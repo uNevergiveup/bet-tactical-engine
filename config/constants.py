@@ -14,7 +14,7 @@ if load_dotenv is not None:
 # Fuentes y credenciales (solo se exige la clave de API-Football al ejecutar el generador).
 FOOTBALL_BASE_URL = "https://v3.football.api-sports.io"
 API_KEY = os.getenv("FOOTBALL_API_KEY", "").strip()
-BWIN_EVENT_URL = "https://www.bwin.es/es/sports/eventos/inter-miami-cf-fc-cincinnati-2:7896499?market=-1"
+BWIN_EVENT_URL = "https://www.bwin.es/es/sports/eventos/placeholder-2:0000000"
 BWIN_USER_AGENT = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
     "AppleWebKit/537.36 (KHTML, like Gecko) "
