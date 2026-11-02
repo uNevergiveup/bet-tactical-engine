@@ -1,0 +1,25 @@
+# Archivos de entorno y credenciales (recursivo)
+**/.env*
+*.env
+!*.env.example
+
+# IDEs y asistentes locales
+.idea/
+.junie/
+*.iml
+
+# Python y entornos virtuales
+__pycache__/
+*.pyc
+.venv/
+venv/
+env/
+
+# Datos, dumps de cuotas y salidas
+outputs/
+*.txt
+*.log
+
+# macOS
+.DS_Store
+**/.DS_Store
