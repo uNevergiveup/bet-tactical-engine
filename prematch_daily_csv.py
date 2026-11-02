@@ -15,7 +15,6 @@ FIELDS='fecha_ventana inicio_ventana_madrid fin_ventana_madrid fixture_id kickof
 
 
 FIELDS += TACTICAL_FIELDS
-FIELDS += 'raw_signal_market_links unique_market_selections supported_signal_market_links unique_supported_selections direct_supported indirect_supported'.split()
 
 def read(p):
     return t.read(p) if p.is_file() else {}
@@ -65,9 +64,9 @@ def export_daily(base):
                 fid=str(q['fixture_id'])
                 if fid not in hypotheses or (q.get('gap_worst_pp') or 0)>(hypotheses[fid].get('gap_worst_pp') or 0):hypotheses[fid]=q
     mapping={'FILTRADO_POR_LIGA':'DESCARTADO_POR_REGLA','EXCLUIDO_POR_FILTRO_MANUAL':'DESCARTADO_POR_REGLA',
-      'EXCLUIDO_POR_HORARIO':'BLOQUEADO_TIEMPO','IDENTIDAD_INCORRECTA':'BLOQUEADO_IDENTIDAD',
-      'DIFERIDO_POR_PRESUPUESTO':'NO_EVALUADO_POR_LIMITE','EXCLUIDO_POR_LIMITE_ANTERIOR':'NO_EVALUADO_POR_LIMITE',
-      'ANALIZADO':'ANALIZADO_SIN_SENAL_VALIDADA','SELECCIONADO':'SELECCIONADO'}
+             'EXCLUIDO_POR_HORARIO':'BLOQUEADO_TIEMPO','IDENTIDAD_INCORRECTA':'BLOQUEADO_IDENTIDAD',
+             'DIFERIDO_POR_PRESUPUESTO':'NO_EVALUADO_POR_LIMITE','EXCLUIDO_POR_LIMITE_ANTERIOR':'NO_EVALUADO_POR_LIMITE',
+             'ANALIZADO':'ANALIZADO_SIN_SENAL_VALIDADA','SELECCIONADO':'SELECCIONADO'}
     tactical=read(base/'tactical/tactical_signal_engine.json')
     # A stale engine for another preselection is not attached to this CSV.
     if tactical and tactical.get('sources',{}).get('preselection_sha256')!=t.sha(base/'enriched/preselection.json'):tactical={}
@@ -93,17 +92,18 @@ def export_daily(base):
             state='SIN_CUOTAS';reason='SNAPSHOT_SHA_NO_VERIFICABLE';selected=False
         ps=[p for p in patterns if str(p.get('fixture_id'))==fid and p.get('pattern_flag')=='ASIMETRIA_RELATIVA_ALTA']
         row=dict.fromkeys(FIELDS,'');row.update(fecha_ventana=start.date().isoformat(),inicio_ventana_madrid=start.isoformat(),fin_ventana_madrid=end.isoformat(),
-            fixture_id=f['fixture_id'],kickoff_madrid=f['kickoff_madrid'],pais=f.get('country',''),liga=f.get('league',''),league_id=f.get('league_id',''),temporada=f.get('season',''),local=f.get('home',''),visitante=f.get('away',''),
-            liga_elegible=('true' if l.get('filter_status')=='ELIGIBLE' else 'false' if l.get('filter_status')=='EXCLUDED' else 'unknown'),motivo_filtro_liga=l.get('filter_reason',''),
-            prematch_elegible=str(t.scope_reason(f,now,45,0) is None).lower(),fase_maxima=a.get('stage','discovery'),estado_final=state,motivo_exclusion_o_pendiente=reason,
-            detalle_evidencia=' | '.join(str(x) for x in [folder/'fixtures.json',base/'candidate_ledger.json',path,scanpath] if x),
-            preselection_evaluada=str(bool(s)).lower(),preselection_score=s.get('research_priority_score',''),cobertura_api=s.get('data_readiness_status',''),patrones_detectados=len(ps) if s else '',patrones_resumen=' | '.join(sorted({str(p.get('metric'))+':'+str(p.get('team_side')) for p in ps})),
-            bwin_busqueda_estado=d.get('status','NO_EVALUADO'),bwin_event_id=m.get('bwin_event_id',d.get('bwin_event_id','')) or '',bwin_url=m.get('bwin_url',d.get('bwin_url','')) or '',identidad_bwin_estado=m.get('discovery_identity_status',d.get('identity_status','')),evidencia_horaria_estado=m.get('time_evidence',{}).get('status',''),
-            cuotas_capturadas=snap.get('selection_triplets_verified',''),captura_madrid=snap.get('capture_declared_madrid',''),sha256_snapshot=snap.get('sha256',''),cuotas_elegibles=gate.get('price_eligible',''),mercados_investigables=gate.get('researchable_after_data_gate',''),
-            opportunity_evaluado=str(bool(scan)).lower(),opportunity_estado=scan.get('status','NO_EVALUADO'),seleccionado=str(selected).lower(),razon_seleccion_o_no_seleccion=handoff.get('routing_reason','') if selected else reason,actualizado_madrid=now.isoformat())
+                                                fixture_id=f['fixture_id'],kickoff_madrid=f['kickoff_madrid'],pais=f.get('country',''),liga=f.get('league',''),league_id=f.get('league_id',''),temporada=f.get('season',''),local=f.get('home',''),visitante=f.get('away',''),
+                                                liga_elegible=('true' if l.get('filter_status')=='ELIGIBLE' else 'false' if l.get('filter_status')=='EXCLUDED' else 'unknown'),motivo_filtro_liga=l.get('filter_reason',''),
+                                                prematch_elegible=str(t.scope_reason(f,now,45,0) is None).lower(),fase_maxima=a.get('stage','discovery'),estado_final=state,motivo_exclusion_o_pendiente=reason,
+                                                detalle_evidencia=' | '.join(str(x) for x in [folder/'fixtures.json',base/'candidate_ledger.json',path,scanpath] if x),
+                                                preselection_evaluada=str(bool(s)).lower(),preselection_score=s.get('research_priority_score',''),cobertura_api=s.get('data_readiness_status',''),patrones_detectados=len(ps) if s else '',patrones_resumen=' | '.join(sorted({str(p.get('metric'))+':'+str(p.get('team_side')) for p in ps})),
+                                                bwin_busqueda_estado=d.get('status','NO_EVALUADO'),bwin_event_id=m.get('bwin_event_id',d.get('bwin_event_id','')) or '',bwin_url=m.get('bwin_url',d.get('bwin_url','')) or '',identidad_bwin_estado=m.get('discovery_identity_status',d.get('identity_status','')),evidencia_horaria_estado=m.get('time_evidence',{}).get('status',''),
+                                                cuotas_capturadas=snap.get('selection_triplets_verified',''),captura_madrid=snap.get('capture_declared_madrid',''),sha256_snapshot=snap.get('sha256',''),cuotas_elegibles=gate.get('price_eligible',''),mercados_investigables=gate.get('researchable_after_data_gate',''),
+                                                opportunity_evaluado=str(bool(scan)).lower(),opportunity_estado=scan.get('status','NO_EVALUADO'),seleccionado=str(selected).lower(),razon_seleccion_o_no_seleccion=handoff.get('routing_reason','') if selected else reason,actualizado_madrid=now.isoformat())
         if capture:row['minutos_hasta_kickoff_en_captura']=round((t.dt(f['kickoff_madrid']).timestamp()-capture.timestamp())/60,2)
         if fid in hypotheses:
             q=hypotheses[fid];row['mejor_hipotesis_mercado']=q.get('market','');row['mejor_hipotesis_cuota']=q.get('odd','')
+            row['score_oportunidad']=q.get('gap_worst_pp','')
             if state=='ANALIZADO_SIN_SENAL_VALIDADA':state='CANDIDATO_INVESTIGACION';row['estado_final']=state
         if selected:row['fase_maxima']='handoff'
         elif scan:row['fase_maxima']='opportunity_scanner'
@@ -111,32 +111,30 @@ def export_daily(base):
         tx=tactical.get('fixtures',{}).get(fid)
         row['tactical_engine_evaluado']=str(bool(tx)).lower()
         if tx:
-            for field in ('raw_signal_market_links','unique_market_selections','supported_signal_market_links','unique_supported_selections','direct_supported','indirect_supported'):
-                row[field]=tx.get('market_validation',{}).get(field,'')
             summary=tx.get('coverage_summary',{})
             rank=tactical_rank.get(fid,{})
             row.update(tactical_signal_count=tx['signal_count'],tactical_signal_families='|'.join(tx['signal_families']),
-                tactical_confidence_level=tx['confidence_level'],tactical_data_coverage=tx['data_coverage'],
-                tactical_profile_status=tx['profile_status'],tactical_contradictions='|'.join(tx['contradictions']),
-                tactical_priority_score=tx['priority_score'],tactical_reason=tx['reason'],
-                historical_matches_available=summary.get('historical_matches_available',''),
-                historical_matches_detailed=summary.get('historical_matches_detailed',''),
-                historical_matches_not_detailed=summary.get('historical_matches_not_detailed',''),
-                metric_observations_valid=summary.get('metric_observations_valid',''),
-                metric_observations_missing=summary.get('metric_observations_missing',''),
-                requested_data_coverage_pct=summary.get('requested_data_coverage_pct',''),
-                historical_effective_coverage_pct=summary.get('historical_effective_coverage_pct',''),
-                tactical_research_score=rank.get('tactical_research_score',tx.get('tactical_research_score','')),
-                market_execution_readiness=rank.get('market_execution_readiness',''),
-                direct_market_hypotheses=rank.get('direct_market_hypotheses',tx.get('direct_market_hypotheses','')),
-                indirect_market_hypotheses=rank.get('indirect_market_hypotheses',tx.get('indirect_market_hypotheses','')),
-                unmodelled_market_count=rank.get('unmodelled_market_count',tx.get('unmodelled_market_count','')),
-                scanner_status=rank.get('scanner_status',scan.get('status','NO_EVALUADO')),
-                evaluation_completeness=rank.get('evaluation_completeness','NO_EVALUADO'),
-                comparison_rank=tactical_position.get(fid,''),
-                final_decision_reason=handoff.get('routing_reason','') if selected else ' | '.join(rank.get('reasons',[])) or reason,
-                market_hypotheses_count=tx['market_hypotheses_count'],market_hypotheses_verified=tx['market_hypotheses_verified'],
-                research_priority=rank.get('research_priority',''),tactical_json=tx['detail_json'],tactical_mode=tactical['mode'])
+                       tactical_confidence_level=tx['confidence_level'],tactical_data_coverage=tx['data_coverage'],
+                       tactical_profile_status=tx['profile_status'],tactical_contradictions='|'.join(tx['contradictions']),
+                       tactical_priority_score=tx['priority_score'],tactical_reason=tx['reason'],
+                       historical_matches_available=summary.get('historical_matches_available',''),
+                       historical_matches_detailed=summary.get('historical_matches_detailed',''),
+                       historical_matches_not_detailed=summary.get('historical_matches_not_detailed',''),
+                       metric_observations_valid=summary.get('metric_observations_valid',''),
+                       metric_observations_missing=summary.get('metric_observations_missing',''),
+                       requested_data_coverage_pct=summary.get('requested_data_coverage_pct',''),
+                       historical_effective_coverage_pct=summary.get('historical_effective_coverage_pct',''),
+                       tactical_research_score=rank.get('tactical_research_score',tx.get('tactical_research_score','')),
+                       market_execution_readiness=rank.get('market_execution_readiness',''),
+                       direct_market_hypotheses=rank.get('direct_market_hypotheses',tx.get('direct_market_hypotheses','')),
+                       indirect_market_hypotheses=rank.get('indirect_market_hypotheses',tx.get('indirect_market_hypotheses','')),
+                       unmodelled_market_count=rank.get('unmodelled_market_count',tx.get('unmodelled_market_count','')),
+                       scanner_status=rank.get('scanner_status',scan.get('status','NO_EVALUADO')),
+                       evaluation_completeness=rank.get('evaluation_completeness','NO_EVALUADO'),
+                       comparison_rank=tactical_position.get(fid,''),
+                       final_decision_reason=handoff.get('routing_reason','') if selected else ' | '.join(rank.get('reasons',[])) or reason,
+                       market_hypotheses_count=tx['market_hypotheses_count'],market_hypotheses_verified=tx['market_hypotheses_verified'],
+                       research_priority=rank.get('research_priority',''),tactical_json=tx['detail_json'],tactical_mode=tactical['mode'])
         rows.append(row)
     rows.sort(key=lambda r:(r['kickoff_madrid'],str(r['fixture_id'])))
     stream=io.StringIO(newline='');w=csv.DictWriter(stream,fieldnames=FIELDS,delimiter=';');w.writeheader();w.writerows(rows)

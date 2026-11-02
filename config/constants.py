@@ -121,11 +121,9 @@ TEAM_ALIASES: dict[str, tuple[str, ...]] = {
     "instituto ac cordoba": ("instituto",),
     "boyaca chico cd": ("boyaca chico",),
     "junior fc barranquilla": ("junior",),
-    "cd junior fc barranquilla primera a futbol": ("junior",),
     "boyaca chico": ("boyaca chico fc",),
-    "psg ligue 1 futbol":("psg",),
-    "elversberg": ("sv elversberg"),
-    "mainz 05 bundesliga futbol": ("fsv mainz 05"),
+    "elversberg": ("sv elversberg",),
+    "mainz 05": ("fsv mainz 05",),
 }
 
 COUNTRY_ES_EN: dict[str, tuple[str, ...]] = {
@@ -330,4 +328,3 @@ PLAYER_STAT_MAPPING = {
     "yellow_cards": ("cards", "yellow"),
     "red_cards": ("cards", "red"),
 }
-

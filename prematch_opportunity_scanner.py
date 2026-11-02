@@ -128,6 +128,16 @@ def identify_market(market: str, home: str, away: str) -> tuple[str, str | None,
         return 'goals', side, 'MODELABLE'
     if base in ('total de corners', 'total corners', 'total de saques de esquina'):
         return 'corners', side, 'MODELABLE'
+    if base in ('total de tiros a puerta', 'total de tiros a porteria', 'total de remates a puerta'):
+        return 'on_target', side, 'MODELABLE'
+    if base in ('total de tiros', 'total de remates'):
+        return 'shots', side, 'MODELABLE'
+    if base == 'total de faltas':
+        return 'fouls', side, 'MODELABLE'
+    if base in ('total de fueras de juego', 'total de fuera de juego', 'total de offsides'):
+        return 'offsides', side, 'MODELABLE'
+    if base == 'total de tarjetas amarillas':
+        return 'yellow', side, 'MODELABLE'
     if 'tarjeta' in t:
         return 'cards', side, 'REQUIERE_MODELO_ARBITRO_Y_DISCIPLINA'
     if 'fuera de juego' in t or 'offside' in t:
@@ -297,17 +307,20 @@ def evaluate_selection(quote, f, threshold_odd, min_n, sensitivity_g, sensitivit
         result['status']='DATOS_ESTADISTICOS_INCOMPLETOS';return result
     lam = model['lambda_total'] if side is None else model['lambda_home' if side=='home' else 'lambda_away']
     p=poisson_p(line['line'],line['direction'],lam)
-    margin=sensitivity_g if metric=='goals' else sensitivity_c
+    base_margin=sensitivity_g if metric=='goals' else sensitivity_c
+    cv_penalty=max(0.0, (model['cv_max'] - 0.50) * 0.20) if model.get('cv_max') is not None else 0.0
+    margin=min(0.65, base_margin + cv_penalty)
     pl=poisson_p(line['line'],line['direction'],lam*(1-margin))
     ph=poisson_p(line['line'],line['direction'],lam*(1+margin))
     lo,hi=min(pl,ph),max(pl,ph)
     be=1/quote['odd']
+    required_n = min_n if metric == 'goals' else min(min_n, 6)
     result.update(data_n_min=model['n_min'],lambda_exploratory=round(lam,4),
                   p_poisson_exploratory=round(p,5),p_sensitivity_min=round(lo,5),
                   p_sensitivity_max=round(hi,5),break_even_probability=round(be,5),
                   gap_point_pp=round(100*(p-be),2),gap_worst_pp=round(100*(lo-be),2),
-                  model_caveat='Poisson simple NO calibrado; intervalo = escenario +/- '+str(int(margin*100))+'% lambda, NO IC estadístico')
-    if model['n_min']<min_n:
+                  model_caveat='Poisson simple NO calibrado; intervalo = escenario +/- '+str(int(round(margin*100)))+'% lambda, NO IC estadístico')
+    if model['n_min']<required_n:
         result['status']='MUESTRA_CORTA_MODELO_SOLO_DIAGNOSTICO'
     elif lo > be + edge_min/100:
         result['status']='DISCREPANCIA_EXPLORATORIA_REVISAR'
@@ -407,7 +420,7 @@ def produce(args):
             raise ValueError('PATTERN_FIXTURE_IDENTITY_CONFLICT '+str(fid))
         metric=pr.get('metric')
         side=pr.get('team_side')
-        if metric not in ('goals','corners') or side not in ('home','away'):
+        if metric not in ('goals','corners','shots','on_target','fouls','offsides','yellow') or side not in ('home','away'):
             continue
         applicable=[r for r in rows if r['fixture_id']==fid and r['metric']==metric and
                     r['market_line'] is not None and r['team_side'] in (side,None) and
@@ -454,8 +467,8 @@ def produce(args):
         'methodology':{
             'distribution':'Poisson simplificada para exploración de totales FT: NO calibrada ni validada',
             'lambda':'Media aritmética entre producción propia y concesión del rival, por equipo; suma para FT',
-            'sensitivity':'Perturbación fija de lambda, NO intervalos de confianza',
-            'unsupported':'Props de jugador, tarjetas, offsides, faltas, combinadas, medias partes, handicap, etc. sin modelo',
+            'sensitivity':'Perturbación de lambda más penalización por CV alto, NO intervalos de confianza',
+            'unsupported':'Props de jugador, combinadas, medias partes, handicap, etc. sin modelo',
             'risk':'Sin ajuste de localía, rival, alineaciones, entrenador, arbitraje, sobredispersión ni sesgo de selección',
             'profitability':'NO se calcula EV validado, stake ni pick; diferencias son señales exploratorias no apostables',
         },
