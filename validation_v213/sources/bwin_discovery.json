@@ -1,0 +1,4387 @@
+{
+  "schema_version": "2.0-batched-discovery",
+  "generated_at_utc": "2026-11-02T20:34:20.715495+00:00",
+  "source_input": "/Users/antonio/Projects/scraper/outputs/discovery/2026-11-02_1500_0300/prospective_trial/enriched/preselection.json",
+  "source_input_sha256": "20218d6ef05c505428709f74b43749f0375de4e4c67035f14dbafbd3821c237e",
+  "prematch_only": true,
+  "matches": [
+    {
+      "fixture_id": 1493215,
+      "home": "Defensa Y Justicia",
+      "away": "Independiente",
+      "league": "Liga Profesional Argentina",
+      "country": "Argentina",
+      "gender": "M",
+      "kickoff_madrid": "2026-11-02T23:00:00+01:00",
+      "research_priority_score": 84.0,
+      "details_checked": true,
+      "status": "EVENT_FOUND_NEEDS_TIME_CONFIRMATION",
+      "bwin_event_id": "7899237",
+      "bwin_url": "https://www.bwin.es/es/sports/eventos/defensa-y-justicia-ca-independiente-2:7899237",
+      "candidates_found": 1,
+      "alternatives": [
+        {
+          "event_id": "7899237",
+          "url": "https://www.bwin.es/es/sports/eventos/defensa-y-justicia-ca-independiente-2:7899237",
+          "score": 1.0,
+          "text": "Defensa y Justicia CA Independiente Hoy / 23:00 CA 1"
+        }
+      ],
+      "identity_status": "NAME_MATCH_TIME_NOT_MACHINE_VERIFIED",
+      "markets": {
+        "result": {
+          "status": "HEADING_OBSERVED_NOT_PRICE_VERIFIED",
+          "headings": [
+            "Resultado del partido"
+          ]
+        },
+        "goals": {
+          "status": "HEADING_OBSERVED_NOT_PRICE_VERIFIED",
+          "headings": [
+            "Total de goles",
+            "Ambos equipos marcan",
+            "Defensa y Justicia - Total de goles",
+            "Total de goles - 1ª parte - Más de 1,5",
+            "Total de goles - 2ª parte - Más de 1,5",
+            "Total de goles - Más de 3,5",
+            "CA Independiente - Total de goles"
+          ]
+        },
+        "corners": {
+          "status": "HEADING_OBSERVED_NOT_PRICE_VERIFIED",
+          "headings": [
+            "Total de córners"
+          ]
+        },
+        "cards": {
+          "status": "NOT_OBSERVED",
+          "headings": []
+        },
+        "shots": {
+          "status": "HEADING_OBSERVED_NOT_PRICE_VERIFIED",
+          "headings": [
+            "Jugador - Total de tiros",
+            "Jugador - Total de tiros a portería"
+          ]
+        },
+        "fouls": {
+          "status": "NOT_OBSERVED",
+          "headings": []
+        },
+        "offsides": {
+          "status": "NOT_OBSERVED",
+          "headings": []
+        }
+      },
+      "name_match_score": 1.0,
+      "inspection": {
+        "status": "OPENED",
+        "page_title": "Defensa y Justicia - CA Independiente Liga Profesional Fútbol | bwin",
+        "event_id_from_url": "7899237",
+        "event_start_machine_readable": null,
+        "kickoff_difference_minutes": null,
+        "market_headings": {
+          "result": {
+            "status": "HEADING_OBSERVED_NOT_PRICE_VERIFIED",
+            "headings": [
+              "Resultado del partido"
+            ]
+          },
+          "goals": {
+            "status": "HEADING_OBSERVED_NOT_PRICE_VERIFIED",
+            "headings": [
+              "Total de goles",
+              "Ambos equipos marcan",
+              "Defensa y Justicia - Total de goles",
+              "Total de goles - 1ª parte - Más de 1,5",
+              "Total de goles - 2ª parte - Más de 1,5",
+              "Total de goles - Más de 3,5",
+              "CA Independiente - Total de goles"
+            ]
+          },
+          "corners": {
+            "status": "HEADING_OBSERVED_NOT_PRICE_VERIFIED",
+            "headings": [
+              "Total de córners"
+            ]
+          },
+          "cards": {
+            "status": "NOT_OBSERVED",
+            "headings": []
+          },
+          "shots": {
+            "status": "HEADING_OBSERVED_NOT_PRICE_VERIFIED",
+            "headings": [
+              "Jugador - Total de tiros",
+              "Jugador - Total de tiros a portería"
+            ]
+          },
+          "fouls": {
+            "status": "NOT_OBSERVED",
+            "headings": []
+          },
+          "offsides": {
+            "status": "NOT_OBSERVED",
+            "headings": []
+          }
+        },
+        "market_heading_families": 4,
+        "is_live": null,
+        "identity_status": "NAME_MATCH_TIME_NOT_MACHINE_VERIFIED",
+        "time_evidence_type": "NONE",
+        "observed_at_utc": "2026-11-02T20:33:00.810959+00:00",
+        "countdown_minutes": null,
+        "countdown_observed_at_utc": null,
+        "event_start_from_countdown": null,
+        "countdown_difference_minutes": null,
+        "title_teams_match": true
+      }
+    },
+    {
+      "fixture_id": 1492442,
+      "home": "RB Bragantino",
+      "away": "Santos",
+      "league": "Serie A",
+      "country": "Brazil",
+      "gender": "M",
+      "kickoff_madrid": "2026-11-03T00:00:00+01:00",
+      "research_priority_score": 89.0,
+      "details_checked": true,
+      "status": "NOT_FOUND_IN_SCANNED_PAGES",
+      "bwin_event_id": null,
+      "bwin_url": null,
+      "candidates_found": 0,
+      "alternatives": [],
+      "identity_status": "NOT_VERIFIED",
+      "markets": null
+    },
+    {
+      "fixture_id": 1549844,
+      "home": "Bucaramanga",
+      "away": "Atletico Nacional",
+      "league": "Primera A",
+      "country": "Colombia",
+      "gender": "M",
+      "kickoff_madrid": "2026-11-03T02:15:00+01:00",
+      "research_priority_score": 80.0,
+      "details_checked": true,
+      "status": "EVENT_FOUND_NEEDS_TIME_CONFIRMATION",
+      "bwin_event_id": "7900513",
+      "bwin_url": "https://www.bwin.es/es/sports/eventos/atl%C3%A9tico-bucaramanga-atl%C3%A9tico-nacional-2:7900513",
+      "candidates_found": 1,
+      "alternatives": [
+        {
+          "event_id": "7900513",
+          "url": "https://www.bwin.es/es/sports/eventos/atl%C3%A9tico-bucaramanga-atl%C3%A9tico-nacional-2:7900513",
+          "score": 1.0,
+          "text": "Atlético Bucaramanga Atlético Nacional Mañana / 2:15 CA"
+        }
+      ],
+      "identity_status": "NAME_MATCH_TIME_NOT_MACHINE_VERIFIED",
+      "markets": {
+        "result": {
+          "status": "HEADING_OBSERVED_NOT_PRICE_VERIFIED",
+          "headings": [
+            "Resultado del partido"
+          ]
+        },
+        "goals": {
+          "status": "HEADING_OBSERVED_NOT_PRICE_VERIFIED",
+          "headings": [
+            "Total de goles",
+            "Ambos equipos marcan",
+            "Atlético Bucaramanga - Total de goles",
+            "Total de goles - Más de 3,5",
+            "Atlético Nacional - Total de goles"
+          ]
+        },
+        "corners": {
+          "status": "NOT_OBSERVED",
+          "headings": []
+        },
+        "cards": {
+          "status": "NOT_OBSERVED",
+          "headings": []
+        },
+        "shots": {
+          "status": "NOT_OBSERVED",
+          "headings": []
+        },
+        "fouls": {
+          "status": "NOT_OBSERVED",
+          "headings": []
+        },
+        "offsides": {
+          "status": "NOT_OBSERVED",
+          "headings": []
+        }
+      },
+      "name_match_score": 1.0,
+      "inspection": {
+        "status": "OPENED",
+        "page_title": "Atlético Bucaramanga - Atlético Nacional Primera A Fútbol | bwin",
+        "event_id_from_url": "7900513",
+        "event_start_machine_readable": null,
+        "kickoff_difference_minutes": null,
+        "market_headings": {
+          "result": {
+            "status": "HEADING_OBSERVED_NOT_PRICE_VERIFIED",
+            "headings": [
+              "Resultado del partido"
+            ]
+          },
+          "goals": {
+            "status": "HEADING_OBSERVED_NOT_PRICE_VERIFIED",
+            "headings": [
+              "Total de goles",
+              "Ambos equipos marcan",
+              "Atlético Bucaramanga - Total de goles",
+              "Total de goles - Más de 3,5",
+              "Atlético Nacional - Total de goles"
+            ]
+          },
+          "corners": {
+            "status": "NOT_OBSERVED",
+            "headings": []
+          },
+          "cards": {
+            "status": "NOT_OBSERVED",
+            "headings": []
+          },
+          "shots": {
+            "status": "NOT_OBSERVED",
+            "headings": []
+          },
+          "fouls": {
+            "status": "NOT_OBSERVED",
+            "headings": []
+          },
+          "offsides": {
+            "status": "NOT_OBSERVED",
+            "headings": []
+          }
+        },
+        "market_heading_families": 2,
+        "is_live": null,
+        "identity_status": "NAME_MATCH_TIME_NOT_MACHINE_VERIFIED",
+        "time_evidence_type": "NONE",
+        "observed_at_utc": "2026-11-02T20:33:03.488339+00:00",
+        "countdown_minutes": null,
+        "countdown_observed_at_utc": null,
+        "event_start_from_countdown": null,
+        "countdown_difference_minutes": null,
+        "title_teams_match": true
+      }
+    },
+    {
+      "fixture_id": 1493223,
+      "home": "Platense",
+      "away": "Central Cordoba de Santiago",
+      "league": "Liga Profesional Argentina",
+      "country": "Argentina",
+      "gender": "M",
+      "kickoff_madrid": "2026-11-02T23:00:00+01:00",
+      "research_priority_score": 77.0,
+      "details_checked": true,
+      "status": "NOT_FOUND_IN_SCANNED_PAGES",
+      "bwin_event_id": null,
+      "bwin_url": null,
+      "candidates_found": 0,
+      "alternatives": [],
+      "identity_status": "NOT_VERIFIED",
+      "markets": null
+    },
+    {
+      "fixture_id": 1493212,
+      "home": "Atletico Tucuman",
+      "away": "Argentinos JRS",
+      "league": "Liga Profesional Argentina",
+      "country": "Argentina",
+      "gender": "M",
+      "kickoff_madrid": "2026-11-03T01:15:00+01:00",
+      "research_priority_score": 78.0,
+      "details_checked": true,
+      "status": "NOT_FOUND_IN_SCANNED_PAGES",
+      "bwin_event_id": null,
+      "bwin_url": null,
+      "candidates_found": 0,
+      "alternatives": [],
+      "identity_status": "NOT_VERIFIED",
+      "markets": null
+    },
+    {
+      "fixture_id": 1559695,
+      "home": "Suchitepéquez",
+      "away": "Malacateco",
+      "league": "Liga Nacional",
+      "country": "Guatemala",
+      "gender": "M",
+      "kickoff_madrid": "2026-11-03T03:00:00+01:00",
+      "research_priority_score": null,
+      "details_checked": true,
+      "status": "EVENT_FOUND_NEEDS_TIME_CONFIRMATION",
+      "bwin_event_id": "7905326",
+      "bwin_url": "https://www.bwin.es/es/sports/eventos/cd-suchitepequez-cd-malacateco-2:7905326",
+      "candidates_found": 1,
+      "alternatives": [
+        {
+          "event_id": "7905326",
+          "url": "https://www.bwin.es/es/sports/eventos/cd-suchitepequez-cd-malacateco-2:7905326",
+          "score": 1.0,
+          "text": "Suchitepequez CD Malacateco Mañana / 3:00 CA"
+        }
+      ],
+      "identity_status": "NAME_MATCH_TIME_NOT_MACHINE_VERIFIED",
+      "markets": {
+        "result": {
+          "status": "HEADING_OBSERVED_NOT_PRICE_VERIFIED",
+          "headings": [
+            "Resultado del partido"
+          ]
+        },
+        "goals": {
+          "status": "HEADING_OBSERVED_NOT_PRICE_VERIFIED",
+          "headings": [
+            "Total de goles",
+            "Ambos equipos marcan"
+          ]
+        },
+        "corners": {
+          "status": "NOT_OBSERVED",
+          "headings": []
+        },
+        "cards": {
+          "status": "NOT_OBSERVED",
+          "headings": []
+        },
+        "shots": {
+          "status": "NOT_OBSERVED",
+          "headings": []
+        },
+        "fouls": {
+          "status": "NOT_OBSERVED",
+          "headings": []
+        },
+        "offsides": {
+          "status": "NOT_OBSERVED",
+          "headings": []
+        }
+      },
+      "name_match_score": 1.0,
+      "inspection": {
+        "status": "OPENED",
+        "page_title": "CD Suchitepequez - CD Malacateco Liga Nacional - Apertura Fútbol | bwin",
+        "event_id_from_url": "7905326",
+        "event_start_machine_readable": null,
+        "kickoff_difference_minutes": null,
+        "market_headings": {
+          "result": {
+            "status": "HEADING_OBSERVED_NOT_PRICE_VERIFIED",
+            "headings": [
+              "Resultado del partido"
+            ]
+          },
+          "goals": {
+            "status": "HEADING_OBSERVED_NOT_PRICE_VERIFIED",
+            "headings": [
+              "Total de goles",
+              "Ambos equipos marcan"
+            ]
+          },
+          "corners": {
+            "status": "NOT_OBSERVED",
+            "headings": []
+          },
+          "cards": {
+            "status": "NOT_OBSERVED",
+            "headings": []
+          },
+          "shots": {
+            "status": "NOT_OBSERVED",
+            "headings": []
+          },
+          "fouls": {
+            "status": "NOT_OBSERVED",
+            "headings": []
+          },
+          "offsides": {
+            "status": "NOT_OBSERVED",
+            "headings": []
+          }
+        },
+        "market_heading_families": 2,
+        "is_live": null,
+        "identity_status": "NAME_MATCH_TIME_NOT_MACHINE_VERIFIED",
+        "time_evidence_type": "NONE",
+        "observed_at_utc": "2026-11-02T20:33:33.034230+00:00",
+        "countdown_minutes": null,
+        "countdown_observed_at_utc": null,
+        "event_start_from_countdown": null,
+        "countdown_difference_minutes": null,
+        "title_teams_match": true
+      }
+    },
+    {
+      "fixture_id": 1648245,
+      "home": "Molynes United",
+      "away": "Mount Pleasant Academy",
+      "league": "Premier League",
+      "country": "Jamaica",
+      "gender": "M",
+      "kickoff_madrid": "2026-11-02T23:05:00+01:00",
+      "research_priority_score": null,
+      "details_checked": true,
+      "status": "NOT_FOUND_IN_SCANNED_PAGES",
+      "bwin_event_id": null,
+      "bwin_url": null,
+      "candidates_found": 0,
+      "alternatives": [],
+      "identity_status": "NOT_VERIFIED",
+      "markets": null
+    },
+    {
+      "fixture_id": 1493220,
+      "home": "Independ. Rivadavia",
+      "away": "Banfield",
+      "league": "Liga Profesional Argentina",
+      "country": "Argentina",
+      "gender": "M",
+      "kickoff_madrid": "2026-11-03T01:15:00+01:00",
+      "research_priority_score": 78.0,
+      "details_checked": true,
+      "status": "NOT_FOUND_IN_SCANNED_PAGES",
+      "bwin_event_id": null,
+      "bwin_url": null,
+      "candidates_found": 0,
+      "alternatives": [],
+      "identity_status": "NOT_VERIFIED",
+      "markets": null
+    },
+    {
+      "fixture_id": 1603416,
+      "home": "León W",
+      "away": "Atlético San Luis W",
+      "league": "Liga MX Femenil",
+      "country": "Mexico",
+      "gender": "F",
+      "kickoff_madrid": "2026-11-03T02:06:00+01:00",
+      "research_priority_score": null,
+      "details_checked": true,
+      "status": "EVENT_FOUND_NEEDS_TIME_CONFIRMATION",
+      "bwin_event_id": "7905327",
+      "bwin_url": "https://www.bwin.es/es/sports/eventos/club-le%C3%B3n-fc-f-atl%C3%A9tico-san-luis-f-2:7905327",
+      "candidates_found": 1,
+      "alternatives": [
+        {
+          "event_id": "7905327",
+          "url": "https://www.bwin.es/es/sports/eventos/club-le%C3%B3n-fc-f-atl%C3%A9tico-san-luis-f-2:7905327",
+          "score": 1.0,
+          "text": "Club León FC F Atlético San Luis F Mañana / 2:06 CA"
+        }
+      ],
+      "identity_status": "NAME_MATCH_TIME_NOT_MACHINE_VERIFIED",
+      "markets": {
+        "result": {
+          "status": "HEADING_OBSERVED_NOT_PRICE_VERIFIED",
+          "headings": [
+            "Resultado del partido"
+          ]
+        },
+        "goals": {
+          "status": "HEADING_OBSERVED_NOT_PRICE_VERIFIED",
+          "headings": [
+            "Total de goles"
+          ]
+        },
+        "corners": {
+          "status": "NOT_OBSERVED",
+          "headings": []
+        },
+        "cards": {
+          "status": "NOT_OBSERVED",
+          "headings": []
+        },
+        "shots": {
+          "status": "NOT_OBSERVED",
+          "headings": []
+        },
+        "fouls": {
+          "status": "NOT_OBSERVED",
+          "headings": []
+        },
+        "offsides": {
+          "status": "NOT_OBSERVED",
+          "headings": []
+        }
+      },
+      "name_match_score": 1.0,
+      "inspection": {
+        "status": "OPENED",
+        "page_title": "Club León FC (F) - Atlético San Luis (F) Liga MX (F) - Apertura Fútbol | bwin",
+        "event_id_from_url": "7905327",
+        "event_start_machine_readable": null,
+        "kickoff_difference_minutes": null,
+        "market_headings": {
+          "result": {
+            "status": "HEADING_OBSERVED_NOT_PRICE_VERIFIED",
+            "headings": [
+              "Resultado del partido"
+            ]
+          },
+          "goals": {
+            "status": "HEADING_OBSERVED_NOT_PRICE_VERIFIED",
+            "headings": [
+              "Total de goles"
+            ]
+          },
+          "corners": {
+            "status": "NOT_OBSERVED",
+            "headings": []
+          },
+          "cards": {
+            "status": "NOT_OBSERVED",
+            "headings": []
+          },
+          "shots": {
+            "status": "NOT_OBSERVED",
+            "headings": []
+          },
+          "fouls": {
+            "status": "NOT_OBSERVED",
+            "headings": []
+          },
+          "offsides": {
+            "status": "NOT_OBSERVED",
+            "headings": []
+          }
+        },
+        "market_heading_families": 2,
+        "is_live": null,
+        "identity_status": "NAME_MATCH_TIME_NOT_MACHINE_VERIFIED",
+        "time_evidence_type": "NONE",
+        "observed_at_utc": "2026-11-02T20:33:35.722451+00:00",
+        "countdown_minutes": null,
+        "countdown_observed_at_utc": null,
+        "event_start_from_countdown": null,
+        "countdown_difference_minutes": null,
+        "title_teams_match": true
+      }
+    },
+    {
+      "fixture_id": 1505550,
+      "home": "Concepción",
+      "away": "Palestino",
+      "league": "Primera División",
+      "country": "Chile",
+      "gender": "M",
+      "kickoff_madrid": "2026-11-03T00:30:00+01:00",
+      "research_priority_score": 74.0,
+      "details_checked": true,
+      "status": "EVENT_FOUND_NEEDS_TIME_CONFIRMATION",
+      "bwin_event_id": "7905236",
+      "bwin_url": "https://www.bwin.es/es/sports/eventos/deportes-concepci%C3%B3n-palestino-2:7905236",
+      "candidates_found": 1,
+      "alternatives": [
+        {
+          "event_id": "7905236",
+          "url": "https://www.bwin.es/es/sports/eventos/deportes-concepci%C3%B3n-palestino-2:7905236",
+          "score": 1.0,
+          "text": "Deportes Concepción Palestino Mañana / 0:30 CA"
+        }
+      ],
+      "identity_status": "NAME_MATCH_TIME_NOT_MACHINE_VERIFIED",
+      "markets": {
+        "result": {
+          "status": "HEADING_OBSERVED_NOT_PRICE_VERIFIED",
+          "headings": [
+            "Resultado del partido"
+          ]
+        },
+        "goals": {
+          "status": "HEADING_OBSERVED_NOT_PRICE_VERIFIED",
+          "headings": [
+            "Total de goles",
+            "Ambos equipos marcan",
+            "Deportes Concepción - Total de goles",
+            "Total de goles - 1ª parte - Más de 1,5",
+            "Total de goles - 2ª parte - Más de 1,5",
+            "Total de goles - Más de 3,5",
+            "Palestino - Total de goles"
+          ]
+        },
+        "corners": {
+          "status": "HEADING_OBSERVED_NOT_PRICE_VERIFIED",
+          "headings": [
+            "Total de córners"
+          ]
+        },
+        "cards": {
+          "status": "NOT_OBSERVED",
+          "headings": []
+        },
+        "shots": {
+          "status": "NOT_OBSERVED",
+          "headings": []
+        },
+        "fouls": {
+          "status": "NOT_OBSERVED",
+          "headings": []
+        },
+        "offsides": {
+          "status": "NOT_OBSERVED",
+          "headings": []
+        }
+      },
+      "name_match_score": 1.0,
+      "inspection": {
+        "status": "OPENED",
+        "page_title": "Deportes Concepción - Palestino Primera División Fútbol | bwin",
+        "event_id_from_url": "7905236",
+        "event_start_machine_readable": null,
+        "kickoff_difference_minutes": null,
+        "market_headings": {
+          "result": {
+            "status": "HEADING_OBSERVED_NOT_PRICE_VERIFIED",
+            "headings": [
+              "Resultado del partido"
+            ]
+          },
+          "goals": {
+            "status": "HEADING_OBSERVED_NOT_PRICE_VERIFIED",
+            "headings": [
+              "Total de goles",
+              "Ambos equipos marcan",
+              "Deportes Concepción - Total de goles",
+              "Total de goles - 1ª parte - Más de 1,5",
+              "Total de goles - 2ª parte - Más de 1,5",
+              "Total de goles - Más de 3,5",
+              "Palestino - Total de goles"
+            ]
+          },
+          "corners": {
+            "status": "HEADING_OBSERVED_NOT_PRICE_VERIFIED",
+            "headings": [
+              "Total de córners"
+            ]
+          },
+          "cards": {
+            "status": "NOT_OBSERVED",
+            "headings": []
+          },
+          "shots": {
+            "status": "NOT_OBSERVED",
+            "headings": []
+          },
+          "fouls": {
+            "status": "NOT_OBSERVED",
+            "headings": []
+          },
+          "offsides": {
+            "status": "NOT_OBSERVED",
+            "headings": []
+          }
+        },
+        "market_heading_families": 3,
+        "is_live": null,
+        "identity_status": "NAME_MATCH_TIME_NOT_MACHINE_VERIFIED",
+        "time_evidence_type": "NONE",
+        "observed_at_utc": "2026-11-02T20:33:38.242605+00:00",
+        "countdown_minutes": null,
+        "countdown_observed_at_utc": null,
+        "event_start_from_countdown": null,
+        "countdown_difference_minutes": null,
+        "title_teams_match": true
+      }
+    },
+    {
+      "fixture_id": 1648246,
+      "home": "Waterhouse",
+      "away": "Cavalier",
+      "league": "Premier League",
+      "country": "Jamaica",
+      "gender": "M",
+      "kickoff_madrid": "2026-11-03T02:00:00+01:00",
+      "research_priority_score": null,
+      "details_checked": true,
+      "status": "EVENT_FOUND_NEEDS_TIME_CONFIRMATION",
+      "bwin_event_id": "7905296",
+      "bwin_url": "https://www.bwin.es/es/sports/eventos/waterhouse-fc-cavalier-fc-2:7905296",
+      "candidates_found": 1,
+      "alternatives": [
+        {
+          "event_id": "7905296",
+          "url": "https://www.bwin.es/es/sports/eventos/waterhouse-fc-cavalier-fc-2:7905296",
+          "score": 1.0,
+          "text": "Waterhouse FC Cavalier FC Mañana / 2:00 CA"
+        }
+      ],
+      "identity_status": "NAME_MATCH_TIME_NOT_MACHINE_VERIFIED",
+      "markets": {
+        "result": {
+          "status": "HEADING_OBSERVED_NOT_PRICE_VERIFIED",
+          "headings": [
+            "Resultado del partido"
+          ]
+        },
+        "goals": {
+          "status": "HEADING_OBSERVED_NOT_PRICE_VERIFIED",
+          "headings": [
+            "Total de goles",
+            "Ambos equipos marcan"
+          ]
+        },
+        "corners": {
+          "status": "NOT_OBSERVED",
+          "headings": []
+        },
+        "cards": {
+          "status": "NOT_OBSERVED",
+          "headings": []
+        },
+        "shots": {
+          "status": "NOT_OBSERVED",
+          "headings": []
+        },
+        "fouls": {
+          "status": "NOT_OBSERVED",
+          "headings": []
+        },
+        "offsides": {
+          "status": "NOT_OBSERVED",
+          "headings": []
+        }
+      },
+      "name_match_score": 1.0,
+      "inspection": {
+        "status": "OPENED",
+        "page_title": "Waterhouse FC - Cavalier FC Liga Premier Fútbol | bwin",
+        "event_id_from_url": "7905296",
+        "event_start_machine_readable": null,
+        "kickoff_difference_minutes": null,
+        "market_headings": {
+          "result": {
+            "status": "HEADING_OBSERVED_NOT_PRICE_VERIFIED",
+            "headings": [
+              "Resultado del partido"
+            ]
+          },
+          "goals": {
+            "status": "HEADING_OBSERVED_NOT_PRICE_VERIFIED",
+            "headings": [
+              "Total de goles",
+              "Ambos equipos marcan"
+            ]
+          },
+          "corners": {
+            "status": "NOT_OBSERVED",
+            "headings": []
+          },
+          "cards": {
+            "status": "NOT_OBSERVED",
+            "headings": []
+          },
+          "shots": {
+            "status": "NOT_OBSERVED",
+            "headings": []
+          },
+          "fouls": {
+            "status": "NOT_OBSERVED",
+            "headings": []
+          },
+          "offsides": {
+            "status": "NOT_OBSERVED",
+            "headings": []
+          }
+        },
+        "market_heading_families": 2,
+        "is_live": null,
+        "identity_status": "NAME_MATCH_TIME_NOT_MACHINE_VERIFIED",
+        "time_evidence_type": "NONE",
+        "observed_at_utc": "2026-11-02T20:34:00.999968+00:00",
+        "countdown_minutes": null,
+        "countdown_observed_at_utc": null,
+        "event_start_from_countdown": null,
+        "countdown_difference_minutes": null,
+        "title_teams_match": true
+      }
+    },
+    {
+      "fixture_id": 1646903,
+      "home": "Albion FC",
+      "away": "Deportivo Maldonado",
+      "league": "Primera División",
+      "country": "Uruguay",
+      "gender": "M",
+      "kickoff_madrid": "2026-11-03T00:00:00+01:00",
+      "research_priority_score": 55.0,
+      "details_checked": true,
+      "status": "EVENT_FOUND_NEEDS_TIME_CONFIRMATION",
+      "bwin_event_id": "7904058",
+      "bwin_url": "https://www.bwin.es/es/sports/eventos/albion-fc-deportivo-maldonado-2:7904058",
+      "candidates_found": 1,
+      "alternatives": [
+        {
+          "event_id": "7904058",
+          "url": "https://www.bwin.es/es/sports/eventos/albion-fc-deportivo-maldonado-2:7904058",
+          "score": 1.0,
+          "text": "Albion FC Deportivo Maldonado Mañana / 0:00 CA"
+        }
+      ],
+      "identity_status": "NAME_MATCH_TIME_NOT_MACHINE_VERIFIED",
+      "markets": {
+        "result": {
+          "status": "HEADING_OBSERVED_NOT_PRICE_VERIFIED",
+          "headings": [
+            "Resultado del partido",
+            "Resultado del partido - Albion FC"
+          ]
+        },
+        "goals": {
+          "status": "HEADING_OBSERVED_NOT_PRICE_VERIFIED",
+          "headings": [
+            "Total de goles",
+            "Ambos equipos marcan",
+            "Albion FC - Total de goles",
+            "Total de goles - Más de 2,5",
+            "Total de goles - 1ª parte - Más de 1,5",
+            "Deportivo Maldonado - Total de goles"
+          ]
+        },
+        "corners": {
+          "status": "HEADING_OBSERVED_NOT_PRICE_VERIFIED",
+          "headings": [
+            "Total de córners"
+          ]
+        },
+        "cards": {
+          "status": "NOT_OBSERVED",
+          "headings": []
+        },
+        "shots": {
+          "status": "NOT_OBSERVED",
+          "headings": []
+        },
+        "fouls": {
+          "status": "NOT_OBSERVED",
+          "headings": []
+        },
+        "offsides": {
+          "status": "NOT_OBSERVED",
+          "headings": []
+        }
+      },
+      "name_match_score": 1.0,
+      "inspection": {
+        "status": "OPENED",
+        "page_title": "Albion FC - Deportivo Maldonado Primera División Fútbol | bwin",
+        "event_id_from_url": "7904058",
+        "event_start_machine_readable": null,
+        "kickoff_difference_minutes": null,
+        "market_headings": {
+          "result": {
+            "status": "HEADING_OBSERVED_NOT_PRICE_VERIFIED",
+            "headings": [
+              "Resultado del partido",
+              "Resultado del partido - Albion FC"
+            ]
+          },
+          "goals": {
+            "status": "HEADING_OBSERVED_NOT_PRICE_VERIFIED",
+            "headings": [
+              "Total de goles",
+              "Ambos equipos marcan",
+              "Albion FC - Total de goles",
+              "Total de goles - Más de 2,5",
+              "Total de goles - 1ª parte - Más de 1,5",
+              "Deportivo Maldonado - Total de goles"
+            ]
+          },
+          "corners": {
+            "status": "HEADING_OBSERVED_NOT_PRICE_VERIFIED",
+            "headings": [
+              "Total de córners"
+            ]
+          },
+          "cards": {
+            "status": "NOT_OBSERVED",
+            "headings": []
+          },
+          "shots": {
+            "status": "NOT_OBSERVED",
+            "headings": []
+          },
+          "fouls": {
+            "status": "NOT_OBSERVED",
+            "headings": []
+          },
+          "offsides": {
+            "status": "NOT_OBSERVED",
+            "headings": []
+          }
+        },
+        "market_heading_families": 3,
+        "is_live": null,
+        "identity_status": "NAME_MATCH_TIME_NOT_MACHINE_VERIFIED",
+        "time_evidence_type": "NONE",
+        "observed_at_utc": "2026-11-02T20:34:03.680289+00:00",
+        "countdown_minutes": null,
+        "countdown_observed_at_utc": null,
+        "event_start_from_countdown": null,
+        "countdown_difference_minutes": null,
+        "title_teams_match": true
+      }
+    },
+    {
+      "fixture_id": 1647117,
+      "home": "Bubali",
+      "away": "Caiquetio",
+      "league": "Division di Honor",
+      "country": "Aruba",
+      "gender": "M",
+      "kickoff_madrid": "2026-11-03T01:30:00+01:00",
+      "research_priority_score": null,
+      "details_checked": true,
+      "status": "EVENT_FOUND_NEEDS_TIME_CONFIRMATION",
+      "bwin_event_id": "7906431",
+      "bwin_url": "https://www.bwin.es/es/sports/eventos/sv-bubali-sv-caiquetio-2:7906431",
+      "candidates_found": 1,
+      "alternatives": [
+        {
+          "event_id": "7906431",
+          "url": "https://www.bwin.es/es/sports/eventos/sv-bubali-sv-caiquetio-2:7906431",
+          "score": 1.0,
+          "text": "SV Bubali SV Caiquetio Mañana / 1:30 CA"
+        }
+      ],
+      "identity_status": "NAME_MATCH_TIME_NOT_MACHINE_VERIFIED",
+      "markets": {
+        "result": {
+          "status": "HEADING_OBSERVED_NOT_PRICE_VERIFIED",
+          "headings": [
+            "Resultado del partido"
+          ]
+        },
+        "goals": {
+          "status": "HEADING_OBSERVED_NOT_PRICE_VERIFIED",
+          "headings": [
+            "Total de goles",
+            "Ambos equipos marcan"
+          ]
+        },
+        "corners": {
+          "status": "NOT_OBSERVED",
+          "headings": []
+        },
+        "cards": {
+          "status": "NOT_OBSERVED",
+          "headings": []
+        },
+        "shots": {
+          "status": "NOT_OBSERVED",
+          "headings": []
+        },
+        "fouls": {
+          "status": "NOT_OBSERVED",
+          "headings": []
+        },
+        "offsides": {
+          "status": "NOT_OBSERVED",
+          "headings": []
+        }
+      },
+      "name_match_score": 1.0,
+      "inspection": {
+        "status": "OPENED",
+        "page_title": "SV Bubali - SV Caiquetio Division di Honor Fútbol | bwin",
+        "event_id_from_url": "7906431",
+        "event_start_machine_readable": null,
+        "kickoff_difference_minutes": null,
+        "market_headings": {
+          "result": {
+            "status": "HEADING_OBSERVED_NOT_PRICE_VERIFIED",
+            "headings": [
+              "Resultado del partido"
+            ]
+          },
+          "goals": {
+            "status": "HEADING_OBSERVED_NOT_PRICE_VERIFIED",
+            "headings": [
+              "Total de goles",
+              "Ambos equipos marcan"
+            ]
+          },
+          "corners": {
+            "status": "NOT_OBSERVED",
+            "headings": []
+          },
+          "cards": {
+            "status": "NOT_OBSERVED",
+            "headings": []
+          },
+          "shots": {
+            "status": "NOT_OBSERVED",
+            "headings": []
+          },
+          "fouls": {
+            "status": "NOT_OBSERVED",
+            "headings": []
+          },
+          "offsides": {
+            "status": "NOT_OBSERVED",
+            "headings": []
+          }
+        },
+        "market_heading_families": 2,
+        "is_live": null,
+        "identity_status": "NAME_MATCH_TIME_NOT_MACHINE_VERIFIED",
+        "time_evidence_type": "NONE",
+        "observed_at_utc": "2026-11-02T20:34:20.613994+00:00",
+        "countdown_minutes": null,
+        "countdown_observed_at_utc": null,
+        "event_start_from_countdown": null,
+        "countdown_difference_minutes": null,
+        "title_teams_match": true
+      }
+    }
+  ],
+  "catalog_observed": [
+    {
+      "bwin_event_id": "7900284",
+      "bwin_url": "https://www.bwin.es/es/sports/eventos/deportivo-la-coru%C3%B1a-osasuna-2:7900284",
+      "text": "LaLiga LIVE 1T • 30:00 Deportivo La Coruña 0 - 0 Osasuna",
+      "text_observed_at_utc": "2026-11-02T20:32:46.630885+00:00",
+      "source_pages": [
+        "https://www.bwin.es/es/sports/f%C3%BAtbol-4/hoy",
+        "https://www.bwin.es/es/sports/f%C3%BAtbol-4"
+      ]
+    },
+    {
+      "bwin_event_id": "7900526",
+      "bwin_url": "https://www.bwin.es/es/sports/eventos/mallorca-c%C3%A1diz-cf-2:7900526",
+      "text": "LaLiga 2 LIVE 1T • 29:39 Mallorca 0 - 0 Cádiz",
+      "text_observed_at_utc": "2026-11-02T20:32:46.630885+00:00",
+      "source_pages": [
+        "https://www.bwin.es/es/sports/f%C3%BAtbol-4/hoy",
+        "https://www.bwin.es/es/sports/f%C3%BAtbol-4"
+      ]
+    },
+    {
+      "bwin_event_id": "7898207",
+      "bwin_url": "https://www.bwin.es/es/sports/eventos/newcastle-united-everton-fc-2:7898207",
+      "text": "Premier League LIVE 1T • 32:35 Newcastle 0 - 0 Everton",
+      "text_observed_at_utc": "2026-11-02T20:32:46.630885+00:00",
+      "source_pages": [
+        "https://www.bwin.es/es/sports/f%C3%BAtbol-4/hoy",
+        "https://www.bwin.es/es/sports/f%C3%BAtbol-4"
+      ]
+    },
+    {
+      "bwin_event_id": "7900501",
+      "bwin_url": "https://www.bwin.es/es/sports/eventos/atalanta-parma-2:7900501",
+      "text": "Serie A LIVE 1T • 47:10 Atalanta 0 - 1 Parma",
+      "text_observed_at_utc": "2026-11-02T20:32:46.630885+00:00",
+      "source_pages": [
+        "https://www.bwin.es/es/sports/f%C3%BAtbol-4/hoy",
+        "https://www.bwin.es/es/sports/f%C3%BAtbol-4"
+      ]
+    },
+    {
+      "bwin_event_id": "7898692",
+      "bwin_url": "https://www.bwin.es/es/sports/eventos/fc-lorient-stade-brestois-29-2:7898692",
+      "text": "Ligue 1 LIVE Descanso FC Lorient 0 - 0 Stade Brestois 29",
+      "text_observed_at_utc": "2026-11-02T20:32:46.630885+00:00",
+      "source_pages": [
+        "https://www.bwin.es/es/sports/f%C3%BAtbol-4/hoy",
+        "https://www.bwin.es/es/sports/f%C3%BAtbol-4"
+      ]
+    },
+    {
+      "bwin_event_id": "7899236",
+      "bwin_url": "https://www.bwin.es/es/sports/eventos/ca-platense-ca-central-c%C3%B3rdoba-sde-2:7899236",
+      "text": "CA Platense CA Central Córdoba SdE Hoy / 23:00 CA 1",
+      "text_observed_at_utc": "2026-11-02T20:32:56.624929+00:00",
+      "source_pages": [
+        "https://www.bwin.es/es/sports/f%C3%BAtbol-4/hoy",
+        "https://www.bwin.es/es/sports/f%C3%BAtbol-4/apuestas/argentina-38"
+      ]
+    },
+    {
+      "bwin_event_id": "7899237",
+      "bwin_url": "https://www.bwin.es/es/sports/eventos/defensa-y-justicia-ca-independiente-2:7899237",
+      "text": "Defensa y Justicia CA Independiente Hoy / 23:00 CA 1",
+      "text_observed_at_utc": "2026-11-02T20:32:56.624929+00:00",
+      "source_pages": [
+        "https://www.bwin.es/es/sports/f%C3%BAtbol-4/hoy",
+        "https://www.bwin.es/es/sports/f%C3%BAtbol-4/apuestas/argentina-38"
+      ]
+    },
+    {
+      "bwin_event_id": "7896059",
+      "bwin_url": "https://www.bwin.es/es/sports/eventos/benfica-fc-alverca-2:7896059",
+      "text": "Liga Portugal LIVE 1T • 15:32 Benfica 0 - 0 FC Alverca",
+      "text_observed_at_utc": "2026-11-02T20:32:46.630885+00:00",
+      "source_pages": [
+        "https://www.bwin.es/es/sports/f%C3%BAtbol-4/hoy",
+        "https://www.bwin.es/es/sports/f%C3%BAtbol-4"
+      ]
+    },
+    {
+      "bwin_event_id": "7896064",
+      "bwin_url": "https://www.bwin.es/es/sports/eventos/gil-vicente-fc-vitoria-guimaraes-sc-2:7896064",
+      "text": "Liga Portugal LIVE 1T • 15:37 Gil Vicente 0 - 0 Vitoria Guimaraes SC",
+      "text_observed_at_utc": "2026-11-02T20:32:46.630885+00:00",
+      "source_pages": [
+        "https://www.bwin.es/es/sports/f%C3%BAtbol-4/hoy",
+        "https://www.bwin.es/es/sports/f%C3%BAtbol-4"
+      ]
+    },
+    {
+      "bwin_event_id": "7900499",
+      "bwin_url": "https://www.bwin.es/es/sports/eventos/red-star-fc-as-nancy-lorraine-2:7900499",
+      "text": "Red Star FC AS Nancy Lorraine Live1T • 47:43 CA 1111",
+      "text_observed_at_utc": "2026-11-02T20:32:39.436043+00:00",
+      "source_pages": [
+        "https://www.bwin.es/es/sports/f%C3%BAtbol-4/hoy"
+      ]
+    },
+    {
+      "bwin_event_id": "7905512",
+      "bwin_url": "https://www.bwin.es/es/sports/eventos/stade-reims-fc-sochaux-2:7905512",
+      "text": "Stade Reims FC Sochaux LiveDescanso CA 2200",
+      "text_observed_at_utc": "2026-11-02T20:32:39.436043+00:00",
+      "source_pages": [
+        "https://www.bwin.es/es/sports/f%C3%BAtbol-4/hoy"
+      ]
+    },
+    {
+      "bwin_event_id": "7905219",
+      "bwin_url": "https://www.bwin.es/es/sports/eventos/rks-rakow-czestochowa-pogon-szczecin-2:7905219",
+      "text": "RKS Rakow Czestochowa Pogon Szczecin LiveDescanso CA 0011",
+      "text_observed_at_utc": "2026-11-02T20:32:39.436043+00:00",
+      "source_pages": [
+        "https://www.bwin.es/es/sports/f%C3%BAtbol-4/hoy"
+      ]
+    },
+    {
+      "bwin_event_id": "7900509",
+      "bwin_url": "https://www.bwin.es/es/sports/eventos/%C3%A1guilas-doradas-fortaleza-ceif-2:7900509",
+      "text": "Águilas Doradas Fortaleza CEIF Comienza en 32 min CA",
+      "text_observed_at_utc": "2026-11-02T20:32:39.436043+00:00",
+      "source_pages": [
+        "https://www.bwin.es/es/sports/f%C3%BAtbol-4/hoy"
+      ]
+    },
+    {
+      "bwin_event_id": "7905223",
+      "bwin_url": "https://www.bwin.es/es/sports/eventos/deportes-limache-audax-italiano-2:7905223",
+      "text": "Deportes Limache Audax Italiano Comienza en 27 min CA",
+      "text_observed_at_utc": "2026-11-02T20:32:39.436043+00:00",
+      "source_pages": [
+        "https://www.bwin.es/es/sports/f%C3%BAtbol-4/hoy"
+      ]
+    },
+    {
+      "bwin_event_id": "7905328",
+      "bwin_url": "https://www.bwin.es/es/sports/eventos/cd-real-tomayapo-club-blooming-2:7905328",
+      "text": "CD Real Tomayapo Blooming Comienza en 42 min CA",
+      "text_observed_at_utc": "2026-11-02T20:32:39.436043+00:00",
+      "source_pages": [
+        "https://www.bwin.es/es/sports/f%C3%BAtbol-4/hoy"
+      ]
+    },
+    {
+      "bwin_event_id": "7909335",
+      "bwin_url": "https://www.bwin.es/es/sports/eventos/gzira-united-fc-marsaxlokk-fc-2:7909335",
+      "text": "Gzira United FC Marsaxlokk FC Live2T • 75:21 CA 0044",
+      "text_observed_at_utc": "2026-11-02T20:32:39.436043+00:00",
+      "source_pages": [
+        "https://www.bwin.es/es/sports/f%C3%BAtbol-4/hoy"
+      ]
+    },
+    {
+      "bwin_event_id": "7905214",
+      "bwin_url": "https://www.bwin.es/es/sports/eventos/jong-ajax-amsterdam-vitesse-2:7905214",
+      "text": "Jong Ajax Amsterdam Vitesse Live2T • 73:15 CA 1100",
+      "text_observed_at_utc": "2026-11-02T20:32:39.436043+00:00",
+      "source_pages": [
+        "https://www.bwin.es/es/sports/f%C3%BAtbol-4/hoy"
+      ]
+    },
+    {
+      "bwin_event_id": "7905215",
+      "bwin_url": "https://www.bwin.es/es/sports/eventos/jong-fc-utrecht-fc-dordrecht-2:7905215",
+      "text": "Jong FC Utrecht FC Dordrecht Live2T • 74:18 CA 33221",
+      "text_observed_at_utc": "2026-11-02T20:32:39.436043+00:00",
+      "source_pages": [
+        "https://www.bwin.es/es/sports/f%C3%BAtbol-4/hoy"
+      ]
+    },
+    {
+      "bwin_event_id": "7905216",
+      "bwin_url": "https://www.bwin.es/es/sports/eventos/jong-psv-eindhoven-nac-breda-2:7905216",
+      "text": "Jong PSV Eindhoven NAC Breda Live2T • 72:39 CA 00001",
+      "text_observed_at_utc": "2026-11-02T20:32:39.436043+00:00",
+      "source_pages": [
+        "https://www.bwin.es/es/sports/f%C3%BAtbol-4/hoy"
+      ]
+    },
+    {
+      "bwin_event_id": "7905287",
+      "bwin_url": "https://www.bwin.es/es/sports/eventos/heracles-almelo-top-oss-2:7905287",
+      "text": "Heracles Almelo TOP Oss Live2T • 68:52 CA 1100",
+      "text_observed_at_utc": "2026-11-02T20:32:40.114948+00:00",
+      "source_pages": [
+        "https://www.bwin.es/es/sports/f%C3%BAtbol-4/hoy"
+      ]
+    },
+    {
+      "bwin_event_id": "7905283",
+      "bwin_url": "https://www.bwin.es/es/sports/eventos/cd-tenerife-f-athletic-club-f-2:7905283",
+      "text": "Liga F LIVE 1T • 31:39 CD Tenerife 0 - 0 Athletic Club",
+      "text_observed_at_utc": "2026-11-02T20:32:46.630885+00:00",
+      "source_pages": [
+        "https://www.bwin.es/es/sports/f%C3%BAtbol-4/hoy",
+        "https://www.bwin.es/es/sports/f%C3%BAtbol-4"
+      ]
+    },
+    {
+      "bwin_event_id": "7905330",
+      "bwin_url": "https://www.bwin.es/es/sports/eventos/sd-huesca-gimn%C3%A0stic-de-tarragona-2:7905330",
+      "text": "SD Huesca Gimnàstic de Tarragona LiveDescanso CA 1100",
+      "text_observed_at_utc": "2026-11-02T20:32:40.114948+00:00",
+      "source_pages": [
+        "https://www.bwin.es/es/sports/f%C3%BAtbol-4/hoy"
+      ]
+    },
+    {
+      "bwin_event_id": "7905295",
+      "bwin_url": "https://www.bwin.es/es/sports/eventos/chelmsford-city-farnham-town-2:7905295",
+      "text": "Chelmsford City Farnham Town LiveDescanso CA 0000",
+      "text_observed_at_utc": "2026-11-02T20:32:40.114948+00:00",
+      "source_pages": [
+        "https://www.bwin.es/es/sports/f%C3%BAtbol-4/hoy"
+      ]
+    },
+    {
+      "bwin_event_id": "7905285",
+      "bwin_url": "https://www.bwin.es/es/sports/eventos/aveley-fc-st-albans-city-2:7905285",
+      "text": "Aveley FC St Albans City Live1T • 46:16 CA 0000",
+      "text_observed_at_utc": "2026-11-02T20:32:40.114948+00:00",
+      "source_pages": [
+        "https://www.bwin.es/es/sports/f%C3%BAtbol-4/hoy"
+      ]
+    },
+    {
+      "bwin_event_id": "7905321",
+      "bwin_url": "https://www.bwin.es/es/sports/eventos/juventus-fc-b-next-gen-pro-vercelli-2:7905321",
+      "text": "Juventus FC B Next Gen Pro Vercelli Live2T • 46:22 CA 1100",
+      "text_observed_at_utc": "2026-11-02T20:32:40.114948+00:00",
+      "source_pages": [
+        "https://www.bwin.es/es/sports/f%C3%BAtbol-4/hoy"
+      ]
+    },
+    {
+      "bwin_event_id": "7905322",
+      "bwin_url": "https://www.bwin.es/es/sports/eventos/novara-fc-desenzano-fc-2:7905322",
+      "text": "Novara Desenzano FC LiveDescanso CA 1100",
+      "text_observed_at_utc": "2026-11-02T20:32:40.114948+00:00",
+      "source_pages": [
+        "https://www.bwin.es/es/sports/f%C3%BAtbol-4/hoy"
+      ]
+    },
+    {
+      "bwin_event_id": "7905324",
+      "bwin_url": "https://www.bwin.es/es/sports/eventos/ssd-casarano-calcio-foggia-2:7905324",
+      "text": "SSD Casarano Calcio Foggia LiveDescanso CA 1111",
+      "text_observed_at_utc": "2026-11-02T20:32:40.114948+00:00",
+      "source_pages": [
+        "https://www.bwin.es/es/sports/f%C3%BAtbol-4/hoy"
+      ]
+    },
+    {
+      "bwin_event_id": "7905300",
+      "bwin_url": "https://www.bwin.es/es/sports/eventos/acf-fiorentina-f-juventus-f-2:7905300",
+      "text": "ACF Fiorentina F Juventus FLiveDescanso CA 0011",
+      "text_observed_at_utc": "2026-11-02T20:32:40.114948+00:00",
+      "source_pages": [
+        "https://www.bwin.es/es/sports/f%C3%BAtbol-4/hoy"
+      ]
+    },
+    {
+      "bwin_event_id": "7905199",
+      "bwin_url": "https://www.bwin.es/es/sports/eventos/fortaleza-ce-atl%C3%A9tico-goianiense-2:7905199",
+      "text": "Fortaleza CE Atlético Goianiense Live2T • 71:19 CA 0000",
+      "text_observed_at_utc": "2026-11-02T20:32:40.114948+00:00",
+      "source_pages": [
+        "https://www.bwin.es/es/sports/f%C3%BAtbol-4/hoy",
+        "https://www.bwin.es/es/sports/f%C3%BAtbol-4/apuestas/brasil-33"
+      ]
+    },
+    {
+      "bwin_event_id": "7905551",
+      "bwin_url": "https://www.bwin.es/es/sports/eventos/athletic-club-br-cear%C3%A1-2:7905551",
+      "text": "Athletic Club BR Ceará Comienza en 27 min CA",
+      "text_observed_at_utc": "2026-11-02T20:32:40.114948+00:00",
+      "source_pages": [
+        "https://www.bwin.es/es/sports/f%C3%BAtbol-4/hoy",
+        "https://www.bwin.es/es/sports/f%C3%BAtbol-4/apuestas/brasil-33"
+      ]
+    },
+    {
+      "bwin_event_id": "7905157",
+      "bwin_url": "https://www.bwin.es/es/sports/eventos/lunes-combi-2:7905157",
+      "text": "Lunes Combi+Hoy / 23:00",
+      "text_observed_at_utc": "2026-11-02T20:32:40.114948+00:00",
+      "source_pages": [
+        "https://www.bwin.es/es/sports/f%C3%BAtbol-4/hoy"
+      ]
+    },
+    {
+      "bwin_event_id": "7905289",
+      "bwin_url": "https://www.bwin.es/es/sports/eventos/preston-north-end-sub-21-fleetwood-town-sub-21-2:7905289",
+      "text": "Preston North End Sub-21 Fleetwood Town Sub-21Live2T • 75:38 CA 11001",
+      "text_observed_at_utc": "2026-11-02T20:32:40.114948+00:00",
+      "source_pages": [
+        "https://www.bwin.es/es/sports/f%C3%BAtbol-4/hoy"
+      ]
+    },
+    {
+      "bwin_event_id": "7905290",
+      "bwin_url": "https://www.bwin.es/es/sports/eventos/bolton-wanderers-sub-21-queens-park-rangers-sub-2:7905290",
+      "text": "Bolton Wanderers Sub-21 Queens Park Rangers Sub-21Live2T • 72:40 CA 0044",
+      "text_observed_at_utc": "2026-11-02T20:32:40.114948+00:00",
+      "source_pages": [
+        "https://www.bwin.es/es/sports/f%C3%BAtbol-4/hoy"
+      ]
+    },
+    {
+      "bwin_event_id": "7905291",
+      "bwin_url": "https://www.bwin.es/es/sports/eventos/wycombe-wanderers-reservas-brentford-sub-21-2:7905291",
+      "text": "Wycombe Wanderers Reservas Brentford Sub-21Live2T • 74:32 CA 1111",
+      "text_observed_at_utc": "2026-11-02T20:32:40.114948+00:00",
+      "source_pages": [
+        "https://www.bwin.es/es/sports/f%C3%BAtbol-4/hoy"
+      ]
+    },
+    {
+      "bwin_event_id": "7905292",
+      "bwin_url": "https://www.bwin.es/es/sports/eventos/afc-bournemouth-sub-21-cardiff-city-fc-sub-21-2:7905292",
+      "text": "AFC Bournemouth Sub-21 Cardiff City FC Sub-21Live2T • 74:23 CA 3311",
+      "text_observed_at_utc": "2026-11-02T20:32:40.114948+00:00",
+      "source_pages": [
+        "https://www.bwin.es/es/sports/f%C3%BAtbol-4/hoy"
+      ]
+    },
+    {
+      "bwin_event_id": "7905293",
+      "bwin_url": "https://www.bwin.es/es/sports/eventos/exeter-city-sub-21-reading-fc-sub-21-2:7905293",
+      "text": "Exeter City Sub-21 Reading FC Sub-21Live2T • 74:00 CA 3322",
+      "text_observed_at_utc": "2026-11-02T20:32:40.114948+00:00",
+      "source_pages": [
+        "https://www.bwin.es/es/sports/f%C3%BAtbol-4/hoy"
+      ]
+    },
+    {
+      "bwin_event_id": "7905294",
+      "bwin_url": "https://www.bwin.es/es/sports/eventos/hull-city-sub-21-derby-county-sub-21-2:7905294",
+      "text": "Hull City Sub-21 Derby County Sub-21Live2T • 73:35 CA 0000",
+      "text_observed_at_utc": "2026-11-02T20:32:40.114948+00:00",
+      "source_pages": [
+        "https://www.bwin.es/es/sports/f%C3%BAtbol-4/hoy"
+      ]
+    },
+    {
+      "bwin_event_id": "7902306",
+      "bwin_url": "https://www.bwin.es/es/sports/eventos/maccabi-ironi-ashdod-h-ramat-hasharon-2:7902306",
+      "text": "Maccabi Ironi Ashdod H. Ramat HaSharon Live2T • 82:18 CA 1111",
+      "text_observed_at_utc": "2026-11-02T20:32:40.114948+00:00",
+      "source_pages": [
+        "https://www.bwin.es/es/sports/f%C3%BAtbol-4/hoy"
+      ]
+    },
+    {
+      "bwin_event_id": "7905217",
+      "bwin_url": "https://www.bwin.es/es/sports/eventos/zks-stal-rzeszow-puszcza-niepolomice-2:7905217",
+      "text": "ZKS Stal Rzeszow Puszcza Niepolomice LiveDescanso CA 0011",
+      "text_observed_at_utc": "2026-11-02T20:32:40.114948+00:00",
+      "source_pages": [
+        "https://www.bwin.es/es/sports/f%C3%BAtbol-4/hoy"
+      ]
+    },
+    {
+      "bwin_event_id": "7905218",
+      "bwin_url": "https://www.bwin.es/es/sports/eventos/lks-lodz-polonia-varsovia-2:7905218",
+      "text": "LKS Lodz Polonia Varsovia LiveDescanso CA 0000",
+      "text_observed_at_utc": "2026-11-02T20:32:40.114948+00:00",
+      "source_pages": [
+        "https://www.bwin.es/es/sports/f%C3%BAtbol-4/hoy"
+      ]
+    },
+    {
+      "bwin_event_id": "7905372",
+      "bwin_url": "https://www.bwin.es/es/sports/eventos/cr-belouizdad-js-saoura-2:7905372",
+      "text": "CR Belouizdad JS Saoura Live2T • 70:34 CA 1100",
+      "text_observed_at_utc": "2026-11-02T20:32:40.114948+00:00",
+      "source_pages": [
+        "https://www.bwin.es/es/sports/f%C3%BAtbol-4/hoy"
+      ]
+    },
+    {
+      "bwin_event_id": "7908277",
+      "bwin_url": "https://www.bwin.es/es/sports/eventos/coleraine-fc-sub-20-ballymena-united-fc-sub-20-2:7908277",
+      "text": "Coleraine FC Sub-20 Ballymena United FC Sub-20Live1T • 31:50 CA 1100",
+      "text_observed_at_utc": "2026-11-02T20:32:40.114948+00:00",
+      "source_pages": [
+        "https://www.bwin.es/es/sports/f%C3%BAtbol-4/hoy"
+      ]
+    },
+    {
+      "bwin_event_id": "7908278",
+      "bwin_url": "https://www.bwin.es/es/sports/eventos/limavady-united-sub-20-cliftonville-olympic-sub-2:7908278",
+      "text": "Limavady United Sub-20 Cliftonville Olympic Sub-20Live1T • 32:12 CA 1111",
+      "text_observed_at_utc": "2026-11-02T20:32:40.114948+00:00",
+      "source_pages": [
+        "https://www.bwin.es/es/sports/f%C3%BAtbol-4/hoy"
+      ]
+    },
+    {
+      "bwin_event_id": "7908279",
+      "bwin_url": "https://www.bwin.es/es/sports/eventos/portadown-sub-20-dungannon-swifts-sub-20-2:7908279",
+      "text": "Portadown Sub-20 Dungannon Swifts Sub-20Live1T • 16:20 CA 0000",
+      "text_observed_at_utc": "2026-11-02T20:32:40.114948+00:00",
+      "source_pages": [
+        "https://www.bwin.es/es/sports/f%C3%BAtbol-4/hoy"
+      ]
+    },
+    {
+      "bwin_event_id": "7905225",
+      "bwin_url": "https://www.bwin.es/es/sports/eventos/independiente-yumbo-boca-juniors-de-cali-2:7905225",
+      "text": "Independiente Yumbo Boca Juniors de Cali Live2T • 74:45 CA 2233",
+      "text_observed_at_utc": "2026-11-02T20:32:40.114948+00:00",
+      "source_pages": [
+        "https://www.bwin.es/es/sports/f%C3%BAtbol-4/hoy"
+      ]
+    },
+    {
+      "bwin_event_id": "7905344",
+      "bwin_url": "https://www.bwin.es/es/sports/eventos/sporting-cristal-fc-cajamarca-2:7905344",
+      "text": "Sporting Cristal FC Cajamarca Comienza ahora CA",
+      "text_observed_at_utc": "2026-11-02T20:32:40.114948+00:00",
+      "source_pages": [
+        "https://www.bwin.es/es/sports/f%C3%BAtbol-4/hoy"
+      ]
+    },
+    {
+      "bwin_event_id": "7908274",
+      "bwin_url": "https://www.bwin.es/es/sports/eventos/deportivo-italiano-deportivo-lsm-2:7908274",
+      "text": "Deportivo Italiano Deportivo LSM Live2T • 63:35 CA 0033",
+      "text_observed_at_utc": "2026-11-02T20:32:40.114948+00:00",
+      "source_pages": [
+        "https://www.bwin.es/es/sports/f%C3%BAtbol-4/hoy"
+      ]
+    },
+    {
+      "bwin_event_id": "7906427",
+      "bwin_url": "https://www.bwin.es/es/sports/eventos/as-douanes-nouakchott-fc-nouadhibou-2:7906427",
+      "text": "AS Douanes Nouakchott FC Nouadhibou Live1T • 42:43 CA 1111",
+      "text_observed_at_utc": "2026-11-02T20:32:40.114948+00:00",
+      "source_pages": [
+        "https://www.bwin.es/es/sports/f%C3%BAtbol-4/hoy"
+      ]
+    },
+    {
+      "bwin_event_id": "7906192",
+      "bwin_url": "https://www.bwin.es/es/sports/eventos/la-luz-fc-reservas-central-espanol-fc-reservas-2:7906192",
+      "text": "La Luz FC Reservas Central Espanol FC ReservasLive2T • 73:06 CA 1133",
+      "text_observed_at_utc": "2026-11-02T20:32:40.114948+00:00",
+      "source_pages": [
+        "https://www.bwin.es/es/sports/f%C3%BAtbol-4/hoy"
+      ]
+    },
+    {
+      "bwin_event_id": "7906031",
+      "bwin_url": "https://www.bwin.es/es/sports/eventos/cd-anaitasuna-alav%C3%A9s-2:7906031",
+      "text": "CD Anaitasuna Alavés CA",
+      "text_observed_at_utc": "2026-11-02T20:32:43.373139+00:00",
+      "source_pages": [
+        "https://www.bwin.es/es/sports/f%C3%BAtbol-4/ma%C3%B1ana"
+      ]
+    },
+    {
+      "bwin_event_id": "7906032",
+      "bwin_url": "https://www.bwin.es/es/sports/eventos/cd-pamplona-eibar-2:7906032",
+      "text": "CD Pamplona Eibar CA",
+      "text_observed_at_utc": "2026-11-02T20:32:43.373139+00:00",
+      "source_pages": [
+        "https://www.bwin.es/es/sports/f%C3%BAtbol-4/ma%C3%B1ana"
+      ]
+    },
+    {
+      "bwin_event_id": "7817856",
+      "bwin_url": "https://www.bwin.es/es/sports/eventos/uefa-champions-league-2026-27-ganador-2:7817856",
+      "text": "UEFA Champions League 2026/27 – Ganador",
+      "text_observed_at_utc": "2026-11-02T20:32:43.373139+00:00",
+      "source_pages": [
+        "https://www.bwin.es/es/sports/f%C3%BAtbol-4/ma%C3%B1ana"
+      ]
+    },
+    {
+      "bwin_event_id": "7857324",
+      "bwin_url": "https://www.bwin.es/es/sports/eventos/champions-league-2026-27-m%C3%A1ximo-goleador-2:7857324",
+      "text": "Champions League 2026/27 – Máximo goleador",
+      "text_observed_at_utc": "2026-11-02T20:32:43.373139+00:00",
+      "source_pages": [
+        "https://www.bwin.es/es/sports/f%C3%BAtbol-4/ma%C3%B1ana"
+      ]
+    },
+    {
+      "bwin_event_id": "7896143",
+      "bwin_url": "https://www.bwin.es/es/sports/eventos/galatasaray-sk-stuttgart-2:7896143",
+      "text": "Galatasaray SK Stuttgart CA",
+      "text_observed_at_utc": "2026-11-02T20:32:43.373139+00:00",
+      "source_pages": [
+        "https://www.bwin.es/es/sports/f%C3%BAtbol-4/ma%C3%B1ana"
+      ]
+    },
+    {
+      "bwin_event_id": "7896152",
+      "bwin_url": "https://www.bwin.es/es/sports/eventos/shakhtar-donetsk-sporting-cp-2:7896152",
+      "text": "Shakhtar Donetsk Sporting CP CA",
+      "text_observed_at_utc": "2026-11-02T20:32:43.373139+00:00",
+      "source_pages": [
+        "https://www.bwin.es/es/sports/f%C3%BAtbol-4/ma%C3%B1ana"
+      ]
+    },
+    {
+      "bwin_event_id": "7896145",
+      "bwin_url": "https://www.bwin.es/es/sports/eventos/at-madrid-bayern-2:7896145",
+      "text": "Atlético Madrid Bayern Múnich",
+      "text_observed_at_utc": "2026-11-02T20:32:43.373139+00:00",
+      "source_pages": [
+        "https://www.bwin.es/es/sports/f%C3%BAtbol-4/ma%C3%B1ana"
+      ]
+    },
+    {
+      "bwin_event_id": "7896147",
+      "bwin_url": "https://www.bwin.es/es/sports/eventos/fc-barcelona-aston-villa-2:7896147",
+      "text": "FC Barcelona Aston Villa",
+      "text_observed_at_utc": "2026-11-02T20:32:43.373139+00:00",
+      "source_pages": [
+        "https://www.bwin.es/es/sports/f%C3%BAtbol-4/ma%C3%B1ana"
+      ]
+    },
+    {
+      "bwin_event_id": "7896149",
+      "bwin_url": "https://www.bwin.es/es/sports/eventos/bodo-glimt-lille-osc-2:7896149",
+      "text": "Bodo Glimt Lille OSC",
+      "text_observed_at_utc": "2026-11-02T20:32:43.373139+00:00",
+      "source_pages": [
+        "https://www.bwin.es/es/sports/f%C3%BAtbol-4/ma%C3%B1ana"
+      ]
+    },
+    {
+      "bwin_event_id": "7896151",
+      "bwin_url": "https://www.bwin.es/es/sports/eventos/manchester-united-as-roma-2:7896151",
+      "text": "Man United AS Roma",
+      "text_observed_at_utc": "2026-11-02T20:32:43.373139+00:00",
+      "source_pages": [
+        "https://www.bwin.es/es/sports/f%C3%BAtbol-4/ma%C3%B1ana"
+      ]
+    },
+    {
+      "bwin_event_id": "7896153",
+      "bwin_url": "https://www.bwin.es/es/sports/eventos/feyenoord-rotterdam-inter-mil%C3%A1n-2:7896153",
+      "text": "Feyenoord Rotterdam Inter Milán",
+      "text_observed_at_utc": "2026-11-02T20:32:43.373139+00:00",
+      "source_pages": [
+        "https://www.bwin.es/es/sports/f%C3%BAtbol-4/ma%C3%B1ana"
+      ]
+    },
+    {
+      "bwin_event_id": "7896155",
+      "bwin_url": "https://www.bwin.es/es/sports/eventos/lask-sk-slovan-bratislava-2:7896155",
+      "text": "LASK SK Slovan Bratislava",
+      "text_observed_at_utc": "2026-11-02T20:32:43.373139+00:00",
+      "source_pages": [
+        "https://www.bwin.es/es/sports/f%C3%BAtbol-4/ma%C3%B1ana"
+      ]
+    },
+    {
+      "bwin_event_id": "7896156",
+      "bwin_url": "https://www.bwin.es/es/sports/eventos/villarreal-psg-2:7896156",
+      "text": "Villarreal PSG",
+      "text_observed_at_utc": "2026-11-02T20:32:43.373139+00:00",
+      "source_pages": [
+        "https://www.bwin.es/es/sports/f%C3%BAtbol-4/ma%C3%B1ana"
+      ]
+    },
+    {
+      "bwin_event_id": "7890932",
+      "bwin_url": "https://www.bwin.es/es/sports/eventos/red-bull-bragantino-santos-2:7890932",
+      "text": "Red Bull Bragantino Santos Mañana / 0:00 CA 3",
+      "text_observed_at_utc": "2026-11-02T20:32:53.384235+00:00",
+      "source_pages": [
+        "https://www.bwin.es/es/sports/f%C3%BAtbol-4/ma%C3%B1ana",
+        "https://www.bwin.es/es/sports/f%C3%BAtbol-4/apuestas/brasil-33"
+      ]
+    },
+    {
+      "bwin_event_id": "7891271",
+      "bwin_url": "https://www.bwin.es/es/sports/eventos/chapecoense-mirassol-2:7891271",
+      "text": "Chapecoense Mirassol Mañana / 23:30 CA 3",
+      "text_observed_at_utc": "2026-11-02T20:32:53.384235+00:00",
+      "source_pages": [
+        "https://www.bwin.es/es/sports/f%C3%BAtbol-4/ma%C3%B1ana",
+        "https://www.bwin.es/es/sports/f%C3%BAtbol-4/apuestas/brasil-33"
+      ]
+    },
+    {
+      "bwin_event_id": "7899234",
+      "bwin_url": "https://www.bwin.es/es/sports/eventos/atl%C3%A9tico-tucum%C3%A1n-argentinos-juniors-2:7899234",
+      "text": "Atlético Tucumán Argentinos Juniors Mañana / 1:15 CA 1",
+      "text_observed_at_utc": "2026-11-02T20:32:56.624929+00:00",
+      "source_pages": [
+        "https://www.bwin.es/es/sports/f%C3%BAtbol-4/ma%C3%B1ana",
+        "https://www.bwin.es/es/sports/f%C3%BAtbol-4/apuestas/argentina-38"
+      ]
+    },
+    {
+      "bwin_event_id": "7899238",
+      "bwin_url": "https://www.bwin.es/es/sports/eventos/independiente-rivadavia-ca-banfield-2:7899238",
+      "text": "Independiente Rivadavia CA Banfield Mañana / 1:15 CA 1",
+      "text_observed_at_utc": "2026-11-02T20:32:56.624929+00:00",
+      "source_pages": [
+        "https://www.bwin.es/es/sports/f%C3%BAtbol-4/ma%C3%B1ana",
+        "https://www.bwin.es/es/sports/f%C3%BAtbol-4/apuestas/argentina-38"
+      ]
+    },
+    {
+      "bwin_event_id": "7900823",
+      "bwin_url": "https://www.bwin.es/es/sports/eventos/blackburn-stoke-2:7900823",
+      "text": "Blackburn Rovers Stoke City Mañana / 20:45 CA",
+      "text_observed_at_utc": "2026-11-02T20:32:43.373139+00:00",
+      "source_pages": [
+        "https://www.bwin.es/es/sports/f%C3%BAtbol-4/ma%C3%B1ana"
+      ]
+    },
+    {
+      "bwin_event_id": "7900825",
+      "bwin_url": "https://www.bwin.es/es/sports/eventos/preston-north-end-sheffield-united-fc-2:7900825",
+      "text": "Preston North End Sheffield United FC Mañana / 20:45 CA",
+      "text_observed_at_utc": "2026-11-02T20:32:43.373139+00:00",
+      "source_pages": [
+        "https://www.bwin.es/es/sports/f%C3%BAtbol-4/ma%C3%B1ana"
+      ]
+    },
+    {
+      "bwin_event_id": "7900828",
+      "bwin_url": "https://www.bwin.es/es/sports/eventos/queens-park-rangers-burnley-2:7900828",
+      "text": "Queens Park Rangers Burnley Mañana / 20:45 CA",
+      "text_observed_at_utc": "2026-11-02T20:32:43.373139+00:00",
+      "source_pages": [
+        "https://www.bwin.es/es/sports/f%C3%BAtbol-4/ma%C3%B1ana"
+      ]
+    },
+    {
+      "bwin_event_id": "7900831",
+      "bwin_url": "https://www.bwin.es/es/sports/eventos/watford-fc-lincoln-city-2:7900831",
+      "text": "Watford FC Lincoln City Mañana / 20:45 CA",
+      "text_observed_at_utc": "2026-11-02T20:32:43.373139+00:00",
+      "source_pages": [
+        "https://www.bwin.es/es/sports/f%C3%BAtbol-4/ma%C3%B1ana"
+      ]
+    },
+    {
+      "bwin_event_id": "7900835",
+      "bwin_url": "https://www.bwin.es/es/sports/eventos/derby-county-norwich-city-2:7900835",
+      "text": "Derby County Norwich Mañana / 20:45 CA",
+      "text_observed_at_utc": "2026-11-02T20:32:43.373139+00:00",
+      "source_pages": [
+        "https://www.bwin.es/es/sports/f%C3%BAtbol-4/ma%C3%B1ana"
+      ]
+    },
+    {
+      "bwin_event_id": "7900837",
+      "bwin_url": "https://www.bwin.es/es/sports/eventos/portsmouth-fc-swansea-city-2:7900837",
+      "text": "Portsmouth FC Swansea City Mañana / 20:45 CA",
+      "text_observed_at_utc": "2026-11-02T20:32:43.373139+00:00",
+      "source_pages": [
+        "https://www.bwin.es/es/sports/f%C3%BAtbol-4/ma%C3%B1ana"
+      ]
+    },
+    {
+      "bwin_event_id": "7900838",
+      "bwin_url": "https://www.bwin.es/es/sports/eventos/charlton-athletic-bolton-wanderers-2:7900838",
+      "text": "Charlton Athletic Bolton Wanderers Mañana / 20:45 CA",
+      "text_observed_at_utc": "2026-11-02T20:32:43.373139+00:00",
+      "source_pages": [
+        "https://www.bwin.es/es/sports/f%C3%BAtbol-4/ma%C3%B1ana"
+      ]
+    },
+    {
+      "bwin_event_id": "7900826",
+      "bwin_url": "https://www.bwin.es/es/sports/eventos/birmingham-city-millwall-fc-2:7900826",
+      "text": "Birmingham City Millwall FC Mañana / 21:00 CA",
+      "text_observed_at_utc": "2026-11-02T20:32:43.373139+00:00",
+      "source_pages": [
+        "https://www.bwin.es/es/sports/f%C3%BAtbol-4/ma%C3%B1ana"
+      ]
+    },
+    {
+      "bwin_event_id": "7900829",
+      "bwin_url": "https://www.bwin.es/es/sports/eventos/west-bromwich-albion-southampton-fc-2:7900829",
+      "text": "West Bromwich Albion Southampton FC Mañana / 21:00 CA",
+      "text_observed_at_utc": "2026-11-02T20:32:43.373139+00:00",
+      "source_pages": [
+        "https://www.bwin.es/es/sports/f%C3%BAtbol-4/ma%C3%B1ana"
+      ]
+    },
+    {
+      "bwin_event_id": "7891307",
+      "bwin_url": "https://www.bwin.es/es/sports/eventos/ik-sirius-halmstads-bk-2:7891307",
+      "text": "IK Sirius Halmstads BK Mañana / 19:00 CA",
+      "text_observed_at_utc": "2026-11-02T20:32:43.373139+00:00",
+      "source_pages": [
+        "https://www.bwin.es/es/sports/f%C3%BAtbol-4/ma%C3%B1ana"
+      ]
+    },
+    {
+      "bwin_event_id": "7904058",
+      "bwin_url": "https://www.bwin.es/es/sports/eventos/albion-fc-deportivo-maldonado-2:7904058",
+      "text": "Albion FC Deportivo Maldonado Mañana / 0:00 CA",
+      "text_observed_at_utc": "2026-11-02T20:32:43.373139+00:00",
+      "source_pages": [
+        "https://www.bwin.es/es/sports/f%C3%BAtbol-4/ma%C3%B1ana"
+      ]
+    },
+    {
+      "bwin_event_id": "7900513",
+      "bwin_url": "https://www.bwin.es/es/sports/eventos/atl%C3%A9tico-bucaramanga-atl%C3%A9tico-nacional-2:7900513",
+      "text": "Atlético Bucaramanga Atlético Nacional Mañana / 2:15 CA",
+      "text_observed_at_utc": "2026-11-02T20:32:43.373139+00:00",
+      "source_pages": [
+        "https://www.bwin.es/es/sports/f%C3%BAtbol-4/ma%C3%B1ana"
+      ]
+    },
+    {
+      "bwin_event_id": "7900684",
+      "bwin_url": "https://www.bwin.es/es/sports/eventos/deportivo-pereira-cd-deportes-tolima-2:7900684",
+      "text": "Deportivo Pereira CD Deportes Tolima Mañana / 21:30 CA",
+      "text_observed_at_utc": "2026-11-02T20:32:43.373139+00:00",
+      "source_pages": [
+        "https://www.bwin.es/es/sports/f%C3%BAtbol-4/ma%C3%B1ana"
+      ]
+    },
+    {
+      "bwin_event_id": "7909128",
+      "bwin_url": "https://www.bwin.es/es/sports/eventos/cs-2-de-mayo-sportivo-trinidense-2:7909128",
+      "text": "CS 2 de Mayo Sportivo Trinidense Mañana / 21:00 CA",
+      "text_observed_at_utc": "2026-11-02T20:32:43.373139+00:00",
+      "source_pages": [
+        "https://www.bwin.es/es/sports/f%C3%BAtbol-4/ma%C3%B1ana"
+      ]
+    },
+    {
+      "bwin_event_id": "7908391",
+      "bwin_url": "https://www.bwin.es/es/sports/eventos/club-nacional-asunci%C3%B3n-sp-san-lorenzo-2:7908391",
+      "text": "Club Nacional Asunción Sp. San Lorenzo Mañana / 23:30 CA",
+      "text_observed_at_utc": "2026-11-02T20:32:43.373139+00:00",
+      "source_pages": [
+        "https://www.bwin.es/es/sports/f%C3%BAtbol-4/ma%C3%B1ana"
+      ]
+    },
+    {
+      "bwin_event_id": "7905236",
+      "bwin_url": "https://www.bwin.es/es/sports/eventos/deportes-concepci%C3%B3n-palestino-2:7905236",
+      "text": "Deportes Concepción Palestino Mañana / 0:30 CA",
+      "text_observed_at_utc": "2026-11-02T20:32:43.373139+00:00",
+      "source_pages": [
+        "https://www.bwin.es/es/sports/f%C3%BAtbol-4/ma%C3%B1ana"
+      ]
+    },
+    {
+      "bwin_event_id": "7900855",
+      "bwin_url": "https://www.bwin.es/es/sports/eventos/huddersfield-town-luton-town-2:7900855",
+      "text": "Huddersfield Town Luton Town Mañana / 20:45 CA",
+      "text_observed_at_utc": "2026-11-02T20:32:43.373139+00:00",
+      "source_pages": [
+        "https://www.bwin.es/es/sports/f%C3%BAtbol-4/ma%C3%B1ana"
+      ]
+    },
+    {
+      "bwin_event_id": "7903945",
+      "bwin_url": "https://www.bwin.es/es/sports/eventos/wigan-athletic-mansfield-town-2:7903945",
+      "text": "Wigan Athletic Mansfield Town Mañana / 20:45 CA",
+      "text_observed_at_utc": "2026-11-02T20:32:43.373139+00:00",
+      "source_pages": [
+        "https://www.bwin.es/es/sports/f%C3%BAtbol-4/ma%C3%B1ana"
+      ]
+    },
+    {
+      "bwin_event_id": "7900862",
+      "bwin_url": "https://www.bwin.es/es/sports/eventos/northampton-town-oldham-athletic-2:7900862",
+      "text": "Northampton Town Oldham Athletic Mañana / 20:45 CA",
+      "text_observed_at_utc": "2026-11-02T20:32:43.373139+00:00",
+      "source_pages": [
+        "https://www.bwin.es/es/sports/f%C3%BAtbol-4/ma%C3%B1ana"
+      ]
+    },
+    {
+      "bwin_event_id": "7908282",
+      "bwin_url": "https://www.bwin.es/es/sports/eventos/cs-desamparados-san-juan-ca-union-de-villa-kraus-2:7908282",
+      "text": "CS Desamparados San Juan CA Unión de Villa Krause Mañana / 1:30 CA",
+      "text_observed_at_utc": "2026-11-02T20:32:43.373139+00:00",
+      "source_pages": [
+        "https://www.bwin.es/es/sports/f%C3%BAtbol-4/ma%C3%B1ana",
+        "https://www.bwin.es/es/sports/f%C3%BAtbol-4/apuestas/argentina-38"
+      ]
+    },
+    {
+      "bwin_event_id": "7905550",
+      "bwin_url": "https://www.bwin.es/es/sports/eventos/goi%C3%A1s-go-crb-al-2:7905550",
+      "text": "Goiás GO CRB AL Mañana / 0:30 CA",
+      "text_observed_at_utc": "2026-11-02T20:32:43.373139+00:00",
+      "source_pages": [
+        "https://www.bwin.es/es/sports/f%C3%BAtbol-4/ma%C3%B1ana",
+        "https://www.bwin.es/es/sports/f%C3%BAtbol-4/apuestas/brasil-33"
+      ]
+    },
+    {
+      "bwin_event_id": "7905158",
+      "bwin_url": "https://www.bwin.es/es/sports/eventos/lunes-combi-2:7905158",
+      "text": "Lunes Combi+Mañana / 1:15",
+      "text_observed_at_utc": "2026-11-02T20:32:43.373139+00:00",
+      "source_pages": [
+        "https://www.bwin.es/es/sports/f%C3%BAtbol-4/ma%C3%B1ana"
+      ]
+    },
+    {
+      "bwin_event_id": "7905812",
+      "bwin_url": "https://www.bwin.es/es/sports/eventos/martes-combi-2:7905812",
+      "text": "Martes Combi+Mañana / 18:45",
+      "text_observed_at_utc": "2026-11-02T20:32:43.373139+00:00",
+      "source_pages": [
+        "https://www.bwin.es/es/sports/f%C3%BAtbol-4/ma%C3%B1ana"
+      ]
+    },
+    {
+      "bwin_event_id": "7905813",
+      "bwin_url": "https://www.bwin.es/es/sports/eventos/martes-combi-2:7905813",
+      "text": "Martes Combi+Mañana / 20:45",
+      "text_observed_at_utc": "2026-11-02T20:32:43.373139+00:00",
+      "source_pages": [
+        "https://www.bwin.es/es/sports/f%C3%BAtbol-4/ma%C3%B1ana"
+      ]
+    },
+    {
+      "bwin_event_id": "7905814",
+      "bwin_url": "https://www.bwin.es/es/sports/eventos/martes-combi-2:7905814",
+      "text": "Martes Combi+Mañana / 21:00",
+      "text_observed_at_utc": "2026-11-02T20:32:43.373139+00:00",
+      "source_pages": [
+        "https://www.bwin.es/es/sports/f%C3%BAtbol-4/ma%C3%B1ana"
+      ]
+    },
+    {
+      "bwin_event_id": "7905815",
+      "bwin_url": "https://www.bwin.es/es/sports/eventos/martes-combi-2:7905815",
+      "text": "Martes Combi+Mañana / 21:00",
+      "text_observed_at_utc": "2026-11-02T20:32:43.373139+00:00",
+      "source_pages": [
+        "https://www.bwin.es/es/sports/f%C3%BAtbol-4/ma%C3%B1ana"
+      ]
+    },
+    {
+      "bwin_event_id": "7909413",
+      "bwin_url": "https://www.bwin.es/es/sports/eventos/martes-combi-2:7909413",
+      "text": "Martes Combi+Mañana / 21:00",
+      "text_observed_at_utc": "2026-11-02T20:32:43.373139+00:00",
+      "source_pages": [
+        "https://www.bwin.es/es/sports/f%C3%BAtbol-4/ma%C3%B1ana"
+      ]
+    },
+    {
+      "bwin_event_id": "7905816",
+      "bwin_url": "https://www.bwin.es/es/sports/eventos/martes-combi-2:7905816",
+      "text": "Martes Combi+Mañana / 23:30",
+      "text_observed_at_utc": "2026-11-02T20:32:43.373139+00:00",
+      "source_pages": [
+        "https://www.bwin.es/es/sports/f%C3%BAtbol-4/ma%C3%B1ana"
+      ]
+    },
+    {
+      "bwin_event_id": "7905674",
+      "bwin_url": "https://www.bwin.es/es/sports/eventos/rotherham-united-newcastle-united-sub-21-2:7905674",
+      "text": "Rotherham United Newcastle Sub-21Mañana / 20:00 CA",
+      "text_observed_at_utc": "2026-11-02T20:32:43.373139+00:00",
+      "source_pages": [
+        "https://www.bwin.es/es/sports/f%C3%BAtbol-4/ma%C3%B1ana"
+      ]
+    },
+    {
+      "bwin_event_id": "7905689",
+      "bwin_url": "https://www.bwin.es/es/sports/eventos/newport-county-crystal-palace-sub-21-2:7905689",
+      "text": "Newport County Crystal Palace Sub-21Mañana / 20:00 CA",
+      "text_observed_at_utc": "2026-11-02T20:32:43.373139+00:00",
+      "source_pages": [
+        "https://www.bwin.es/es/sports/f%C3%BAtbol-4/ma%C3%B1ana"
+      ]
+    },
+    {
+      "bwin_event_id": "7905690",
+      "bwin_url": "https://www.bwin.es/es/sports/eventos/cambridge-united-brighton-and-hove-albion-sub-21-2:7905690",
+      "text": "Cambridge United Brighton And Hove Albion Sub-21Mañana / 20:00 CA",
+      "text_observed_at_utc": "2026-11-02T20:32:43.373139+00:00",
+      "source_pages": [
+        "https://www.bwin.es/es/sports/f%C3%BAtbol-4/ma%C3%B1ana"
+      ]
+    },
+    {
+      "bwin_event_id": "7905692",
+      "bwin_url": "https://www.bwin.es/es/sports/eventos/rochdale-doncaster-rovers-fc-2:7905692",
+      "text": "Rochdale Doncaster Rovers FC Mañana / 20:00 CA",
+      "text_observed_at_utc": "2026-11-02T20:32:43.373139+00:00",
+      "source_pages": [
+        "https://www.bwin.es/es/sports/f%C3%BAtbol-4/ma%C3%B1ana"
+      ]
+    },
+    {
+      "bwin_event_id": "7904356",
+      "bwin_url": "https://www.bwin.es/es/sports/eventos/fk-otrant-olympic-ulcinj-fk-arsenal-tivat-2:7904356",
+      "text": "FK Otrant-Olympic Ulcinj FK Arsenal Tivat Mañana / 13:00 CA",
+      "text_observed_at_utc": "2026-11-02T20:32:43.373139+00:00",
+      "source_pages": [
+        "https://www.bwin.es/es/sports/f%C3%BAtbol-4/ma%C3%B1ana"
+      ]
+    },
+    {
+      "bwin_event_id": "7902458",
+      "bwin_url": "https://www.bwin.es/es/sports/eventos/sevilla-alav%C3%A9s-2:7902458",
+      "text": "Sevilla Alavés 6/11/26 21:00 CA",
+      "text_observed_at_utc": "2026-11-02T20:32:46.630885+00:00",
+      "source_pages": [
+        "https://www.bwin.es/es/sports/f%C3%BAtbol-4"
+      ]
+    },
+    {
+      "bwin_event_id": "7903871",
+      "bwin_url": "https://www.bwin.es/es/sports/eventos/m%C3%A1laga-cf-racing-santander-2:7903871",
+      "text": "Málaga CF Racing Santander 7/11/26 14:00 CA",
+      "text_observed_at_utc": "2026-11-02T20:32:46.630885+00:00",
+      "source_pages": [
+        "https://www.bwin.es/es/sports/f%C3%BAtbol-4"
+      ]
+    },
+    {
+      "bwin_event_id": "7903627",
+      "bwin_url": "https://www.bwin.es/es/sports/eventos/espanyol-deportivo-la-coru%C3%B1a-2:7903627",
+      "text": "Espanyol Deportivo La Coruña 7/11/26 16:15",
+      "text_observed_at_utc": "2026-11-02T20:32:46.630885+00:00",
+      "source_pages": [
+        "https://www.bwin.es/es/sports/f%C3%BAtbol-4"
+      ]
+    },
+    {
+      "bwin_event_id": "7903872",
+      "bwin_url": "https://www.bwin.es/es/sports/eventos/osasuna-athletic-club-2:7903872",
+      "text": "Osasuna Athletic Club 7/11/26 18:30",
+      "text_observed_at_utc": "2026-11-02T20:32:46.630885+00:00",
+      "source_pages": [
+        "https://www.bwin.es/es/sports/f%C3%BAtbol-4"
+      ]
+    },
+    {
+      "bwin_event_id": "7903873",
+      "bwin_url": "https://www.bwin.es/es/sports/eventos/valencia-real-madrid-2:7903873",
+      "text": "Valencia Real Madrid 7/11/26 21:00",
+      "text_observed_at_utc": "2026-11-02T20:32:46.630885+00:00",
+      "source_pages": [
+        "https://www.bwin.es/es/sports/f%C3%BAtbol-4"
+      ]
+    },
+    {
+      "bwin_event_id": "7904031",
+      "bwin_url": "https://www.bwin.es/es/sports/eventos/elche-real-betis-2:7904031",
+      "text": "Elche Real Betis 8/11/26 14:00",
+      "text_observed_at_utc": "2026-11-02T20:32:46.630885+00:00",
+      "source_pages": [
+        "https://www.bwin.es/es/sports/f%C3%BAtbol-4"
+      ]
+    },
+    {
+      "bwin_event_id": "7904029",
+      "bwin_url": "https://www.bwin.es/es/sports/eventos/r-sociedad-rayo-2:7904029",
+      "text": "Real Sociedad Rayo Vallecano 8/11/26 16:15",
+      "text_observed_at_utc": "2026-11-02T20:32:46.630885+00:00",
+      "source_pages": [
+        "https://www.bwin.es/es/sports/f%C3%BAtbol-4"
+      ]
+    },
+    {
+      "bwin_event_id": "7904030",
+      "bwin_url": "https://www.bwin.es/es/sports/eventos/villarreal-getafe-2:7904030",
+      "text": "Villarreal Getafe 8/11/26 18:30",
+      "text_observed_at_utc": "2026-11-02T20:32:46.630885+00:00",
+      "source_pages": [
+        "https://www.bwin.es/es/sports/f%C3%BAtbol-4"
+      ]
+    },
+    {
+      "bwin_event_id": "7904043",
+      "bwin_url": "https://www.bwin.es/es/sports/eventos/at-madrid-bar%C3%A7a-2:7904043",
+      "text": "Atlético Madrid FC Barcelona 8/11/26 21:00",
+      "text_observed_at_utc": "2026-11-02T20:32:46.630885+00:00",
+      "source_pages": [
+        "https://www.bwin.es/es/sports/f%C3%BAtbol-4"
+      ]
+    },
+    {
+      "bwin_event_id": "7891274",
+      "bwin_url": "https://www.bwin.es/es/sports/eventos/internacional-rs-coritiba-2:7891274",
+      "text": "Internacional RS Coritiba 4/11/26 1:30 CA 3",
+      "text_observed_at_utc": "2026-11-02T20:32:53.384235+00:00",
+      "source_pages": [
+        "https://www.bwin.es/es/sports/f%C3%BAtbol-4/apuestas/brasil-33"
+      ]
+    },
+    {
+      "bwin_event_id": "7891708",
+      "bwin_url": "https://www.bwin.es/es/sports/eventos/atl%C3%A9tico-paranaense-vasco-da-gama-2:7891708",
+      "text": "Atlético Paranaense CR Vasco da Gama RJ 4/11/26 23:30 CA 3",
+      "text_observed_at_utc": "2026-11-02T20:32:53.384235+00:00",
+      "source_pages": [
+        "https://www.bwin.es/es/sports/f%C3%BAtbol-4/apuestas/brasil-33"
+      ]
+    },
+    {
+      "bwin_event_id": "7891714",
+      "bwin_url": "https://www.bwin.es/es/sports/eventos/cr-flamengo-gremio-2:7891714",
+      "text": "CR Flamengo Gremio 4/11/26 23:30 CA 3",
+      "text_observed_at_utc": "2026-11-02T20:32:53.384235+00:00",
+      "source_pages": [
+        "https://www.bwin.es/es/sports/f%C3%BAtbol-4/apuestas/brasil-33"
+      ]
+    },
+    {
+      "bwin_event_id": "7891716",
+      "bwin_url": "https://www.bwin.es/es/sports/eventos/botafogo-rj-atl%C3%A9tico-mineiro-2:7891716",
+      "text": "Botafogo RJ Atlético Mineiro 5/11/26 1:30",
+      "text_observed_at_utc": "2026-11-02T20:32:53.384235+00:00",
+      "source_pages": [
+        "https://www.bwin.es/es/sports/f%C3%BAtbol-4/apuestas/brasil-33"
+      ]
+    },
+    {
+      "bwin_event_id": "7891717",
+      "bwin_url": "https://www.bwin.es/es/sports/eventos/s%C3%A3o-paulo-fc-corinthians-sp-2:7891717",
+      "text": "São Paulo FC Corinthians SP 5/11/26 1:30",
+      "text_observed_at_utc": "2026-11-02T20:32:53.384235+00:00",
+      "source_pages": [
+        "https://www.bwin.es/es/sports/f%C3%BAtbol-4/apuestas/brasil-33"
+      ]
+    },
+    {
+      "bwin_event_id": "7892146",
+      "bwin_url": "https://www.bwin.es/es/sports/eventos/palmeiras-clube-do-remo-2:7892146",
+      "text": "Palmeiras Clube do Remo 5/11/26 23:30",
+      "text_observed_at_utc": "2026-11-02T20:32:53.384235+00:00",
+      "source_pages": [
+        "https://www.bwin.es/es/sports/f%C3%BAtbol-4/apuestas/brasil-33"
+      ]
+    },
+    {
+      "bwin_event_id": "7892145",
+      "bwin_url": "https://www.bwin.es/es/sports/eventos/cruzeiro-ec-bahia-2:7892145",
+      "text": "Cruzeiro EC Bahia 6/11/26 1:30",
+      "text_observed_at_utc": "2026-11-02T20:32:53.384235+00:00",
+      "source_pages": [
+        "https://www.bwin.es/es/sports/f%C3%BAtbol-4/apuestas/brasil-33"
+      ]
+    },
+    {
+      "bwin_event_id": "7892566",
+      "bwin_url": "https://www.bwin.es/es/sports/eventos/ec-vitoria-fluminense-rj-2:7892566",
+      "text": "EC Vitoria Fluminense RJ 7/11/26 0:00",
+      "text_observed_at_utc": "2026-11-02T20:32:53.384235+00:00",
+      "source_pages": [
+        "https://www.bwin.es/es/sports/f%C3%BAtbol-4/apuestas/brasil-33"
+      ]
+    },
+    {
+      "bwin_event_id": "7908389",
+      "bwin_url": "https://www.bwin.es/es/sports/eventos/operario-pr-sport-club-do-recife-pe-2:7908389",
+      "text": "Operario PR Sport Recife 6/11/26 23:30 CA",
+      "text_observed_at_utc": "2026-11-02T20:32:53.384235+00:00",
+      "source_pages": [
+        "https://www.bwin.es/es/sports/f%C3%BAtbol-4/apuestas/brasil-33"
+      ]
+    },
+    {
+      "bwin_event_id": "7908388",
+      "bwin_url": "https://www.bwin.es/es/sports/eventos/avai-sc-sao-bernardo-fc-sp-2:7908388",
+      "text": "Avai SC Sao Bernardo FC SP 7/11/26 20:00 CA",
+      "text_observed_at_utc": "2026-11-02T20:32:53.384235+00:00",
+      "source_pages": [
+        "https://www.bwin.es/es/sports/f%C3%BAtbol-4/apuestas/brasil-33"
+      ]
+    },
+    {
+      "bwin_event_id": "7909472",
+      "bwin_url": "https://www.bwin.es/es/sports/eventos/gremio-novorizontino-sp-fortaleza-ce-2:7909472",
+      "text": "Gremio Novorizontino SP Fortaleza CE 7/11/26 20:10 CA",
+      "text_observed_at_utc": "2026-11-02T20:32:53.384235+00:00",
+      "source_pages": [
+        "https://www.bwin.es/es/sports/f%C3%BAtbol-4/apuestas/brasil-33"
+      ]
+    },
+    {
+      "bwin_event_id": "7907188",
+      "bwin_url": "https://www.bwin.es/es/sports/eventos/vila-nova-fc-go-criciuma-ec-sc-2:7907188",
+      "text": "Vila Nova FC GO Criciuma EC SC 8/11/26 0:00 CA",
+      "text_observed_at_utc": "2026-11-02T20:32:53.384235+00:00",
+      "source_pages": [
+        "https://www.bwin.es/es/sports/f%C3%BAtbol-4/apuestas/brasil-33"
+      ]
+    },
+    {
+      "bwin_event_id": "7909475",
+      "bwin_url": "https://www.bwin.es/es/sports/eventos/clube-n%C3%A1utico-capibaribe-pe-crb-al-2:7909475",
+      "text": "Clube Náutico Capibaribe PE CRB AL 8/11/26 1:30 CA",
+      "text_observed_at_utc": "2026-11-02T20:32:53.384235+00:00",
+      "source_pages": [
+        "https://www.bwin.es/es/sports/f%C3%BAtbol-4/apuestas/brasil-33"
+      ]
+    },
+    {
+      "bwin_event_id": "7909476",
+      "bwin_url": "https://www.bwin.es/es/sports/eventos/athletic-club-br-atl%C3%A9tico-goianiense-2:7909476",
+      "text": "Athletic Club BR Atlético Goianiense 8/11/26 20:00 CA",
+      "text_observed_at_utc": "2026-11-02T20:32:53.384235+00:00",
+      "source_pages": [
+        "https://www.bwin.es/es/sports/f%C3%BAtbol-4/apuestas/brasil-33"
+      ]
+    },
+    {
+      "bwin_event_id": "7908377",
+      "bwin_url": "https://www.bwin.es/es/sports/eventos/ca-aldosivi-river-plate-2:7908377",
+      "text": "CA Aldosivi River Plate 8/11/26 21:00 CA",
+      "text_observed_at_utc": "2026-11-02T20:32:56.624929+00:00",
+      "source_pages": [
+        "https://www.bwin.es/es/sports/f%C3%BAtbol-4/apuestas/argentina-38"
+      ]
+    },
+    {
+      "bwin_event_id": "7908378",
+      "bwin_url": "https://www.bwin.es/es/sports/eventos/rosario-central-estudiantes-de-r%C3%ADo-cuarto-2:7908378",
+      "text": "Rosario Central Estudiantes de Río Cuarto 8/11/26 21:00",
+      "text_observed_at_utc": "2026-11-02T20:32:56.624929+00:00",
+      "source_pages": [
+        "https://www.bwin.es/es/sports/f%C3%BAtbol-4/apuestas/argentina-38"
+      ]
+    },
+    {
+      "bwin_event_id": "7908379",
+      "bwin_url": "https://www.bwin.es/es/sports/eventos/ca-tigre-ca-sarmiento-2:7908379",
+      "text": "CA Tigre CA Sarmiento 8/11/26 21:00",
+      "text_observed_at_utc": "2026-11-02T20:32:56.624929+00:00",
+      "source_pages": [
+        "https://www.bwin.es/es/sports/f%C3%BAtbol-4/apuestas/argentina-38"
+      ]
+    },
+    {
+      "bwin_event_id": "7908380",
+      "bwin_url": "https://www.bwin.es/es/sports/eventos/talleres-de-c%C3%B3rdoba-estudiantes-de-la-plata-2:7908380",
+      "text": "Talleres de Córdoba Estudiantes de La Plata 8/11/26 21:00",
+      "text_observed_at_utc": "2026-11-02T20:32:56.624929+00:00",
+      "source_pages": [
+        "https://www.bwin.es/es/sports/f%C3%BAtbol-4/apuestas/argentina-38"
+      ]
+    },
+    {
+      "bwin_event_id": "7908381",
+      "bwin_url": "https://www.bwin.es/es/sports/eventos/ca-boca-juniors-defensa-y-justicia-2:7908381",
+      "text": "Boca Juniors Defensa y Justicia 8/11/26 21:00",
+      "text_observed_at_utc": "2026-11-02T20:32:56.624929+00:00",
+      "source_pages": [
+        "https://www.bwin.es/es/sports/f%C3%BAtbol-4/apuestas/argentina-38"
+      ]
+    },
+    {
+      "bwin_event_id": "7908384",
+      "bwin_url": "https://www.bwin.es/es/sports/eventos/uni%C3%B3n-santa-fe-v%C3%A9lez-sarsfield-2:7908384",
+      "text": "Unión Santa Fe Vélez Sarsfield 8/11/26 21:00",
+      "text_observed_at_utc": "2026-11-02T20:32:56.624929+00:00",
+      "source_pages": [
+        "https://www.bwin.es/es/sports/f%C3%BAtbol-4/apuestas/argentina-38"
+      ]
+    },
+    {
+      "bwin_event_id": "7908385",
+      "bwin_url": "https://www.bwin.es/es/sports/eventos/gimnasia-y-esgrima-la-plata-ca-belgrano-de-c%C3%B3rdo-2:7908385",
+      "text": "Gimnasia Y Esgrima La Plata CA Belgrano de Córdoba 8/11/26 21:00",
+      "text_observed_at_utc": "2026-11-02T20:32:56.624929+00:00",
+      "source_pages": [
+        "https://www.bwin.es/es/sports/f%C3%BAtbol-4/apuestas/argentina-38"
+      ]
+    },
+    {
+      "bwin_event_id": "7908386",
+      "bwin_url": "https://www.bwin.es/es/sports/eventos/instituto-ac-c%C3%B3rdoba-newell%C2%B4s-old-boys-2:7908386",
+      "text": "Instituto AC Córdoba Newell´s Old Boys 8/11/26 21:00",
+      "text_observed_at_utc": "2026-11-02T20:32:56.624929+00:00",
+      "source_pages": [
+        "https://www.bwin.es/es/sports/f%C3%BAtbol-4/apuestas/argentina-38"
+      ]
+    },
+    {
+      "bwin_event_id": "7908387",
+      "bwin_url": "https://www.bwin.es/es/sports/eventos/barracas-central-racing-club-avellaneda-2:7908387",
+      "text": "Barracas Central Racing Club Avellaneda 8/11/26 21:00",
+      "text_observed_at_utc": "2026-11-02T20:32:56.624929+00:00",
+      "source_pages": [
+        "https://www.bwin.es/es/sports/f%C3%BAtbol-4/apuestas/argentina-38"
+      ]
+    },
+    {
+      "bwin_event_id": "7908394",
+      "bwin_url": "https://www.bwin.es/es/sports/eventos/ca-banfield-atl%C3%A9tico-tucum%C3%A1n-2:7908394",
+      "text": "CA Banfield Atlético Tucumán 8/11/26 21:00",
+      "text_observed_at_utc": "2026-11-02T20:32:56.624929+00:00",
+      "source_pages": [
+        "https://www.bwin.es/es/sports/f%C3%BAtbol-4/apuestas/argentina-38"
+      ]
+    },
+    {
+      "bwin_event_id": "7900284",
+      "bwin_url": "https://www.bwin.es/es/sports/eventos/deportivo-la-coru%C3%B1a-osasuna-2:7900284",
+      "text": "LaLiga LIVE 1T • 30:27 Deportivo La Coruña 0 - 0 Osasuna",
+      "text_observed_at_utc": "2026-11-02T20:33:12.736911+00:00",
+      "source_pages": [
+        "https://www.bwin.es/es/sports/f%C3%BAtbol-4/hoy",
+        "https://www.bwin.es/es/sports/f%C3%BAtbol-4"
+      ]
+    },
+    {
+      "bwin_event_id": "7900526",
+      "bwin_url": "https://www.bwin.es/es/sports/eventos/mallorca-c%C3%A1diz-cf-2:7900526",
+      "text": "LaLiga 2 LIVE 1T • 30:06 Mallorca 0 - 0 Cádiz",
+      "text_observed_at_utc": "2026-11-02T20:33:12.736911+00:00",
+      "source_pages": [
+        "https://www.bwin.es/es/sports/f%C3%BAtbol-4/hoy",
+        "https://www.bwin.es/es/sports/f%C3%BAtbol-4"
+      ]
+    },
+    {
+      "bwin_event_id": "7898207",
+      "bwin_url": "https://www.bwin.es/es/sports/eventos/newcastle-united-everton-fc-2:7898207",
+      "text": "Premier League LIVE 1T • 33:01 Newcastle 0 - 0 Everton",
+      "text_observed_at_utc": "2026-11-02T20:33:12.736911+00:00",
+      "source_pages": [
+        "https://www.bwin.es/es/sports/f%C3%BAtbol-4/hoy",
+        "https://www.bwin.es/es/sports/f%C3%BAtbol-4"
+      ]
+    },
+    {
+      "bwin_event_id": "7900501",
+      "bwin_url": "https://www.bwin.es/es/sports/eventos/atalanta-parma-2:7900501",
+      "text": "Serie A LIVE 1T • 47:36 Atalanta 0 - 1 Parma",
+      "text_observed_at_utc": "2026-11-02T20:33:12.736911+00:00",
+      "source_pages": [
+        "https://www.bwin.es/es/sports/f%C3%BAtbol-4/hoy",
+        "https://www.bwin.es/es/sports/f%C3%BAtbol-4"
+      ]
+    },
+    {
+      "bwin_event_id": "7898692",
+      "bwin_url": "https://www.bwin.es/es/sports/eventos/fc-lorient-stade-brestois-29-2:7898692",
+      "text": "Ligue 1 LIVE Descanso FC Lorient 0 - 0 Stade Brestois 29",
+      "text_observed_at_utc": "2026-11-02T20:33:12.736911+00:00",
+      "source_pages": [
+        "https://www.bwin.es/es/sports/f%C3%BAtbol-4/hoy",
+        "https://www.bwin.es/es/sports/f%C3%BAtbol-4"
+      ]
+    },
+    {
+      "bwin_event_id": "7899236",
+      "bwin_url": "https://www.bwin.es/es/sports/eventos/ca-platense-ca-central-c%C3%B3rdoba-sde-2:7899236",
+      "text": "CA Platense CA Central Córdoba SdE Hoy / 23:00 CA 1",
+      "text_observed_at_utc": "2026-11-02T20:33:25.591693+00:00",
+      "source_pages": [
+        "https://www.bwin.es/es/sports/f%C3%BAtbol-4/hoy",
+        "https://www.bwin.es/es/sports/f%C3%BAtbol-4/apuestas/argentina-38"
+      ]
+    },
+    {
+      "bwin_event_id": "7899237",
+      "bwin_url": "https://www.bwin.es/es/sports/eventos/defensa-y-justicia-ca-independiente-2:7899237",
+      "text": "Defensa y Justicia CA Independiente Hoy / 23:00 CA 1",
+      "text_observed_at_utc": "2026-11-02T20:33:25.591693+00:00",
+      "source_pages": [
+        "https://www.bwin.es/es/sports/f%C3%BAtbol-4/hoy",
+        "https://www.bwin.es/es/sports/f%C3%BAtbol-4/apuestas/argentina-38"
+      ]
+    },
+    {
+      "bwin_event_id": "7896059",
+      "bwin_url": "https://www.bwin.es/es/sports/eventos/benfica-fc-alverca-2:7896059",
+      "text": "Liga Portugal LIVE 1T • 15:58 Benfica 0 - 0 FC Alverca",
+      "text_observed_at_utc": "2026-11-02T20:33:12.736911+00:00",
+      "source_pages": [
+        "https://www.bwin.es/es/sports/f%C3%BAtbol-4/hoy",
+        "https://www.bwin.es/es/sports/f%C3%BAtbol-4"
+      ]
+    },
+    {
+      "bwin_event_id": "7896064",
+      "bwin_url": "https://www.bwin.es/es/sports/eventos/gil-vicente-fc-vitoria-guimaraes-sc-2:7896064",
+      "text": "Liga Portugal LIVE 1T • 16:03 Gil Vicente 0 - 0 Vitoria Guimaraes SC",
+      "text_observed_at_utc": "2026-11-02T20:33:12.736911+00:00",
+      "source_pages": [
+        "https://www.bwin.es/es/sports/f%C3%BAtbol-4/hoy",
+        "https://www.bwin.es/es/sports/f%C3%BAtbol-4"
+      ]
+    },
+    {
+      "bwin_event_id": "7900499",
+      "bwin_url": "https://www.bwin.es/es/sports/eventos/red-star-fc-as-nancy-lorraine-2:7900499",
+      "text": "Red Star FC AS Nancy Lorraine Live1T • 47:51 CA 1111",
+      "text_observed_at_utc": "2026-11-02T20:33:06.120599+00:00",
+      "source_pages": [
+        "https://www.bwin.es/es/sports/f%C3%BAtbol-4/hoy"
+      ]
+    },
+    {
+      "bwin_event_id": "7905512",
+      "bwin_url": "https://www.bwin.es/es/sports/eventos/stade-reims-fc-sochaux-2:7905512",
+      "text": "Stade Reims FC Sochaux LiveDescanso CA 2200",
+      "text_observed_at_utc": "2026-11-02T20:33:06.120599+00:00",
+      "source_pages": [
+        "https://www.bwin.es/es/sports/f%C3%BAtbol-4/hoy"
+      ]
+    },
+    {
+      "bwin_event_id": "7905219",
+      "bwin_url": "https://www.bwin.es/es/sports/eventos/rks-rakow-czestochowa-pogon-szczecin-2:7905219",
+      "text": "RKS Rakow Czestochowa Pogon Szczecin LiveDescanso CA 0011",
+      "text_observed_at_utc": "2026-11-02T20:33:06.120599+00:00",
+      "source_pages": [
+        "https://www.bwin.es/es/sports/f%C3%BAtbol-4/hoy"
+      ]
+    },
+    {
+      "bwin_event_id": "7900509",
+      "bwin_url": "https://www.bwin.es/es/sports/eventos/%C3%A1guilas-doradas-fortaleza-ceif-2:7900509",
+      "text": "Águilas Doradas Fortaleza CEIF Comienza en 31 min CA",
+      "text_observed_at_utc": "2026-11-02T20:33:06.120599+00:00",
+      "source_pages": [
+        "https://www.bwin.es/es/sports/f%C3%BAtbol-4/hoy"
+      ]
+    },
+    {
+      "bwin_event_id": "7905223",
+      "bwin_url": "https://www.bwin.es/es/sports/eventos/deportes-limache-audax-italiano-2:7905223",
+      "text": "Deportes Limache Audax Italiano Comienza en 26 min CA",
+      "text_observed_at_utc": "2026-11-02T20:33:06.120599+00:00",
+      "source_pages": [
+        "https://www.bwin.es/es/sports/f%C3%BAtbol-4/hoy"
+      ]
+    },
+    {
+      "bwin_event_id": "7905328",
+      "bwin_url": "https://www.bwin.es/es/sports/eventos/cd-real-tomayapo-club-blooming-2:7905328",
+      "text": "CD Real Tomayapo Blooming Comienza en 41 min CA",
+      "text_observed_at_utc": "2026-11-02T20:33:06.120599+00:00",
+      "source_pages": [
+        "https://www.bwin.es/es/sports/f%C3%BAtbol-4/hoy"
+      ]
+    },
+    {
+      "bwin_event_id": "7909335",
+      "bwin_url": "https://www.bwin.es/es/sports/eventos/gzira-united-fc-marsaxlokk-fc-2:7909335",
+      "text": "Gzira United FC Marsaxlokk FC Live2T • 75:48 CA 0044",
+      "text_observed_at_utc": "2026-11-02T20:33:06.120599+00:00",
+      "source_pages": [
+        "https://www.bwin.es/es/sports/f%C3%BAtbol-4/hoy"
+      ]
+    },
+    {
+      "bwin_event_id": "7905214",
+      "bwin_url": "https://www.bwin.es/es/sports/eventos/jong-ajax-amsterdam-vitesse-2:7905214",
+      "text": "Jong Ajax Amsterdam Vitesse Live2T • 73:42 CA 1100",
+      "text_observed_at_utc": "2026-11-02T20:33:06.120599+00:00",
+      "source_pages": [
+        "https://www.bwin.es/es/sports/f%C3%BAtbol-4/hoy"
+      ]
+    },
+    {
+      "bwin_event_id": "7905215",
+      "bwin_url": "https://www.bwin.es/es/sports/eventos/jong-fc-utrecht-fc-dordrecht-2:7905215",
+      "text": "Jong FC Utrecht FC Dordrecht Live2T • 74:45 CA 33221",
+      "text_observed_at_utc": "2026-11-02T20:33:06.120599+00:00",
+      "source_pages": [
+        "https://www.bwin.es/es/sports/f%C3%BAtbol-4/hoy"
+      ]
+    },
+    {
+      "bwin_event_id": "7905216",
+      "bwin_url": "https://www.bwin.es/es/sports/eventos/jong-psv-eindhoven-nac-breda-2:7905216",
+      "text": "Jong PSV Eindhoven NAC Breda Live2T • 73:06 CA 00001",
+      "text_observed_at_utc": "2026-11-02T20:33:06.120599+00:00",
+      "source_pages": [
+        "https://www.bwin.es/es/sports/f%C3%BAtbol-4/hoy"
+      ]
+    },
+    {
+      "bwin_event_id": "7905287",
+      "bwin_url": "https://www.bwin.es/es/sports/eventos/heracles-almelo-top-oss-2:7905287",
+      "text": "Heracles Almelo TOP Oss Live2T • 69:19 CA 1100",
+      "text_observed_at_utc": "2026-11-02T20:33:06.120599+00:00",
+      "source_pages": [
+        "https://www.bwin.es/es/sports/f%C3%BAtbol-4/hoy"
+      ]
+    },
+    {
+      "bwin_event_id": "7905283",
+      "bwin_url": "https://www.bwin.es/es/sports/eventos/cd-tenerife-f-athletic-club-f-2:7905283",
+      "text": "Liga F LIVE 1T • 32:06 CD Tenerife 0 - 0 Athletic Club",
+      "text_observed_at_utc": "2026-11-02T20:33:12.736911+00:00",
+      "source_pages": [
+        "https://www.bwin.es/es/sports/f%C3%BAtbol-4/hoy",
+        "https://www.bwin.es/es/sports/f%C3%BAtbol-4"
+      ]
+    },
+    {
+      "bwin_event_id": "7905330",
+      "bwin_url": "https://www.bwin.es/es/sports/eventos/sd-huesca-gimn%C3%A0stic-de-tarragona-2:7905330",
+      "text": "SD Huesca Gimnàstic de Tarragona LiveDescanso CA 1100",
+      "text_observed_at_utc": "2026-11-02T20:33:06.120599+00:00",
+      "source_pages": [
+        "https://www.bwin.es/es/sports/f%C3%BAtbol-4/hoy"
+      ]
+    },
+    {
+      "bwin_event_id": "7905295",
+      "bwin_url": "https://www.bwin.es/es/sports/eventos/chelmsford-city-farnham-town-2:7905295",
+      "text": "Chelmsford City Farnham Town LiveDescanso CA 0000",
+      "text_observed_at_utc": "2026-11-02T20:33:06.120599+00:00",
+      "source_pages": [
+        "https://www.bwin.es/es/sports/f%C3%BAtbol-4/hoy"
+      ]
+    },
+    {
+      "bwin_event_id": "7905285",
+      "bwin_url": "https://www.bwin.es/es/sports/eventos/aveley-fc-st-albans-city-2:7905285",
+      "text": "Aveley FC St Albans City LiveDescanso CA 0000",
+      "text_observed_at_utc": "2026-11-02T20:33:06.120599+00:00",
+      "source_pages": [
+        "https://www.bwin.es/es/sports/f%C3%BAtbol-4/hoy"
+      ]
+    },
+    {
+      "bwin_event_id": "7905321",
+      "bwin_url": "https://www.bwin.es/es/sports/eventos/juventus-fc-b-next-gen-pro-vercelli-2:7905321",
+      "text": "Juventus FC B Next Gen Pro Vercelli Live2T • 46:49 CA 1100",
+      "text_observed_at_utc": "2026-11-02T20:33:06.120599+00:00",
+      "source_pages": [
+        "https://www.bwin.es/es/sports/f%C3%BAtbol-4/hoy"
+      ]
+    },
+    {
+      "bwin_event_id": "7905322",
+      "bwin_url": "https://www.bwin.es/es/sports/eventos/novara-fc-desenzano-fc-2:7905322",
+      "text": "Novara Desenzano FC LiveDescanso CA 1100",
+      "text_observed_at_utc": "2026-11-02T20:33:06.120599+00:00",
+      "source_pages": [
+        "https://www.bwin.es/es/sports/f%C3%BAtbol-4/hoy"
+      ]
+    },
+    {
+      "bwin_event_id": "7905324",
+      "bwin_url": "https://www.bwin.es/es/sports/eventos/ssd-casarano-calcio-foggia-2:7905324",
+      "text": "SSD Casarano Calcio Foggia Live2T • 45:14 CA 1111",
+      "text_observed_at_utc": "2026-11-02T20:33:06.120599+00:00",
+      "source_pages": [
+        "https://www.bwin.es/es/sports/f%C3%BAtbol-4/hoy"
+      ]
+    },
+    {
+      "bwin_event_id": "7905300",
+      "bwin_url": "https://www.bwin.es/es/sports/eventos/acf-fiorentina-f-juventus-f-2:7905300",
+      "text": "ACF Fiorentina F Juventus FLiveDescanso CA 0011",
+      "text_observed_at_utc": "2026-11-02T20:33:06.120599+00:00",
+      "source_pages": [
+        "https://www.bwin.es/es/sports/f%C3%BAtbol-4/hoy"
+      ]
+    },
+    {
+      "bwin_event_id": "7905199",
+      "bwin_url": "https://www.bwin.es/es/sports/eventos/fortaleza-ce-atl%C3%A9tico-goianiense-2:7905199",
+      "text": "Fortaleza CE Atlético Goianiense Live2T • 71:46 CA 0000",
+      "text_observed_at_utc": "2026-11-02T20:33:06.120599+00:00",
+      "source_pages": [
+        "https://www.bwin.es/es/sports/f%C3%BAtbol-4/hoy"
+      ]
+    },
+    {
+      "bwin_event_id": "7905551",
+      "bwin_url": "https://www.bwin.es/es/sports/eventos/athletic-club-br-cear%C3%A1-2:7905551",
+      "text": "Athletic Club BR Ceará Comienza en 26 min CA",
+      "text_observed_at_utc": "2026-11-02T20:33:06.120599+00:00",
+      "source_pages": [
+        "https://www.bwin.es/es/sports/f%C3%BAtbol-4/hoy"
+      ]
+    },
+    {
+      "bwin_event_id": "7905157",
+      "bwin_url": "https://www.bwin.es/es/sports/eventos/lunes-combi-2:7905157",
+      "text": "Lunes Combi+Hoy / 23:00",
+      "text_observed_at_utc": "2026-11-02T20:33:06.120599+00:00",
+      "source_pages": [
+        "https://www.bwin.es/es/sports/f%C3%BAtbol-4/hoy"
+      ]
+    },
+    {
+      "bwin_event_id": "7905289",
+      "bwin_url": "https://www.bwin.es/es/sports/eventos/preston-north-end-sub-21-fleetwood-town-sub-21-2:7905289",
+      "text": "Preston North End Sub-21 Fleetwood Town Sub-21Live2T • 76:05 CA 11001",
+      "text_observed_at_utc": "2026-11-02T20:33:06.120599+00:00",
+      "source_pages": [
+        "https://www.bwin.es/es/sports/f%C3%BAtbol-4/hoy"
+      ]
+    },
+    {
+      "bwin_event_id": "7905290",
+      "bwin_url": "https://www.bwin.es/es/sports/eventos/bolton-wanderers-sub-21-queens-park-rangers-sub-2:7905290",
+      "text": "Bolton Wanderers Sub-21 Queens Park Rangers Sub-21Live2T • 73:07 CA 0044",
+      "text_observed_at_utc": "2026-11-02T20:33:06.120599+00:00",
+      "source_pages": [
+        "https://www.bwin.es/es/sports/f%C3%BAtbol-4/hoy"
+      ]
+    },
+    {
+      "bwin_event_id": "7905291",
+      "bwin_url": "https://www.bwin.es/es/sports/eventos/wycombe-wanderers-reservas-brentford-sub-21-2:7905291",
+      "text": "Wycombe Wanderers Reservas Brentford Sub-21Live2T • 74:59 CA 1111",
+      "text_observed_at_utc": "2026-11-02T20:33:06.120599+00:00",
+      "source_pages": [
+        "https://www.bwin.es/es/sports/f%C3%BAtbol-4/hoy"
+      ]
+    },
+    {
+      "bwin_event_id": "7905292",
+      "bwin_url": "https://www.bwin.es/es/sports/eventos/afc-bournemouth-sub-21-cardiff-city-fc-sub-21-2:7905292",
+      "text": "AFC Bournemouth Sub-21 Cardiff City FC Sub-21Live2T • 74:51 CA 3311",
+      "text_observed_at_utc": "2026-11-02T20:33:06.120599+00:00",
+      "source_pages": [
+        "https://www.bwin.es/es/sports/f%C3%BAtbol-4/hoy"
+      ]
+    },
+    {
+      "bwin_event_id": "7905293",
+      "bwin_url": "https://www.bwin.es/es/sports/eventos/exeter-city-sub-21-reading-fc-sub-21-2:7905293",
+      "text": "Exeter City Sub-21 Reading FC Sub-21Live2T • 74:22 CA 3322",
+      "text_observed_at_utc": "2026-11-02T20:33:06.120599+00:00",
+      "source_pages": [
+        "https://www.bwin.es/es/sports/f%C3%BAtbol-4/hoy"
+      ]
+    },
+    {
+      "bwin_event_id": "7905294",
+      "bwin_url": "https://www.bwin.es/es/sports/eventos/hull-city-sub-21-derby-county-sub-21-2:7905294",
+      "text": "Hull City Sub-21 Derby County Sub-21Live2T • 74:02 CA 0000",
+      "text_observed_at_utc": "2026-11-02T20:33:06.120599+00:00",
+      "source_pages": [
+        "https://www.bwin.es/es/sports/f%C3%BAtbol-4/hoy"
+      ]
+    },
+    {
+      "bwin_event_id": "7902306",
+      "bwin_url": "https://www.bwin.es/es/sports/eventos/maccabi-ironi-ashdod-h-ramat-hasharon-2:7902306",
+      "text": "Maccabi Ironi Ashdod H. Ramat HaSharon Live2T • 82:45 CA 1111",
+      "text_observed_at_utc": "2026-11-02T20:33:06.120599+00:00",
+      "source_pages": [
+        "https://www.bwin.es/es/sports/f%C3%BAtbol-4/hoy"
+      ]
+    },
+    {
+      "bwin_event_id": "7905217",
+      "bwin_url": "https://www.bwin.es/es/sports/eventos/zks-stal-rzeszow-puszcza-niepolomice-2:7905217",
+      "text": "ZKS Stal Rzeszow Puszcza Niepolomice LiveDescanso CA 0011",
+      "text_observed_at_utc": "2026-11-02T20:33:06.120599+00:00",
+      "source_pages": [
+        "https://www.bwin.es/es/sports/f%C3%BAtbol-4/hoy"
+      ]
+    },
+    {
+      "bwin_event_id": "7905218",
+      "bwin_url": "https://www.bwin.es/es/sports/eventos/lks-lodz-polonia-varsovia-2:7905218",
+      "text": "LKS Lodz Polonia Varsovia LiveDescanso CA 0000",
+      "text_observed_at_utc": "2026-11-02T20:33:06.120599+00:00",
+      "source_pages": [
+        "https://www.bwin.es/es/sports/f%C3%BAtbol-4/hoy"
+      ]
+    },
+    {
+      "bwin_event_id": "7905372",
+      "bwin_url": "https://www.bwin.es/es/sports/eventos/cr-belouizdad-js-saoura-2:7905372",
+      "text": "CR Belouizdad JS Saoura Live2T • 71:01 CA 1100",
+      "text_observed_at_utc": "2026-11-02T20:33:06.120599+00:00",
+      "source_pages": [
+        "https://www.bwin.es/es/sports/f%C3%BAtbol-4/hoy"
+      ]
+    },
+    {
+      "bwin_event_id": "7908277",
+      "bwin_url": "https://www.bwin.es/es/sports/eventos/coleraine-fc-sub-20-ballymena-united-fc-sub-20-2:7908277",
+      "text": "Coleraine FC Sub-20 Ballymena United FC Sub-20Live1T • 32:17 CA 1100",
+      "text_observed_at_utc": "2026-11-02T20:33:06.120599+00:00",
+      "source_pages": [
+        "https://www.bwin.es/es/sports/f%C3%BAtbol-4/hoy"
+      ]
+    },
+    {
+      "bwin_event_id": "7908278",
+      "bwin_url": "https://www.bwin.es/es/sports/eventos/limavady-united-sub-20-cliftonville-olympic-sub-2:7908278",
+      "text": "Limavady United Sub-20 Cliftonville Olympic Sub-20Live1T • 32:40 CA 1122",
+      "text_observed_at_utc": "2026-11-02T20:33:06.120599+00:00",
+      "source_pages": [
+        "https://www.bwin.es/es/sports/f%C3%BAtbol-4/hoy"
+      ]
+    },
+    {
+      "bwin_event_id": "7908279",
+      "bwin_url": "https://www.bwin.es/es/sports/eventos/portadown-sub-20-dungannon-swifts-sub-20-2:7908279",
+      "text": "Portadown Sub-20 Dungannon Swifts Sub-20Live1T • 16:48 CA 0000",
+      "text_observed_at_utc": "2026-11-02T20:33:06.120599+00:00",
+      "source_pages": [
+        "https://www.bwin.es/es/sports/f%C3%BAtbol-4/hoy"
+      ]
+    },
+    {
+      "bwin_event_id": "7905225",
+      "bwin_url": "https://www.bwin.es/es/sports/eventos/independiente-yumbo-boca-juniors-de-cali-2:7905225",
+      "text": "Independiente Yumbo Boca Juniors de Cali Live2T • 75:11 CA 2233",
+      "text_observed_at_utc": "2026-11-02T20:33:06.120599+00:00",
+      "source_pages": [
+        "https://www.bwin.es/es/sports/f%C3%BAtbol-4/hoy"
+      ]
+    },
+    {
+      "bwin_event_id": "7905344",
+      "bwin_url": "https://www.bwin.es/es/sports/eventos/sporting-cristal-fc-cajamarca-2:7905344",
+      "text": "Sporting Cristal FC Cajamarca Comienza ahora CA",
+      "text_observed_at_utc": "2026-11-02T20:33:06.120599+00:00",
+      "source_pages": [
+        "https://www.bwin.es/es/sports/f%C3%BAtbol-4/hoy"
+      ]
+    },
+    {
+      "bwin_event_id": "7908274",
+      "bwin_url": "https://www.bwin.es/es/sports/eventos/deportivo-italiano-deportivo-lsm-2:7908274",
+      "text": "Deportivo Italiano Deportivo LSM Live2T • 64:01 CA 0033",
+      "text_observed_at_utc": "2026-11-02T20:33:06.120599+00:00",
+      "source_pages": [
+        "https://www.bwin.es/es/sports/f%C3%BAtbol-4/hoy"
+      ]
+    },
+    {
+      "bwin_event_id": "7906427",
+      "bwin_url": "https://www.bwin.es/es/sports/eventos/as-douanes-nouakchott-fc-nouadhibou-2:7906427",
+      "text": "AS Douanes Nouakchott FC Nouadhibou Live1T • 43:10 CA 1111",
+      "text_observed_at_utc": "2026-11-02T20:33:06.120599+00:00",
+      "source_pages": [
+        "https://www.bwin.es/es/sports/f%C3%BAtbol-4/hoy"
+      ]
+    },
+    {
+      "bwin_event_id": "7906192",
+      "bwin_url": "https://www.bwin.es/es/sports/eventos/la-luz-fc-reservas-central-espanol-fc-reservas-2:7906192",
+      "text": "La Luz FC Reservas Central Espanol FC ReservasLive2T • 73:27 CA 1133",
+      "text_observed_at_utc": "2026-11-02T20:33:06.120599+00:00",
+      "source_pages": [
+        "https://www.bwin.es/es/sports/f%C3%BAtbol-4/hoy"
+      ]
+    },
+    {
+      "bwin_event_id": "7906031",
+      "bwin_url": "https://www.bwin.es/es/sports/eventos/cd-anaitasuna-alav%C3%A9s-2:7906031",
+      "text": "CD Anaitasuna Alavés CA",
+      "text_observed_at_utc": "2026-11-02T20:33:09.453182+00:00",
+      "source_pages": [
+        "https://www.bwin.es/es/sports/f%C3%BAtbol-4/ma%C3%B1ana"
+      ]
+    },
+    {
+      "bwin_event_id": "7906032",
+      "bwin_url": "https://www.bwin.es/es/sports/eventos/cd-pamplona-eibar-2:7906032",
+      "text": "CD Pamplona Eibar CA",
+      "text_observed_at_utc": "2026-11-02T20:33:09.453182+00:00",
+      "source_pages": [
+        "https://www.bwin.es/es/sports/f%C3%BAtbol-4/ma%C3%B1ana"
+      ]
+    },
+    {
+      "bwin_event_id": "7817856",
+      "bwin_url": "https://www.bwin.es/es/sports/eventos/uefa-champions-league-2026-27-ganador-2:7817856",
+      "text": "UEFA Champions League 2026/27 – Ganador",
+      "text_observed_at_utc": "2026-11-02T20:33:09.453182+00:00",
+      "source_pages": [
+        "https://www.bwin.es/es/sports/f%C3%BAtbol-4/ma%C3%B1ana"
+      ]
+    },
+    {
+      "bwin_event_id": "7857324",
+      "bwin_url": "https://www.bwin.es/es/sports/eventos/champions-league-2026-27-m%C3%A1ximo-goleador-2:7857324",
+      "text": "Champions League 2026/27 – Máximo goleador",
+      "text_observed_at_utc": "2026-11-02T20:33:09.453182+00:00",
+      "source_pages": [
+        "https://www.bwin.es/es/sports/f%C3%BAtbol-4/ma%C3%B1ana"
+      ]
+    },
+    {
+      "bwin_event_id": "7896143",
+      "bwin_url": "https://www.bwin.es/es/sports/eventos/galatasaray-sk-stuttgart-2:7896143",
+      "text": "Galatasaray SK Stuttgart CA",
+      "text_observed_at_utc": "2026-11-02T20:33:09.453182+00:00",
+      "source_pages": [
+        "https://www.bwin.es/es/sports/f%C3%BAtbol-4/ma%C3%B1ana"
+      ]
+    },
+    {
+      "bwin_event_id": "7896152",
+      "bwin_url": "https://www.bwin.es/es/sports/eventos/shakhtar-donetsk-sporting-cp-2:7896152",
+      "text": "Shakhtar Donetsk Sporting CP CA",
+      "text_observed_at_utc": "2026-11-02T20:33:09.453182+00:00",
+      "source_pages": [
+        "https://www.bwin.es/es/sports/f%C3%BAtbol-4/ma%C3%B1ana"
+      ]
+    },
+    {
+      "bwin_event_id": "7896145",
+      "bwin_url": "https://www.bwin.es/es/sports/eventos/at-madrid-bayern-2:7896145",
+      "text": "Atlético Madrid Bayern Múnich",
+      "text_observed_at_utc": "2026-11-02T20:33:09.453182+00:00",
+      "source_pages": [
+        "https://www.bwin.es/es/sports/f%C3%BAtbol-4/ma%C3%B1ana"
+      ]
+    },
+    {
+      "bwin_event_id": "7896147",
+      "bwin_url": "https://www.bwin.es/es/sports/eventos/fc-barcelona-aston-villa-2:7896147",
+      "text": "FC Barcelona Aston Villa",
+      "text_observed_at_utc": "2026-11-02T20:33:09.453182+00:00",
+      "source_pages": [
+        "https://www.bwin.es/es/sports/f%C3%BAtbol-4/ma%C3%B1ana"
+      ]
+    },
+    {
+      "bwin_event_id": "7896149",
+      "bwin_url": "https://www.bwin.es/es/sports/eventos/bodo-glimt-lille-osc-2:7896149",
+      "text": "Bodo Glimt Lille OSC",
+      "text_observed_at_utc": "2026-11-02T20:33:09.453182+00:00",
+      "source_pages": [
+        "https://www.bwin.es/es/sports/f%C3%BAtbol-4/ma%C3%B1ana"
+      ]
+    },
+    {
+      "bwin_event_id": "7896151",
+      "bwin_url": "https://www.bwin.es/es/sports/eventos/manchester-united-as-roma-2:7896151",
+      "text": "Man United AS Roma",
+      "text_observed_at_utc": "2026-11-02T20:33:09.453182+00:00",
+      "source_pages": [
+        "https://www.bwin.es/es/sports/f%C3%BAtbol-4/ma%C3%B1ana"
+      ]
+    },
+    {
+      "bwin_event_id": "7896153",
+      "bwin_url": "https://www.bwin.es/es/sports/eventos/feyenoord-rotterdam-inter-mil%C3%A1n-2:7896153",
+      "text": "Feyenoord Rotterdam Inter Milán",
+      "text_observed_at_utc": "2026-11-02T20:33:09.453182+00:00",
+      "source_pages": [
+        "https://www.bwin.es/es/sports/f%C3%BAtbol-4/ma%C3%B1ana"
+      ]
+    },
+    {
+      "bwin_event_id": "7896155",
+      "bwin_url": "https://www.bwin.es/es/sports/eventos/lask-sk-slovan-bratislava-2:7896155",
+      "text": "LASK SK Slovan Bratislava",
+      "text_observed_at_utc": "2026-11-02T20:33:09.453182+00:00",
+      "source_pages": [
+        "https://www.bwin.es/es/sports/f%C3%BAtbol-4/ma%C3%B1ana"
+      ]
+    },
+    {
+      "bwin_event_id": "7896156",
+      "bwin_url": "https://www.bwin.es/es/sports/eventos/villarreal-psg-2:7896156",
+      "text": "Villarreal PSG",
+      "text_observed_at_utc": "2026-11-02T20:33:09.453182+00:00",
+      "source_pages": [
+        "https://www.bwin.es/es/sports/f%C3%BAtbol-4/ma%C3%B1ana"
+      ]
+    },
+    {
+      "bwin_event_id": "7890932",
+      "bwin_url": "https://www.bwin.es/es/sports/eventos/red-bull-bragantino-santos-2:7890932",
+      "text": "Red Bull Bragantino Santos Mañana / 0:00 CA",
+      "text_observed_at_utc": "2026-11-02T20:33:09.453182+00:00",
+      "source_pages": [
+        "https://www.bwin.es/es/sports/f%C3%BAtbol-4/ma%C3%B1ana"
+      ]
+    },
+    {
+      "bwin_event_id": "7891271",
+      "bwin_url": "https://www.bwin.es/es/sports/eventos/chapecoense-mirassol-2:7891271",
+      "text": "Chapecoense Mirassol Mañana / 23:30 CA",
+      "text_observed_at_utc": "2026-11-02T20:33:09.453182+00:00",
+      "source_pages": [
+        "https://www.bwin.es/es/sports/f%C3%BAtbol-4/ma%C3%B1ana"
+      ]
+    },
+    {
+      "bwin_event_id": "7899234",
+      "bwin_url": "https://www.bwin.es/es/sports/eventos/atl%C3%A9tico-tucum%C3%A1n-argentinos-juniors-2:7899234",
+      "text": "Atlético Tucumán Argentinos Juniors Mañana / 1:15 CA 1",
+      "text_observed_at_utc": "2026-11-02T20:33:25.591693+00:00",
+      "source_pages": [
+        "https://www.bwin.es/es/sports/f%C3%BAtbol-4/ma%C3%B1ana",
+        "https://www.bwin.es/es/sports/f%C3%BAtbol-4/apuestas/argentina-38"
+      ]
+    },
+    {
+      "bwin_event_id": "7899238",
+      "bwin_url": "https://www.bwin.es/es/sports/eventos/independiente-rivadavia-ca-banfield-2:7899238",
+      "text": "Independiente Rivadavia CA Banfield Mañana / 1:15 CA 1",
+      "text_observed_at_utc": "2026-11-02T20:33:25.591693+00:00",
+      "source_pages": [
+        "https://www.bwin.es/es/sports/f%C3%BAtbol-4/ma%C3%B1ana",
+        "https://www.bwin.es/es/sports/f%C3%BAtbol-4/apuestas/argentina-38"
+      ]
+    },
+    {
+      "bwin_event_id": "7900823",
+      "bwin_url": "https://www.bwin.es/es/sports/eventos/blackburn-stoke-2:7900823",
+      "text": "Blackburn Rovers Stoke City Mañana / 20:45 CA",
+      "text_observed_at_utc": "2026-11-02T20:33:09.453182+00:00",
+      "source_pages": [
+        "https://www.bwin.es/es/sports/f%C3%BAtbol-4/ma%C3%B1ana"
+      ]
+    },
+    {
+      "bwin_event_id": "7900825",
+      "bwin_url": "https://www.bwin.es/es/sports/eventos/preston-north-end-sheffield-united-fc-2:7900825",
+      "text": "Preston North End Sheffield United FC Mañana / 20:45 CA",
+      "text_observed_at_utc": "2026-11-02T20:33:09.453182+00:00",
+      "source_pages": [
+        "https://www.bwin.es/es/sports/f%C3%BAtbol-4/ma%C3%B1ana"
+      ]
+    },
+    {
+      "bwin_event_id": "7900828",
+      "bwin_url": "https://www.bwin.es/es/sports/eventos/queens-park-rangers-burnley-2:7900828",
+      "text": "Queens Park Rangers Burnley Mañana / 20:45 CA",
+      "text_observed_at_utc": "2026-11-02T20:33:09.453182+00:00",
+      "source_pages": [
+        "https://www.bwin.es/es/sports/f%C3%BAtbol-4/ma%C3%B1ana"
+      ]
+    },
+    {
+      "bwin_event_id": "7900831",
+      "bwin_url": "https://www.bwin.es/es/sports/eventos/watford-fc-lincoln-city-2:7900831",
+      "text": "Watford FC Lincoln City Mañana / 20:45 CA",
+      "text_observed_at_utc": "2026-11-02T20:33:09.453182+00:00",
+      "source_pages": [
+        "https://www.bwin.es/es/sports/f%C3%BAtbol-4/ma%C3%B1ana"
+      ]
+    },
+    {
+      "bwin_event_id": "7900835",
+      "bwin_url": "https://www.bwin.es/es/sports/eventos/derby-county-norwich-city-2:7900835",
+      "text": "Derby County Norwich Mañana / 20:45 CA",
+      "text_observed_at_utc": "2026-11-02T20:33:09.453182+00:00",
+      "source_pages": [
+        "https://www.bwin.es/es/sports/f%C3%BAtbol-4/ma%C3%B1ana"
+      ]
+    },
+    {
+      "bwin_event_id": "7900837",
+      "bwin_url": "https://www.bwin.es/es/sports/eventos/portsmouth-fc-swansea-city-2:7900837",
+      "text": "Portsmouth FC Swansea City Mañana / 20:45 CA",
+      "text_observed_at_utc": "2026-11-02T20:33:09.453182+00:00",
+      "source_pages": [
+        "https://www.bwin.es/es/sports/f%C3%BAtbol-4/ma%C3%B1ana"
+      ]
+    },
+    {
+      "bwin_event_id": "7900838",
+      "bwin_url": "https://www.bwin.es/es/sports/eventos/charlton-athletic-bolton-wanderers-2:7900838",
+      "text": "Charlton Athletic Bolton Wanderers Mañana / 20:45 CA",
+      "text_observed_at_utc": "2026-11-02T20:33:09.453182+00:00",
+      "source_pages": [
+        "https://www.bwin.es/es/sports/f%C3%BAtbol-4/ma%C3%B1ana"
+      ]
+    },
+    {
+      "bwin_event_id": "7900826",
+      "bwin_url": "https://www.bwin.es/es/sports/eventos/birmingham-city-millwall-fc-2:7900826",
+      "text": "Birmingham City Millwall FC Mañana / 21:00 CA",
+      "text_observed_at_utc": "2026-11-02T20:33:09.453182+00:00",
+      "source_pages": [
+        "https://www.bwin.es/es/sports/f%C3%BAtbol-4/ma%C3%B1ana"
+      ]
+    },
+    {
+      "bwin_event_id": "7900829",
+      "bwin_url": "https://www.bwin.es/es/sports/eventos/west-bromwich-albion-southampton-fc-2:7900829",
+      "text": "West Bromwich Albion Southampton FC Mañana / 21:00 CA",
+      "text_observed_at_utc": "2026-11-02T20:33:09.453182+00:00",
+      "source_pages": [
+        "https://www.bwin.es/es/sports/f%C3%BAtbol-4/ma%C3%B1ana"
+      ]
+    },
+    {
+      "bwin_event_id": "7891307",
+      "bwin_url": "https://www.bwin.es/es/sports/eventos/ik-sirius-halmstads-bk-2:7891307",
+      "text": "IK Sirius Halmstads BK Mañana / 19:00 CA",
+      "text_observed_at_utc": "2026-11-02T20:33:09.453182+00:00",
+      "source_pages": [
+        "https://www.bwin.es/es/sports/f%C3%BAtbol-4/ma%C3%B1ana"
+      ]
+    },
+    {
+      "bwin_event_id": "7904058",
+      "bwin_url": "https://www.bwin.es/es/sports/eventos/albion-fc-deportivo-maldonado-2:7904058",
+      "text": "Albion FC Deportivo Maldonado Mañana / 0:00 CA",
+      "text_observed_at_utc": "2026-11-02T20:33:09.453182+00:00",
+      "source_pages": [
+        "https://www.bwin.es/es/sports/f%C3%BAtbol-4/ma%C3%B1ana"
+      ]
+    },
+    {
+      "bwin_event_id": "7900513",
+      "bwin_url": "https://www.bwin.es/es/sports/eventos/atl%C3%A9tico-bucaramanga-atl%C3%A9tico-nacional-2:7900513",
+      "text": "Atlético Bucaramanga Atlético Nacional Mañana / 2:15 CA",
+      "text_observed_at_utc": "2026-11-02T20:33:09.453182+00:00",
+      "source_pages": [
+        "https://www.bwin.es/es/sports/f%C3%BAtbol-4/ma%C3%B1ana"
+      ]
+    },
+    {
+      "bwin_event_id": "7900684",
+      "bwin_url": "https://www.bwin.es/es/sports/eventos/deportivo-pereira-cd-deportes-tolima-2:7900684",
+      "text": "Deportivo Pereira CD Deportes Tolima Mañana / 21:30 CA",
+      "text_observed_at_utc": "2026-11-02T20:33:09.453182+00:00",
+      "source_pages": [
+        "https://www.bwin.es/es/sports/f%C3%BAtbol-4/ma%C3%B1ana"
+      ]
+    },
+    {
+      "bwin_event_id": "7909128",
+      "bwin_url": "https://www.bwin.es/es/sports/eventos/cs-2-de-mayo-sportivo-trinidense-2:7909128",
+      "text": "CS 2 de Mayo Sportivo Trinidense Mañana / 21:00 CA",
+      "text_observed_at_utc": "2026-11-02T20:33:09.453182+00:00",
+      "source_pages": [
+        "https://www.bwin.es/es/sports/f%C3%BAtbol-4/ma%C3%B1ana"
+      ]
+    },
+    {
+      "bwin_event_id": "7908391",
+      "bwin_url": "https://www.bwin.es/es/sports/eventos/club-nacional-asunci%C3%B3n-sp-san-lorenzo-2:7908391",
+      "text": "Club Nacional Asunción Sp. San Lorenzo Mañana / 23:30 CA",
+      "text_observed_at_utc": "2026-11-02T20:33:09.453182+00:00",
+      "source_pages": [
+        "https://www.bwin.es/es/sports/f%C3%BAtbol-4/ma%C3%B1ana"
+      ]
+    },
+    {
+      "bwin_event_id": "7905236",
+      "bwin_url": "https://www.bwin.es/es/sports/eventos/deportes-concepci%C3%B3n-palestino-2:7905236",
+      "text": "Deportes Concepción Palestino Mañana / 0:30 CA",
+      "text_observed_at_utc": "2026-11-02T20:33:09.453182+00:00",
+      "source_pages": [
+        "https://www.bwin.es/es/sports/f%C3%BAtbol-4/ma%C3%B1ana"
+      ]
+    },
+    {
+      "bwin_event_id": "7900855",
+      "bwin_url": "https://www.bwin.es/es/sports/eventos/huddersfield-town-luton-town-2:7900855",
+      "text": "Huddersfield Town Luton Town Mañana / 20:45 CA",
+      "text_observed_at_utc": "2026-11-02T20:33:09.453182+00:00",
+      "source_pages": [
+        "https://www.bwin.es/es/sports/f%C3%BAtbol-4/ma%C3%B1ana"
+      ]
+    },
+    {
+      "bwin_event_id": "7903945",
+      "bwin_url": "https://www.bwin.es/es/sports/eventos/wigan-athletic-mansfield-town-2:7903945",
+      "text": "Wigan Athletic Mansfield Town Mañana / 20:45 CA",
+      "text_observed_at_utc": "2026-11-02T20:33:09.453182+00:00",
+      "source_pages": [
+        "https://www.bwin.es/es/sports/f%C3%BAtbol-4/ma%C3%B1ana"
+      ]
+    },
+    {
+      "bwin_event_id": "7900862",
+      "bwin_url": "https://www.bwin.es/es/sports/eventos/northampton-town-oldham-athletic-2:7900862",
+      "text": "Northampton Town Oldham Athletic Mañana / 20:45 CA",
+      "text_observed_at_utc": "2026-11-02T20:33:09.453182+00:00",
+      "source_pages": [
+        "https://www.bwin.es/es/sports/f%C3%BAtbol-4/ma%C3%B1ana"
+      ]
+    },
+    {
+      "bwin_event_id": "7908282",
+      "bwin_url": "https://www.bwin.es/es/sports/eventos/cs-desamparados-san-juan-ca-union-de-villa-kraus-2:7908282",
+      "text": "CS Desamparados San Juan CA Unión de Villa Krause Mañana / 1:30 CA",
+      "text_observed_at_utc": "2026-11-02T20:33:09.453182+00:00",
+      "source_pages": [
+        "https://www.bwin.es/es/sports/f%C3%BAtbol-4/ma%C3%B1ana",
+        "https://www.bwin.es/es/sports/f%C3%BAtbol-4/apuestas/argentina-38"
+      ]
+    },
+    {
+      "bwin_event_id": "7905550",
+      "bwin_url": "https://www.bwin.es/es/sports/eventos/goi%C3%A1s-go-crb-al-2:7905550",
+      "text": "Goiás GO CRB AL Mañana / 0:30 CA",
+      "text_observed_at_utc": "2026-11-02T20:33:09.453182+00:00",
+      "source_pages": [
+        "https://www.bwin.es/es/sports/f%C3%BAtbol-4/ma%C3%B1ana"
+      ]
+    },
+    {
+      "bwin_event_id": "7905158",
+      "bwin_url": "https://www.bwin.es/es/sports/eventos/lunes-combi-2:7905158",
+      "text": "Lunes Combi+Mañana / 1:15",
+      "text_observed_at_utc": "2026-11-02T20:33:09.453182+00:00",
+      "source_pages": [
+        "https://www.bwin.es/es/sports/f%C3%BAtbol-4/ma%C3%B1ana"
+      ]
+    },
+    {
+      "bwin_event_id": "7905812",
+      "bwin_url": "https://www.bwin.es/es/sports/eventos/martes-combi-2:7905812",
+      "text": "Martes Combi+Mañana / 18:45",
+      "text_observed_at_utc": "2026-11-02T20:33:09.453182+00:00",
+      "source_pages": [
+        "https://www.bwin.es/es/sports/f%C3%BAtbol-4/ma%C3%B1ana"
+      ]
+    },
+    {
+      "bwin_event_id": "7905813",
+      "bwin_url": "https://www.bwin.es/es/sports/eventos/martes-combi-2:7905813",
+      "text": "Martes Combi+Mañana / 20:45",
+      "text_observed_at_utc": "2026-11-02T20:33:09.453182+00:00",
+      "source_pages": [
+        "https://www.bwin.es/es/sports/f%C3%BAtbol-4/ma%C3%B1ana"
+      ]
+    },
+    {
+      "bwin_event_id": "7905814",
+      "bwin_url": "https://www.bwin.es/es/sports/eventos/martes-combi-2:7905814",
+      "text": "Martes Combi+Mañana / 21:00",
+      "text_observed_at_utc": "2026-11-02T20:33:09.453182+00:00",
+      "source_pages": [
+        "https://www.bwin.es/es/sports/f%C3%BAtbol-4/ma%C3%B1ana"
+      ]
+    },
+    {
+      "bwin_event_id": "7905815",
+      "bwin_url": "https://www.bwin.es/es/sports/eventos/martes-combi-2:7905815",
+      "text": "Martes Combi+Mañana / 21:00",
+      "text_observed_at_utc": "2026-11-02T20:33:09.453182+00:00",
+      "source_pages": [
+        "https://www.bwin.es/es/sports/f%C3%BAtbol-4/ma%C3%B1ana"
+      ]
+    },
+    {
+      "bwin_event_id": "7909413",
+      "bwin_url": "https://www.bwin.es/es/sports/eventos/martes-combi-2:7909413",
+      "text": "Martes Combi+Mañana / 21:00",
+      "text_observed_at_utc": "2026-11-02T20:33:09.453182+00:00",
+      "source_pages": [
+        "https://www.bwin.es/es/sports/f%C3%BAtbol-4/ma%C3%B1ana"
+      ]
+    },
+    {
+      "bwin_event_id": "7905816",
+      "bwin_url": "https://www.bwin.es/es/sports/eventos/martes-combi-2:7905816",
+      "text": "Martes Combi+Mañana / 23:30",
+      "text_observed_at_utc": "2026-11-02T20:33:09.453182+00:00",
+      "source_pages": [
+        "https://www.bwin.es/es/sports/f%C3%BAtbol-4/ma%C3%B1ana"
+      ]
+    },
+    {
+      "bwin_event_id": "7905674",
+      "bwin_url": "https://www.bwin.es/es/sports/eventos/rotherham-united-newcastle-united-sub-21-2:7905674",
+      "text": "Rotherham United Newcastle Sub-21Mañana / 20:00 CA",
+      "text_observed_at_utc": "2026-11-02T20:33:09.453182+00:00",
+      "source_pages": [
+        "https://www.bwin.es/es/sports/f%C3%BAtbol-4/ma%C3%B1ana"
+      ]
+    },
+    {
+      "bwin_event_id": "7905689",
+      "bwin_url": "https://www.bwin.es/es/sports/eventos/newport-county-crystal-palace-sub-21-2:7905689",
+      "text": "Newport County Crystal Palace Sub-21Mañana / 20:00 CA",
+      "text_observed_at_utc": "2026-11-02T20:33:09.453182+00:00",
+      "source_pages": [
+        "https://www.bwin.es/es/sports/f%C3%BAtbol-4/ma%C3%B1ana"
+      ]
+    },
+    {
+      "bwin_event_id": "7905690",
+      "bwin_url": "https://www.bwin.es/es/sports/eventos/cambridge-united-brighton-and-hove-albion-sub-21-2:7905690",
+      "text": "Cambridge United Brighton And Hove Albion Sub-21Mañana / 20:00 CA",
+      "text_observed_at_utc": "2026-11-02T20:33:09.453182+00:00",
+      "source_pages": [
+        "https://www.bwin.es/es/sports/f%C3%BAtbol-4/ma%C3%B1ana"
+      ]
+    },
+    {
+      "bwin_event_id": "7905692",
+      "bwin_url": "https://www.bwin.es/es/sports/eventos/rochdale-doncaster-rovers-fc-2:7905692",
+      "text": "Rochdale Doncaster Rovers FC Mañana / 20:00 CA",
+      "text_observed_at_utc": "2026-11-02T20:33:09.453182+00:00",
+      "source_pages": [
+        "https://www.bwin.es/es/sports/f%C3%BAtbol-4/ma%C3%B1ana"
+      ]
+    },
+    {
+      "bwin_event_id": "7904356",
+      "bwin_url": "https://www.bwin.es/es/sports/eventos/fk-otrant-olympic-ulcinj-fk-arsenal-tivat-2:7904356",
+      "text": "FK Otrant-Olympic Ulcinj FK Arsenal Tivat Mañana / 13:00 CA",
+      "text_observed_at_utc": "2026-11-02T20:33:09.453182+00:00",
+      "source_pages": [
+        "https://www.bwin.es/es/sports/f%C3%BAtbol-4/ma%C3%B1ana"
+      ]
+    },
+    {
+      "bwin_event_id": "7902458",
+      "bwin_url": "https://www.bwin.es/es/sports/eventos/sevilla-alav%C3%A9s-2:7902458",
+      "text": "Sevilla Alavés 6/11/26 21:00 CA",
+      "text_observed_at_utc": "2026-11-02T20:33:12.736911+00:00",
+      "source_pages": [
+        "https://www.bwin.es/es/sports/f%C3%BAtbol-4"
+      ]
+    },
+    {
+      "bwin_event_id": "7903871",
+      "bwin_url": "https://www.bwin.es/es/sports/eventos/m%C3%A1laga-cf-racing-santander-2:7903871",
+      "text": "Málaga CF Racing Santander 7/11/26 14:00 CA",
+      "text_observed_at_utc": "2026-11-02T20:33:12.736911+00:00",
+      "source_pages": [
+        "https://www.bwin.es/es/sports/f%C3%BAtbol-4"
+      ]
+    },
+    {
+      "bwin_event_id": "7903627",
+      "bwin_url": "https://www.bwin.es/es/sports/eventos/espanyol-deportivo-la-coru%C3%B1a-2:7903627",
+      "text": "Espanyol Deportivo La Coruña 7/11/26 16:15",
+      "text_observed_at_utc": "2026-11-02T20:33:12.736911+00:00",
+      "source_pages": [
+        "https://www.bwin.es/es/sports/f%C3%BAtbol-4"
+      ]
+    },
+    {
+      "bwin_event_id": "7903872",
+      "bwin_url": "https://www.bwin.es/es/sports/eventos/osasuna-athletic-club-2:7903872",
+      "text": "Osasuna Athletic Club 7/11/26 18:30",
+      "text_observed_at_utc": "2026-11-02T20:33:12.736911+00:00",
+      "source_pages": [
+        "https://www.bwin.es/es/sports/f%C3%BAtbol-4"
+      ]
+    },
+    {
+      "bwin_event_id": "7903873",
+      "bwin_url": "https://www.bwin.es/es/sports/eventos/valencia-real-madrid-2:7903873",
+      "text": "Valencia Real Madrid 7/11/26 21:00",
+      "text_observed_at_utc": "2026-11-02T20:33:12.736911+00:00",
+      "source_pages": [
+        "https://www.bwin.es/es/sports/f%C3%BAtbol-4"
+      ]
+    },
+    {
+      "bwin_event_id": "7904031",
+      "bwin_url": "https://www.bwin.es/es/sports/eventos/elche-real-betis-2:7904031",
+      "text": "Elche Real Betis 8/11/26 14:00",
+      "text_observed_at_utc": "2026-11-02T20:33:12.736911+00:00",
+      "source_pages": [
+        "https://www.bwin.es/es/sports/f%C3%BAtbol-4"
+      ]
+    },
+    {
+      "bwin_event_id": "7904029",
+      "bwin_url": "https://www.bwin.es/es/sports/eventos/r-sociedad-rayo-2:7904029",
+      "text": "Real Sociedad Rayo Vallecano 8/11/26 16:15",
+      "text_observed_at_utc": "2026-11-02T20:33:12.736911+00:00",
+      "source_pages": [
+        "https://www.bwin.es/es/sports/f%C3%BAtbol-4"
+      ]
+    },
+    {
+      "bwin_event_id": "7904030",
+      "bwin_url": "https://www.bwin.es/es/sports/eventos/villarreal-getafe-2:7904030",
+      "text": "Villarreal Getafe 8/11/26 18:30",
+      "text_observed_at_utc": "2026-11-02T20:33:12.736911+00:00",
+      "source_pages": [
+        "https://www.bwin.es/es/sports/f%C3%BAtbol-4"
+      ]
+    },
+    {
+      "bwin_event_id": "7904043",
+      "bwin_url": "https://www.bwin.es/es/sports/eventos/at-madrid-bar%C3%A7a-2:7904043",
+      "text": "Atlético Madrid FC Barcelona 8/11/26 21:00",
+      "text_observed_at_utc": "2026-11-02T20:33:12.736911+00:00",
+      "source_pages": [
+        "https://www.bwin.es/es/sports/f%C3%BAtbol-4"
+      ]
+    },
+    {
+      "bwin_event_id": "7905326",
+      "bwin_url": "https://www.bwin.es/es/sports/eventos/cd-suchitepequez-cd-malacateco-2:7905326",
+      "text": "Suchitepequez CD Malacateco Mañana / 3:00 CA",
+      "text_observed_at_utc": "2026-11-02T20:33:19.043914+00:00",
+      "source_pages": [
+        "https://www.bwin.es/es/sports/f%C3%BAtbol-4/apuestas/guatemala-127"
+      ]
+    },
+    {
+      "bwin_event_id": "7905661",
+      "bwin_url": "https://www.bwin.es/es/sports/eventos/xelaj%C3%BA-mc-cd-marquense-2:7905661",
+      "text": "Xelajú MC CD Marquense Mañana / 22:00 CA",
+      "text_observed_at_utc": "2026-11-02T20:33:19.043914+00:00",
+      "source_pages": [
+        "https://www.bwin.es/es/sports/f%C3%BAtbol-4/apuestas/guatemala-127"
+      ]
+    },
+    {
+      "bwin_event_id": "7905296",
+      "bwin_url": "https://www.bwin.es/es/sports/eventos/waterhouse-fc-cavalier-fc-2:7905296",
+      "text": "Waterhouse FC Cavalier FC Mañana / 2:00 CA",
+      "text_observed_at_utc": "2026-11-02T20:33:22.298632+00:00",
+      "source_pages": [
+        "https://www.bwin.es/es/sports/f%C3%BAtbol-4/apuestas/jamaica-138"
+      ]
+    },
+    {
+      "bwin_event_id": "7908377",
+      "bwin_url": "https://www.bwin.es/es/sports/eventos/ca-aldosivi-river-plate-2:7908377",
+      "text": "CA Aldosivi River Plate 8/11/26 21:00 CA",
+      "text_observed_at_utc": "2026-11-02T20:33:25.591693+00:00",
+      "source_pages": [
+        "https://www.bwin.es/es/sports/f%C3%BAtbol-4/apuestas/argentina-38"
+      ]
+    },
+    {
+      "bwin_event_id": "7908378",
+      "bwin_url": "https://www.bwin.es/es/sports/eventos/rosario-central-estudiantes-de-r%C3%ADo-cuarto-2:7908378",
+      "text": "Rosario Central Estudiantes de Río Cuarto 8/11/26 21:00",
+      "text_observed_at_utc": "2026-11-02T20:33:25.591693+00:00",
+      "source_pages": [
+        "https://www.bwin.es/es/sports/f%C3%BAtbol-4/apuestas/argentina-38"
+      ]
+    },
+    {
+      "bwin_event_id": "7908379",
+      "bwin_url": "https://www.bwin.es/es/sports/eventos/ca-tigre-ca-sarmiento-2:7908379",
+      "text": "CA Tigre CA Sarmiento 8/11/26 21:00",
+      "text_observed_at_utc": "2026-11-02T20:33:25.591693+00:00",
+      "source_pages": [
+        "https://www.bwin.es/es/sports/f%C3%BAtbol-4/apuestas/argentina-38"
+      ]
+    },
+    {
+      "bwin_event_id": "7908380",
+      "bwin_url": "https://www.bwin.es/es/sports/eventos/talleres-de-c%C3%B3rdoba-estudiantes-de-la-plata-2:7908380",
+      "text": "Talleres de Córdoba Estudiantes de La Plata 8/11/26 21:00",
+      "text_observed_at_utc": "2026-11-02T20:33:25.591693+00:00",
+      "source_pages": [
+        "https://www.bwin.es/es/sports/f%C3%BAtbol-4/apuestas/argentina-38"
+      ]
+    },
+    {
+      "bwin_event_id": "7908381",
+      "bwin_url": "https://www.bwin.es/es/sports/eventos/ca-boca-juniors-defensa-y-justicia-2:7908381",
+      "text": "Boca Juniors Defensa y Justicia 8/11/26 21:00",
+      "text_observed_at_utc": "2026-11-02T20:33:25.591693+00:00",
+      "source_pages": [
+        "https://www.bwin.es/es/sports/f%C3%BAtbol-4/apuestas/argentina-38"
+      ]
+    },
+    {
+      "bwin_event_id": "7908384",
+      "bwin_url": "https://www.bwin.es/es/sports/eventos/uni%C3%B3n-santa-fe-v%C3%A9lez-sarsfield-2:7908384",
+      "text": "Unión Santa Fe Vélez Sarsfield 8/11/26 21:00",
+      "text_observed_at_utc": "2026-11-02T20:33:25.591693+00:00",
+      "source_pages": [
+        "https://www.bwin.es/es/sports/f%C3%BAtbol-4/apuestas/argentina-38"
+      ]
+    },
+    {
+      "bwin_event_id": "7908385",
+      "bwin_url": "https://www.bwin.es/es/sports/eventos/gimnasia-y-esgrima-la-plata-ca-belgrano-de-c%C3%B3rdo-2:7908385",
+      "text": "Gimnasia Y Esgrima La Plata CA Belgrano de Córdoba 8/11/26 21:00",
+      "text_observed_at_utc": "2026-11-02T20:33:25.591693+00:00",
+      "source_pages": [
+        "https://www.bwin.es/es/sports/f%C3%BAtbol-4/apuestas/argentina-38"
+      ]
+    },
+    {
+      "bwin_event_id": "7908386",
+      "bwin_url": "https://www.bwin.es/es/sports/eventos/instituto-ac-c%C3%B3rdoba-newell%C2%B4s-old-boys-2:7908386",
+      "text": "Instituto AC Córdoba Newell´s Old Boys 8/11/26 21:00",
+      "text_observed_at_utc": "2026-11-02T20:33:25.591693+00:00",
+      "source_pages": [
+        "https://www.bwin.es/es/sports/f%C3%BAtbol-4/apuestas/argentina-38"
+      ]
+    },
+    {
+      "bwin_event_id": "7908387",
+      "bwin_url": "https://www.bwin.es/es/sports/eventos/barracas-central-racing-club-avellaneda-2:7908387",
+      "text": "Barracas Central Racing Club Avellaneda 8/11/26 21:00",
+      "text_observed_at_utc": "2026-11-02T20:33:25.591693+00:00",
+      "source_pages": [
+        "https://www.bwin.es/es/sports/f%C3%BAtbol-4/apuestas/argentina-38"
+      ]
+    },
+    {
+      "bwin_event_id": "7908394",
+      "bwin_url": "https://www.bwin.es/es/sports/eventos/ca-banfield-atl%C3%A9tico-tucum%C3%A1n-2:7908394",
+      "text": "CA Banfield Atlético Tucumán 8/11/26 21:00",
+      "text_observed_at_utc": "2026-11-02T20:33:25.591693+00:00",
+      "source_pages": [
+        "https://www.bwin.es/es/sports/f%C3%BAtbol-4/apuestas/argentina-38"
+      ]
+    },
+    {
+      "bwin_event_id": "7902369",
+      "bwin_url": "https://www.bwin.es/es/sports/eventos/atl%C3%A9tico-san-luis-fc-juarez-2:7902369",
+      "text": "Atlético San Luis FC Juárez 7/11/26 2:00 CA",
+      "text_observed_at_utc": "2026-11-02T20:33:28.848094+00:00",
+      "source_pages": [
+        "https://www.bwin.es/es/sports/f%C3%BAtbol-4/apuestas/m%C3%A9xico-43"
+      ]
+    },
+    {
+      "bwin_event_id": "7902371",
+      "bwin_url": "https://www.bwin.es/es/sports/eventos/atlante-fc-club-santos-laguna-2:7902371",
+      "text": "Atlante FC Club Santos Laguna 7/11/26 4:00 CA",
+      "text_observed_at_utc": "2026-11-02T20:33:28.848094+00:00",
+      "source_pages": [
+        "https://www.bwin.es/es/sports/f%C3%BAtbol-4/apuestas/m%C3%A9xico-43"
+      ]
+    },
+    {
+      "bwin_event_id": "7905327",
+      "bwin_url": "https://www.bwin.es/es/sports/eventos/club-le%C3%B3n-fc-f-atl%C3%A9tico-san-luis-f-2:7905327",
+      "text": "Club León FC F Atlético San Luis F Mañana / 2:06 CA",
+      "text_observed_at_utc": "2026-11-02T20:33:28.848094+00:00",
+      "source_pages": [
+        "https://www.bwin.es/es/sports/f%C3%BAtbol-4/apuestas/m%C3%A9xico-43"
+      ]
+    },
+    {
+      "bwin_event_id": "7900284",
+      "bwin_url": "https://www.bwin.es/es/sports/eventos/deportivo-la-coru%C3%B1a-osasuna-2:7900284",
+      "text": "LaLiga LIVE 1T • 30:51 Deportivo La Coruña 0 - 0 Osasuna",
+      "text_observed_at_utc": "2026-11-02T20:33:47.313878+00:00",
+      "source_pages": [
+        "https://www.bwin.es/es/sports/f%C3%BAtbol-4/hoy",
+        "https://www.bwin.es/es/sports/f%C3%BAtbol-4"
+      ]
+    },
+    {
+      "bwin_event_id": "7900526",
+      "bwin_url": "https://www.bwin.es/es/sports/eventos/mallorca-c%C3%A1diz-cf-2:7900526",
+      "text": "LaLiga 2 LIVE 1T • 30:35 Mallorca 0 - 0 Cádiz",
+      "text_observed_at_utc": "2026-11-02T20:33:47.313878+00:00",
+      "source_pages": [
+        "https://www.bwin.es/es/sports/f%C3%BAtbol-4/hoy",
+        "https://www.bwin.es/es/sports/f%C3%BAtbol-4"
+      ]
+    },
+    {
+      "bwin_event_id": "7898207",
+      "bwin_url": "https://www.bwin.es/es/sports/eventos/newcastle-united-everton-fc-2:7898207",
+      "text": "Premier League LIVE 1T • 33:41 Newcastle 0 - 0 Everton",
+      "text_observed_at_utc": "2026-11-02T20:33:47.313878+00:00",
+      "source_pages": [
+        "https://www.bwin.es/es/sports/f%C3%BAtbol-4/hoy",
+        "https://www.bwin.es/es/sports/f%C3%BAtbol-4"
+      ]
+    },
+    {
+      "bwin_event_id": "7900501",
+      "bwin_url": "https://www.bwin.es/es/sports/eventos/atalanta-parma-2:7900501",
+      "text": "Serie A LIVE Descanso Atalanta 0 - 1 Parma",
+      "text_observed_at_utc": "2026-11-02T20:33:47.313878+00:00",
+      "source_pages": [
+        "https://www.bwin.es/es/sports/f%C3%BAtbol-4/hoy",
+        "https://www.bwin.es/es/sports/f%C3%BAtbol-4"
+      ]
+    },
+    {
+      "bwin_event_id": "7898692",
+      "bwin_url": "https://www.bwin.es/es/sports/eventos/fc-lorient-stade-brestois-29-2:7898692",
+      "text": "Ligue 1 LIVE Descanso FC Lorient 0 - 0 Stade Brestois 29",
+      "text_observed_at_utc": "2026-11-02T20:33:47.313878+00:00",
+      "source_pages": [
+        "https://www.bwin.es/es/sports/f%C3%BAtbol-4/hoy",
+        "https://www.bwin.es/es/sports/f%C3%BAtbol-4"
+      ]
+    },
+    {
+      "bwin_event_id": "7899236",
+      "bwin_url": "https://www.bwin.es/es/sports/eventos/ca-platense-ca-central-c%C3%B3rdoba-sde-2:7899236",
+      "text": "CA Platense CA Central Córdoba SdE Hoy / 23:00 CA",
+      "text_observed_at_utc": "2026-11-02T20:33:40.655884+00:00",
+      "source_pages": [
+        "https://www.bwin.es/es/sports/f%C3%BAtbol-4/hoy"
+      ]
+    },
+    {
+      "bwin_event_id": "7899237",
+      "bwin_url": "https://www.bwin.es/es/sports/eventos/defensa-y-justicia-ca-independiente-2:7899237",
+      "text": "Defensa y Justicia CA Independiente Hoy / 23:00 CA",
+      "text_observed_at_utc": "2026-11-02T20:33:40.655884+00:00",
+      "source_pages": [
+        "https://www.bwin.es/es/sports/f%C3%BAtbol-4/hoy"
+      ]
+    },
+    {
+      "bwin_event_id": "7896059",
+      "bwin_url": "https://www.bwin.es/es/sports/eventos/benfica-fc-alverca-2:7896059",
+      "text": "Liga Portugal LIVE 1T • 14:58 Benfica 0 - 0 FC Alverca",
+      "text_observed_at_utc": "2026-11-02T20:33:47.313878+00:00",
+      "source_pages": [
+        "https://www.bwin.es/es/sports/f%C3%BAtbol-4/hoy",
+        "https://www.bwin.es/es/sports/f%C3%BAtbol-4"
+      ]
+    },
+    {
+      "bwin_event_id": "7896064",
+      "bwin_url": "https://www.bwin.es/es/sports/eventos/gil-vicente-fc-vitoria-guimaraes-sc-2:7896064",
+      "text": "Liga Portugal LIVE 1T • 16:20 Gil Vicente 0 - 0 Vitoria Guimaraes SC",
+      "text_observed_at_utc": "2026-11-02T20:33:47.313878+00:00",
+      "source_pages": [
+        "https://www.bwin.es/es/sports/f%C3%BAtbol-4/hoy",
+        "https://www.bwin.es/es/sports/f%C3%BAtbol-4"
+      ]
+    },
+    {
+      "bwin_event_id": "7900499",
+      "bwin_url": "https://www.bwin.es/es/sports/eventos/red-star-fc-as-nancy-lorraine-2:7900499",
+      "text": "Red Star FC AS Nancy Lorraine Live1T • 48:43 CA 1111",
+      "text_observed_at_utc": "2026-11-02T20:33:40.655884+00:00",
+      "source_pages": [
+        "https://www.bwin.es/es/sports/f%C3%BAtbol-4/hoy"
+      ]
+    },
+    {
+      "bwin_event_id": "7905512",
+      "bwin_url": "https://www.bwin.es/es/sports/eventos/stade-reims-fc-sochaux-2:7905512",
+      "text": "Stade Reims FC Sochaux LiveDescanso CA 2200",
+      "text_observed_at_utc": "2026-11-02T20:33:40.655884+00:00",
+      "source_pages": [
+        "https://www.bwin.es/es/sports/f%C3%BAtbol-4/hoy"
+      ]
+    },
+    {
+      "bwin_event_id": "7905219",
+      "bwin_url": "https://www.bwin.es/es/sports/eventos/rks-rakow-czestochowa-pogon-szczecin-2:7905219",
+      "text": "RKS Rakow Czestochowa Pogon Szczecin LiveDescanso CA 0011",
+      "text_observed_at_utc": "2026-11-02T20:33:40.655884+00:00",
+      "source_pages": [
+        "https://www.bwin.es/es/sports/f%C3%BAtbol-4/hoy"
+      ]
+    },
+    {
+      "bwin_event_id": "7900509",
+      "bwin_url": "https://www.bwin.es/es/sports/eventos/%C3%A1guilas-doradas-fortaleza-ceif-2:7900509",
+      "text": "Águilas Doradas Fortaleza CEIF Comienza en 31 min CA",
+      "text_observed_at_utc": "2026-11-02T20:33:40.655884+00:00",
+      "source_pages": [
+        "https://www.bwin.es/es/sports/f%C3%BAtbol-4/hoy"
+      ]
+    },
+    {
+      "bwin_event_id": "7905223",
+      "bwin_url": "https://www.bwin.es/es/sports/eventos/deportes-limache-audax-italiano-2:7905223",
+      "text": "Deportes Limache Audax Italiano Comienza en 26 min CA",
+      "text_observed_at_utc": "2026-11-02T20:33:40.655884+00:00",
+      "source_pages": [
+        "https://www.bwin.es/es/sports/f%C3%BAtbol-4/hoy"
+      ]
+    },
+    {
+      "bwin_event_id": "7905328",
+      "bwin_url": "https://www.bwin.es/es/sports/eventos/cd-real-tomayapo-club-blooming-2:7905328",
+      "text": "CD Real Tomayapo Blooming Comienza en 41 min CA",
+      "text_observed_at_utc": "2026-11-02T20:33:40.655884+00:00",
+      "source_pages": [
+        "https://www.bwin.es/es/sports/f%C3%BAtbol-4/hoy"
+      ]
+    },
+    {
+      "bwin_event_id": "7909335",
+      "bwin_url": "https://www.bwin.es/es/sports/eventos/gzira-united-fc-marsaxlokk-fc-2:7909335",
+      "text": "Gzira United FC Marsaxlokk FC Live2T • 76:22 CA 0044",
+      "text_observed_at_utc": "2026-11-02T20:33:40.655884+00:00",
+      "source_pages": [
+        "https://www.bwin.es/es/sports/f%C3%BAtbol-4/hoy"
+      ]
+    },
+    {
+      "bwin_event_id": "7905214",
+      "bwin_url": "https://www.bwin.es/es/sports/eventos/jong-ajax-amsterdam-vitesse-2:7905214",
+      "text": "Jong Ajax Amsterdam Vitesse Live2T • 74:15 CA 1100",
+      "text_observed_at_utc": "2026-11-02T20:33:40.655884+00:00",
+      "source_pages": [
+        "https://www.bwin.es/es/sports/f%C3%BAtbol-4/hoy"
+      ]
+    },
+    {
+      "bwin_event_id": "7905215",
+      "bwin_url": "https://www.bwin.es/es/sports/eventos/jong-fc-utrecht-fc-dordrecht-2:7905215",
+      "text": "Jong FC Utrecht FC Dordrecht Live2T • 75:19 CA 33221",
+      "text_observed_at_utc": "2026-11-02T20:33:40.655884+00:00",
+      "source_pages": [
+        "https://www.bwin.es/es/sports/f%C3%BAtbol-4/hoy"
+      ]
+    },
+    {
+      "bwin_event_id": "7905216",
+      "bwin_url": "https://www.bwin.es/es/sports/eventos/jong-psv-eindhoven-nac-breda-2:7905216",
+      "text": "Jong PSV Eindhoven NAC Breda Live2T • 73:40 CA 00001",
+      "text_observed_at_utc": "2026-11-02T20:33:40.655884+00:00",
+      "source_pages": [
+        "https://www.bwin.es/es/sports/f%C3%BAtbol-4/hoy"
+      ]
+    },
+    {
+      "bwin_event_id": "7905287",
+      "bwin_url": "https://www.bwin.es/es/sports/eventos/heracles-almelo-top-oss-2:7905287",
+      "text": "Heracles Almelo TOP Oss Live2T • 69:53 CA 1100",
+      "text_observed_at_utc": "2026-11-02T20:33:40.655884+00:00",
+      "source_pages": [
+        "https://www.bwin.es/es/sports/f%C3%BAtbol-4/hoy"
+      ]
+    },
+    {
+      "bwin_event_id": "7905283",
+      "bwin_url": "https://www.bwin.es/es/sports/eventos/cd-tenerife-f-athletic-club-f-2:7905283",
+      "text": "Liga F LIVE 1T • 32:41 CD Tenerife 0 - 0 Athletic Club",
+      "text_observed_at_utc": "2026-11-02T20:33:47.313878+00:00",
+      "source_pages": [
+        "https://www.bwin.es/es/sports/f%C3%BAtbol-4/hoy",
+        "https://www.bwin.es/es/sports/f%C3%BAtbol-4"
+      ]
+    },
+    {
+      "bwin_event_id": "7905330",
+      "bwin_url": "https://www.bwin.es/es/sports/eventos/sd-huesca-gimn%C3%A0stic-de-tarragona-2:7905330",
+      "text": "SD Huesca Gimnàstic de Tarragona LiveDescanso CA 1100",
+      "text_observed_at_utc": "2026-11-02T20:33:40.655884+00:00",
+      "source_pages": [
+        "https://www.bwin.es/es/sports/f%C3%BAtbol-4/hoy"
+      ]
+    },
+    {
+      "bwin_event_id": "7905295",
+      "bwin_url": "https://www.bwin.es/es/sports/eventos/chelmsford-city-farnham-town-2:7905295",
+      "text": "Chelmsford City Farnham Town LiveDescanso CA 0000",
+      "text_observed_at_utc": "2026-11-02T20:33:40.655884+00:00",
+      "source_pages": [
+        "https://www.bwin.es/es/sports/f%C3%BAtbol-4/hoy"
+      ]
+    },
+    {
+      "bwin_event_id": "7905285",
+      "bwin_url": "https://www.bwin.es/es/sports/eventos/aveley-fc-st-albans-city-2:7905285",
+      "text": "Aveley FC St Albans City LiveDescanso CA 0000",
+      "text_observed_at_utc": "2026-11-02T20:33:40.655884+00:00",
+      "source_pages": [
+        "https://www.bwin.es/es/sports/f%C3%BAtbol-4/hoy"
+      ]
+    },
+    {
+      "bwin_event_id": "7905321",
+      "bwin_url": "https://www.bwin.es/es/sports/eventos/juventus-fc-b-next-gen-pro-vercelli-2:7905321",
+      "text": "Juventus FC B Next Gen Pro Vercelli Live2T • 47:23 CA 1100",
+      "text_observed_at_utc": "2026-11-02T20:33:40.655884+00:00",
+      "source_pages": [
+        "https://www.bwin.es/es/sports/f%C3%BAtbol-4/hoy"
+      ]
+    },
+    {
+      "bwin_event_id": "7905322",
+      "bwin_url": "https://www.bwin.es/es/sports/eventos/novara-fc-desenzano-fc-2:7905322",
+      "text": "Novara Desenzano FC LiveDescanso CA 1100",
+      "text_observed_at_utc": "2026-11-02T20:33:40.655884+00:00",
+      "source_pages": [
+        "https://www.bwin.es/es/sports/f%C3%BAtbol-4/hoy"
+      ]
+    },
+    {
+      "bwin_event_id": "7905324",
+      "bwin_url": "https://www.bwin.es/es/sports/eventos/ssd-casarano-calcio-foggia-2:7905324",
+      "text": "SSD Casarano Calcio Foggia Live2T • 45:48 CA 1111",
+      "text_observed_at_utc": "2026-11-02T20:33:40.655884+00:00",
+      "source_pages": [
+        "https://www.bwin.es/es/sports/f%C3%BAtbol-4/hoy"
+      ]
+    },
+    {
+      "bwin_event_id": "7905300",
+      "bwin_url": "https://www.bwin.es/es/sports/eventos/acf-fiorentina-f-juventus-f-2:7905300",
+      "text": "ACF Fiorentina F Juventus FLiveDescanso CA 0011",
+      "text_observed_at_utc": "2026-11-02T20:33:40.655884+00:00",
+      "source_pages": [
+        "https://www.bwin.es/es/sports/f%C3%BAtbol-4/hoy"
+      ]
+    },
+    {
+      "bwin_event_id": "7905199",
+      "bwin_url": "https://www.bwin.es/es/sports/eventos/fortaleza-ce-atl%C3%A9tico-goianiense-2:7905199",
+      "text": "Fortaleza CE Atlético Goianiense Live2T • 72:19 CA 0000",
+      "text_observed_at_utc": "2026-11-02T20:33:40.655884+00:00",
+      "source_pages": [
+        "https://www.bwin.es/es/sports/f%C3%BAtbol-4/hoy"
+      ]
+    },
+    {
+      "bwin_event_id": "7905551",
+      "bwin_url": "https://www.bwin.es/es/sports/eventos/athletic-club-br-cear%C3%A1-2:7905551",
+      "text": "Athletic Club BR Ceará Comienza en 26 min CA",
+      "text_observed_at_utc": "2026-11-02T20:33:40.655884+00:00",
+      "source_pages": [
+        "https://www.bwin.es/es/sports/f%C3%BAtbol-4/hoy"
+      ]
+    },
+    {
+      "bwin_event_id": "7905157",
+      "bwin_url": "https://www.bwin.es/es/sports/eventos/lunes-combi-2:7905157",
+      "text": "Lunes Combi+Hoy / 23:00",
+      "text_observed_at_utc": "2026-11-02T20:33:40.655884+00:00",
+      "source_pages": [
+        "https://www.bwin.es/es/sports/f%C3%BAtbol-4/hoy"
+      ]
+    },
+    {
+      "bwin_event_id": "7905289",
+      "bwin_url": "https://www.bwin.es/es/sports/eventos/preston-north-end-sub-21-fleetwood-town-sub-21-2:7905289",
+      "text": "Preston North End Sub-21 Fleetwood Town Sub-21Live2T • 76:39 CA 11001",
+      "text_observed_at_utc": "2026-11-02T20:33:40.655884+00:00",
+      "source_pages": [
+        "https://www.bwin.es/es/sports/f%C3%BAtbol-4/hoy"
+      ]
+    },
+    {
+      "bwin_event_id": "7905290",
+      "bwin_url": "https://www.bwin.es/es/sports/eventos/bolton-wanderers-sub-21-queens-park-rangers-sub-2:7905290",
+      "text": "Bolton Wanderers Sub-21 Queens Park Rangers Sub-21Live2T • 73:41 CA 0044",
+      "text_observed_at_utc": "2026-11-02T20:33:40.655884+00:00",
+      "source_pages": [
+        "https://www.bwin.es/es/sports/f%C3%BAtbol-4/hoy"
+      ]
+    },
+    {
+      "bwin_event_id": "7905291",
+      "bwin_url": "https://www.bwin.es/es/sports/eventos/wycombe-wanderers-reservas-brentford-sub-21-2:7905291",
+      "text": "Wycombe Wanderers Reservas Brentford Sub-21Live2T • 75:34 CA 1111",
+      "text_observed_at_utc": "2026-11-02T20:33:40.655884+00:00",
+      "source_pages": [
+        "https://www.bwin.es/es/sports/f%C3%BAtbol-4/hoy"
+      ]
+    },
+    {
+      "bwin_event_id": "7905292",
+      "bwin_url": "https://www.bwin.es/es/sports/eventos/afc-bournemouth-sub-21-cardiff-city-fc-sub-21-2:7905292",
+      "text": "AFC Bournemouth Sub-21 Cardiff City FC Sub-21Live2T • 75:24 CA 3311",
+      "text_observed_at_utc": "2026-11-02T20:33:40.655884+00:00",
+      "source_pages": [
+        "https://www.bwin.es/es/sports/f%C3%BAtbol-4/hoy"
+      ]
+    },
+    {
+      "bwin_event_id": "7905293",
+      "bwin_url": "https://www.bwin.es/es/sports/eventos/exeter-city-sub-21-reading-fc-sub-21-2:7905293",
+      "text": "Exeter City Sub-21 Reading FC Sub-21Live2T • 75:02 CA 3322",
+      "text_observed_at_utc": "2026-11-02T20:33:40.655884+00:00",
+      "source_pages": [
+        "https://www.bwin.es/es/sports/f%C3%BAtbol-4/hoy"
+      ]
+    },
+    {
+      "bwin_event_id": "7905294",
+      "bwin_url": "https://www.bwin.es/es/sports/eventos/hull-city-sub-21-derby-county-sub-21-2:7905294",
+      "text": "Hull City Sub-21 Derby County Sub-21Live2T • 74:37 CA 0000",
+      "text_observed_at_utc": "2026-11-02T20:33:40.655884+00:00",
+      "source_pages": [
+        "https://www.bwin.es/es/sports/f%C3%BAtbol-4/hoy"
+      ]
+    },
+    {
+      "bwin_event_id": "7902306",
+      "bwin_url": "https://www.bwin.es/es/sports/eventos/maccabi-ironi-ashdod-h-ramat-hasharon-2:7902306",
+      "text": "Maccabi Ironi Ashdod H. Ramat HaSharon Live2T • 83:20 CA 1111",
+      "text_observed_at_utc": "2026-11-02T20:33:40.655884+00:00",
+      "source_pages": [
+        "https://www.bwin.es/es/sports/f%C3%BAtbol-4/hoy"
+      ]
+    },
+    {
+      "bwin_event_id": "7905217",
+      "bwin_url": "https://www.bwin.es/es/sports/eventos/zks-stal-rzeszow-puszcza-niepolomice-2:7905217",
+      "text": "ZKS Stal Rzeszow Puszcza Niepolomice LiveDescanso CA 0011",
+      "text_observed_at_utc": "2026-11-02T20:33:40.655884+00:00",
+      "source_pages": [
+        "https://www.bwin.es/es/sports/f%C3%BAtbol-4/hoy"
+      ]
+    },
+    {
+      "bwin_event_id": "7905218",
+      "bwin_url": "https://www.bwin.es/es/sports/eventos/lks-lodz-polonia-varsovia-2:7905218",
+      "text": "LKS Lodz Polonia Varsovia LiveDescanso CA 0000",
+      "text_observed_at_utc": "2026-11-02T20:33:40.655884+00:00",
+      "source_pages": [
+        "https://www.bwin.es/es/sports/f%C3%BAtbol-4/hoy"
+      ]
+    },
+    {
+      "bwin_event_id": "7905372",
+      "bwin_url": "https://www.bwin.es/es/sports/eventos/cr-belouizdad-js-saoura-2:7905372",
+      "text": "CR Belouizdad JS Saoura Live2T • 71:36 CA 1100",
+      "text_observed_at_utc": "2026-11-02T20:33:40.655884+00:00",
+      "source_pages": [
+        "https://www.bwin.es/es/sports/f%C3%BAtbol-4/hoy"
+      ]
+    },
+    {
+      "bwin_event_id": "7908277",
+      "bwin_url": "https://www.bwin.es/es/sports/eventos/coleraine-fc-sub-20-ballymena-united-fc-sub-20-2:7908277",
+      "text": "Coleraine FC Sub-20 Ballymena United FC Sub-20Live1T • 32:52 CA 1100",
+      "text_observed_at_utc": "2026-11-02T20:33:40.655884+00:00",
+      "source_pages": [
+        "https://www.bwin.es/es/sports/f%C3%BAtbol-4/hoy"
+      ]
+    },
+    {
+      "bwin_event_id": "7908278",
+      "bwin_url": "https://www.bwin.es/es/sports/eventos/limavady-united-sub-20-cliftonville-olympic-sub-2:7908278",
+      "text": "Limavady United Sub-20 Cliftonville Olympic Sub-20Live1T • 33:15 CA 1122",
+      "text_observed_at_utc": "2026-11-02T20:33:40.655884+00:00",
+      "source_pages": [
+        "https://www.bwin.es/es/sports/f%C3%BAtbol-4/hoy"
+      ]
+    },
+    {
+      "bwin_event_id": "7908279",
+      "bwin_url": "https://www.bwin.es/es/sports/eventos/portadown-sub-20-dungannon-swifts-sub-20-2:7908279",
+      "text": "Portadown Sub-20 Dungannon Swifts Sub-20Live1T • 17:22 CA 0000",
+      "text_observed_at_utc": "2026-11-02T20:33:40.655884+00:00",
+      "source_pages": [
+        "https://www.bwin.es/es/sports/f%C3%BAtbol-4/hoy"
+      ]
+    },
+    {
+      "bwin_event_id": "7905225",
+      "bwin_url": "https://www.bwin.es/es/sports/eventos/independiente-yumbo-boca-juniors-de-cali-2:7905225",
+      "text": "Independiente Yumbo Boca Juniors de Cali Live2T • 75:46 CA 2233",
+      "text_observed_at_utc": "2026-11-02T20:33:40.655884+00:00",
+      "source_pages": [
+        "https://www.bwin.es/es/sports/f%C3%BAtbol-4/hoy"
+      ]
+    },
+    {
+      "bwin_event_id": "7905344",
+      "bwin_url": "https://www.bwin.es/es/sports/eventos/sporting-cristal-fc-cajamarca-2:7905344",
+      "text": "Sporting Cristal FC Cajamarca Comienza ahora CA",
+      "text_observed_at_utc": "2026-11-02T20:33:40.655884+00:00",
+      "source_pages": [
+        "https://www.bwin.es/es/sports/f%C3%BAtbol-4/hoy"
+      ]
+    },
+    {
+      "bwin_event_id": "7908274",
+      "bwin_url": "https://www.bwin.es/es/sports/eventos/deportivo-italiano-deportivo-lsm-2:7908274",
+      "text": "Deportivo Italiano Deportivo LSM Live2T • 64:37 CA 0033",
+      "text_observed_at_utc": "2026-11-02T20:33:40.655884+00:00",
+      "source_pages": [
+        "https://www.bwin.es/es/sports/f%C3%BAtbol-4/hoy"
+      ]
+    },
+    {
+      "bwin_event_id": "7906427",
+      "bwin_url": "https://www.bwin.es/es/sports/eventos/as-douanes-nouakchott-fc-nouadhibou-2:7906427",
+      "text": "AS Douanes Nouakchott FC Nouadhibou Live1T • 43:44 CA 1111",
+      "text_observed_at_utc": "2026-11-02T20:33:40.655884+00:00",
+      "source_pages": [
+        "https://www.bwin.es/es/sports/f%C3%BAtbol-4/hoy"
+      ]
+    },
+    {
+      "bwin_event_id": "7906192",
+      "bwin_url": "https://www.bwin.es/es/sports/eventos/la-luz-fc-reservas-central-espanol-fc-reservas-2:7906192",
+      "text": "La Luz FC Reservas Central Espanol FC ReservasLive2T • 74:02 CA 1133",
+      "text_observed_at_utc": "2026-11-02T20:33:40.655884+00:00",
+      "source_pages": [
+        "https://www.bwin.es/es/sports/f%C3%BAtbol-4/hoy"
+      ]
+    },
+    {
+      "bwin_event_id": "7906031",
+      "bwin_url": "https://www.bwin.es/es/sports/eventos/cd-anaitasuna-alav%C3%A9s-2:7906031",
+      "text": "CD Anaitasuna Alavés CA",
+      "text_observed_at_utc": "2026-11-02T20:33:43.956538+00:00",
+      "source_pages": [
+        "https://www.bwin.es/es/sports/f%C3%BAtbol-4/ma%C3%B1ana"
+      ]
+    },
+    {
+      "bwin_event_id": "7906032",
+      "bwin_url": "https://www.bwin.es/es/sports/eventos/cd-pamplona-eibar-2:7906032",
+      "text": "CD Pamplona Eibar CA",
+      "text_observed_at_utc": "2026-11-02T20:33:43.956538+00:00",
+      "source_pages": [
+        "https://www.bwin.es/es/sports/f%C3%BAtbol-4/ma%C3%B1ana"
+      ]
+    },
+    {
+      "bwin_event_id": "7817856",
+      "bwin_url": "https://www.bwin.es/es/sports/eventos/uefa-champions-league-2026-27-ganador-2:7817856",
+      "text": "UEFA Champions League 2026/27 – Ganador",
+      "text_observed_at_utc": "2026-11-02T20:33:43.956538+00:00",
+      "source_pages": [
+        "https://www.bwin.es/es/sports/f%C3%BAtbol-4/ma%C3%B1ana"
+      ]
+    },
+    {
+      "bwin_event_id": "7857324",
+      "bwin_url": "https://www.bwin.es/es/sports/eventos/champions-league-2026-27-m%C3%A1ximo-goleador-2:7857324",
+      "text": "Champions League 2026/27 – Máximo goleador",
+      "text_observed_at_utc": "2026-11-02T20:33:43.956538+00:00",
+      "source_pages": [
+        "https://www.bwin.es/es/sports/f%C3%BAtbol-4/ma%C3%B1ana"
+      ]
+    },
+    {
+      "bwin_event_id": "7896143",
+      "bwin_url": "https://www.bwin.es/es/sports/eventos/galatasaray-sk-stuttgart-2:7896143",
+      "text": "Galatasaray SK Stuttgart CA",
+      "text_observed_at_utc": "2026-11-02T20:33:43.956538+00:00",
+      "source_pages": [
+        "https://www.bwin.es/es/sports/f%C3%BAtbol-4/ma%C3%B1ana"
+      ]
+    },
+    {
+      "bwin_event_id": "7896152",
+      "bwin_url": "https://www.bwin.es/es/sports/eventos/shakhtar-donetsk-sporting-cp-2:7896152",
+      "text": "Shakhtar Donetsk Sporting CP CA",
+      "text_observed_at_utc": "2026-11-02T20:33:43.956538+00:00",
+      "source_pages": [
+        "https://www.bwin.es/es/sports/f%C3%BAtbol-4/ma%C3%B1ana"
+      ]
+    },
+    {
+      "bwin_event_id": "7896145",
+      "bwin_url": "https://www.bwin.es/es/sports/eventos/at-madrid-bayern-2:7896145",
+      "text": "Atlético Madrid Bayern Múnich",
+      "text_observed_at_utc": "2026-11-02T20:33:43.956538+00:00",
+      "source_pages": [
+        "https://www.bwin.es/es/sports/f%C3%BAtbol-4/ma%C3%B1ana"
+      ]
+    },
+    {
+      "bwin_event_id": "7896147",
+      "bwin_url": "https://www.bwin.es/es/sports/eventos/fc-barcelona-aston-villa-2:7896147",
+      "text": "FC Barcelona Aston Villa",
+      "text_observed_at_utc": "2026-11-02T20:33:43.956538+00:00",
+      "source_pages": [
+        "https://www.bwin.es/es/sports/f%C3%BAtbol-4/ma%C3%B1ana"
+      ]
+    },
+    {
+      "bwin_event_id": "7896149",
+      "bwin_url": "https://www.bwin.es/es/sports/eventos/bodo-glimt-lille-osc-2:7896149",
+      "text": "Bodo Glimt Lille OSC",
+      "text_observed_at_utc": "2026-11-02T20:33:43.956538+00:00",
+      "source_pages": [
+        "https://www.bwin.es/es/sports/f%C3%BAtbol-4/ma%C3%B1ana"
+      ]
+    },
+    {
+      "bwin_event_id": "7896151",
+      "bwin_url": "https://www.bwin.es/es/sports/eventos/manchester-united-as-roma-2:7896151",
+      "text": "Man United AS Roma",
+      "text_observed_at_utc": "2026-11-02T20:33:43.956538+00:00",
+      "source_pages": [
+        "https://www.bwin.es/es/sports/f%C3%BAtbol-4/ma%C3%B1ana"
+      ]
+    },
+    {
+      "bwin_event_id": "7896153",
+      "bwin_url": "https://www.bwin.es/es/sports/eventos/feyenoord-rotterdam-inter-mil%C3%A1n-2:7896153",
+      "text": "Feyenoord Rotterdam Inter Milán",
+      "text_observed_at_utc": "2026-11-02T20:33:43.956538+00:00",
+      "source_pages": [
+        "https://www.bwin.es/es/sports/f%C3%BAtbol-4/ma%C3%B1ana"
+      ]
+    },
+    {
+      "bwin_event_id": "7896155",
+      "bwin_url": "https://www.bwin.es/es/sports/eventos/lask-sk-slovan-bratislava-2:7896155",
+      "text": "LASK SK Slovan Bratislava",
+      "text_observed_at_utc": "2026-11-02T20:33:43.956538+00:00",
+      "source_pages": [
+        "https://www.bwin.es/es/sports/f%C3%BAtbol-4/ma%C3%B1ana"
+      ]
+    },
+    {
+      "bwin_event_id": "7896156",
+      "bwin_url": "https://www.bwin.es/es/sports/eventos/villarreal-psg-2:7896156",
+      "text": "Villarreal PSG",
+      "text_observed_at_utc": "2026-11-02T20:33:43.956538+00:00",
+      "source_pages": [
+        "https://www.bwin.es/es/sports/f%C3%BAtbol-4/ma%C3%B1ana"
+      ]
+    },
+    {
+      "bwin_event_id": "7890932",
+      "bwin_url": "https://www.bwin.es/es/sports/eventos/red-bull-bragantino-santos-2:7890932",
+      "text": "Red Bull Bragantino Santos Mañana / 0:00 CA",
+      "text_observed_at_utc": "2026-11-02T20:33:43.956538+00:00",
+      "source_pages": [
+        "https://www.bwin.es/es/sports/f%C3%BAtbol-4/ma%C3%B1ana"
+      ]
+    },
+    {
+      "bwin_event_id": "7891271",
+      "bwin_url": "https://www.bwin.es/es/sports/eventos/chapecoense-mirassol-2:7891271",
+      "text": "Chapecoense Mirassol Mañana / 23:30 CA",
+      "text_observed_at_utc": "2026-11-02T20:33:43.956538+00:00",
+      "source_pages": [
+        "https://www.bwin.es/es/sports/f%C3%BAtbol-4/ma%C3%B1ana"
+      ]
+    },
+    {
+      "bwin_event_id": "7899234",
+      "bwin_url": "https://www.bwin.es/es/sports/eventos/atl%C3%A9tico-tucum%C3%A1n-argentinos-juniors-2:7899234",
+      "text": "Atlético Tucumán Argentinos Juniors Mañana / 1:15 CA",
+      "text_observed_at_utc": "2026-11-02T20:33:43.956538+00:00",
+      "source_pages": [
+        "https://www.bwin.es/es/sports/f%C3%BAtbol-4/ma%C3%B1ana"
+      ]
+    },
+    {
+      "bwin_event_id": "7899238",
+      "bwin_url": "https://www.bwin.es/es/sports/eventos/independiente-rivadavia-ca-banfield-2:7899238",
+      "text": "Independiente Rivadavia CA Banfield Mañana / 1:15 CA",
+      "text_observed_at_utc": "2026-11-02T20:33:43.956538+00:00",
+      "source_pages": [
+        "https://www.bwin.es/es/sports/f%C3%BAtbol-4/ma%C3%B1ana"
+      ]
+    },
+    {
+      "bwin_event_id": "7900823",
+      "bwin_url": "https://www.bwin.es/es/sports/eventos/blackburn-stoke-2:7900823",
+      "text": "Blackburn Rovers Stoke City Mañana / 20:45 CA",
+      "text_observed_at_utc": "2026-11-02T20:33:43.956538+00:00",
+      "source_pages": [
+        "https://www.bwin.es/es/sports/f%C3%BAtbol-4/ma%C3%B1ana"
+      ]
+    },
+    {
+      "bwin_event_id": "7900825",
+      "bwin_url": "https://www.bwin.es/es/sports/eventos/preston-north-end-sheffield-united-fc-2:7900825",
+      "text": "Preston North End Sheffield United FC Mañana / 20:45 CA",
+      "text_observed_at_utc": "2026-11-02T20:33:43.956538+00:00",
+      "source_pages": [
+        "https://www.bwin.es/es/sports/f%C3%BAtbol-4/ma%C3%B1ana"
+      ]
+    },
+    {
+      "bwin_event_id": "7900828",
+      "bwin_url": "https://www.bwin.es/es/sports/eventos/queens-park-rangers-burnley-2:7900828",
+      "text": "Queens Park Rangers Burnley Mañana / 20:45 CA",
+      "text_observed_at_utc": "2026-11-02T20:33:43.956538+00:00",
+      "source_pages": [
+        "https://www.bwin.es/es/sports/f%C3%BAtbol-4/ma%C3%B1ana"
+      ]
+    },
+    {
+      "bwin_event_id": "7900831",
+      "bwin_url": "https://www.bwin.es/es/sports/eventos/watford-fc-lincoln-city-2:7900831",
+      "text": "Watford FC Lincoln City Mañana / 20:45 CA",
+      "text_observed_at_utc": "2026-11-02T20:33:43.956538+00:00",
+      "source_pages": [
+        "https://www.bwin.es/es/sports/f%C3%BAtbol-4/ma%C3%B1ana"
+      ]
+    },
+    {
+      "bwin_event_id": "7900835",
+      "bwin_url": "https://www.bwin.es/es/sports/eventos/derby-county-norwich-city-2:7900835",
+      "text": "Derby County Norwich Mañana / 20:45 CA",
+      "text_observed_at_utc": "2026-11-02T20:33:43.956538+00:00",
+      "source_pages": [
+        "https://www.bwin.es/es/sports/f%C3%BAtbol-4/ma%C3%B1ana"
+      ]
+    },
+    {
+      "bwin_event_id": "7900837",
+      "bwin_url": "https://www.bwin.es/es/sports/eventos/portsmouth-fc-swansea-city-2:7900837",
+      "text": "Portsmouth FC Swansea City Mañana / 20:45 CA",
+      "text_observed_at_utc": "2026-11-02T20:33:43.956538+00:00",
+      "source_pages": [
+        "https://www.bwin.es/es/sports/f%C3%BAtbol-4/ma%C3%B1ana"
+      ]
+    },
+    {
+      "bwin_event_id": "7900838",
+      "bwin_url": "https://www.bwin.es/es/sports/eventos/charlton-athletic-bolton-wanderers-2:7900838",
+      "text": "Charlton Athletic Bolton Wanderers Mañana / 20:45 CA",
+      "text_observed_at_utc": "2026-11-02T20:33:43.956538+00:00",
+      "source_pages": [
+        "https://www.bwin.es/es/sports/f%C3%BAtbol-4/ma%C3%B1ana"
+      ]
+    },
+    {
+      "bwin_event_id": "7900826",
+      "bwin_url": "https://www.bwin.es/es/sports/eventos/birmingham-city-millwall-fc-2:7900826",
+      "text": "Birmingham City Millwall FC Mañana / 21:00 CA",
+      "text_observed_at_utc": "2026-11-02T20:33:43.956538+00:00",
+      "source_pages": [
+        "https://www.bwin.es/es/sports/f%C3%BAtbol-4/ma%C3%B1ana"
+      ]
+    },
+    {
+      "bwin_event_id": "7900829",
+      "bwin_url": "https://www.bwin.es/es/sports/eventos/west-bromwich-albion-southampton-fc-2:7900829",
+      "text": "West Bromwich Albion Southampton FC Mañana / 21:00 CA",
+      "text_observed_at_utc": "2026-11-02T20:33:43.956538+00:00",
+      "source_pages": [
+        "https://www.bwin.es/es/sports/f%C3%BAtbol-4/ma%C3%B1ana"
+      ]
+    },
+    {
+      "bwin_event_id": "7891307",
+      "bwin_url": "https://www.bwin.es/es/sports/eventos/ik-sirius-halmstads-bk-2:7891307",
+      "text": "IK Sirius Halmstads BK Mañana / 19:00 CA",
+      "text_observed_at_utc": "2026-11-02T20:33:43.956538+00:00",
+      "source_pages": [
+        "https://www.bwin.es/es/sports/f%C3%BAtbol-4/ma%C3%B1ana"
+      ]
+    },
+    {
+      "bwin_event_id": "7904058",
+      "bwin_url": "https://www.bwin.es/es/sports/eventos/albion-fc-deportivo-maldonado-2:7904058",
+      "text": "Albion FC Deportivo Maldonado Mañana / 0:00 CA",
+      "text_observed_at_utc": "2026-11-02T20:33:43.956538+00:00",
+      "source_pages": [
+        "https://www.bwin.es/es/sports/f%C3%BAtbol-4/ma%C3%B1ana"
+      ]
+    },
+    {
+      "bwin_event_id": "7900513",
+      "bwin_url": "https://www.bwin.es/es/sports/eventos/atl%C3%A9tico-bucaramanga-atl%C3%A9tico-nacional-2:7900513",
+      "text": "Atlético Bucaramanga Atlético Nacional Mañana / 2:15 CA",
+      "text_observed_at_utc": "2026-11-02T20:33:43.956538+00:00",
+      "source_pages": [
+        "https://www.bwin.es/es/sports/f%C3%BAtbol-4/ma%C3%B1ana"
+      ]
+    },
+    {
+      "bwin_event_id": "7900684",
+      "bwin_url": "https://www.bwin.es/es/sports/eventos/deportivo-pereira-cd-deportes-tolima-2:7900684",
+      "text": "Deportivo Pereira CD Deportes Tolima Mañana / 21:30 CA",
+      "text_observed_at_utc": "2026-11-02T20:33:43.956538+00:00",
+      "source_pages": [
+        "https://www.bwin.es/es/sports/f%C3%BAtbol-4/ma%C3%B1ana"
+      ]
+    },
+    {
+      "bwin_event_id": "7909128",
+      "bwin_url": "https://www.bwin.es/es/sports/eventos/cs-2-de-mayo-sportivo-trinidense-2:7909128",
+      "text": "CS 2 de Mayo Sportivo Trinidense Mañana / 21:00 CA",
+      "text_observed_at_utc": "2026-11-02T20:33:43.956538+00:00",
+      "source_pages": [
+        "https://www.bwin.es/es/sports/f%C3%BAtbol-4/ma%C3%B1ana"
+      ]
+    },
+    {
+      "bwin_event_id": "7908391",
+      "bwin_url": "https://www.bwin.es/es/sports/eventos/club-nacional-asunci%C3%B3n-sp-san-lorenzo-2:7908391",
+      "text": "Club Nacional Asunción Sp. San Lorenzo Mañana / 23:30 CA",
+      "text_observed_at_utc": "2026-11-02T20:33:43.956538+00:00",
+      "source_pages": [
+        "https://www.bwin.es/es/sports/f%C3%BAtbol-4/ma%C3%B1ana"
+      ]
+    },
+    {
+      "bwin_event_id": "7905236",
+      "bwin_url": "https://www.bwin.es/es/sports/eventos/deportes-concepci%C3%B3n-palestino-2:7905236",
+      "text": "Deportes Concepción Palestino Mañana / 0:30 CA",
+      "text_observed_at_utc": "2026-11-02T20:33:43.956538+00:00",
+      "source_pages": [
+        "https://www.bwin.es/es/sports/f%C3%BAtbol-4/ma%C3%B1ana"
+      ]
+    },
+    {
+      "bwin_event_id": "7900855",
+      "bwin_url": "https://www.bwin.es/es/sports/eventos/huddersfield-town-luton-town-2:7900855",
+      "text": "Huddersfield Town Luton Town Mañana / 20:45 CA",
+      "text_observed_at_utc": "2026-11-02T20:33:43.956538+00:00",
+      "source_pages": [
+        "https://www.bwin.es/es/sports/f%C3%BAtbol-4/ma%C3%B1ana"
+      ]
+    },
+    {
+      "bwin_event_id": "7903945",
+      "bwin_url": "https://www.bwin.es/es/sports/eventos/wigan-athletic-mansfield-town-2:7903945",
+      "text": "Wigan Athletic Mansfield Town Mañana / 20:45 CA",
+      "text_observed_at_utc": "2026-11-02T20:33:43.956538+00:00",
+      "source_pages": [
+        "https://www.bwin.es/es/sports/f%C3%BAtbol-4/ma%C3%B1ana"
+      ]
+    },
+    {
+      "bwin_event_id": "7900862",
+      "bwin_url": "https://www.bwin.es/es/sports/eventos/northampton-town-oldham-athletic-2:7900862",
+      "text": "Northampton Town Oldham Athletic Mañana / 20:45 CA",
+      "text_observed_at_utc": "2026-11-02T20:33:43.956538+00:00",
+      "source_pages": [
+        "https://www.bwin.es/es/sports/f%C3%BAtbol-4/ma%C3%B1ana"
+      ]
+    },
+    {
+      "bwin_event_id": "7908282",
+      "bwin_url": "https://www.bwin.es/es/sports/eventos/cs-desamparados-san-juan-ca-union-de-villa-kraus-2:7908282",
+      "text": "CS Desamparados San Juan CA Unión de Villa Krause Mañana / 1:30 CA",
+      "text_observed_at_utc": "2026-11-02T20:33:43.956538+00:00",
+      "source_pages": [
+        "https://www.bwin.es/es/sports/f%C3%BAtbol-4/ma%C3%B1ana"
+      ]
+    },
+    {
+      "bwin_event_id": "7905550",
+      "bwin_url": "https://www.bwin.es/es/sports/eventos/goi%C3%A1s-go-crb-al-2:7905550",
+      "text": "Goiás GO CRB AL Mañana / 0:30 CA",
+      "text_observed_at_utc": "2026-11-02T20:33:43.956538+00:00",
+      "source_pages": [
+        "https://www.bwin.es/es/sports/f%C3%BAtbol-4/ma%C3%B1ana"
+      ]
+    },
+    {
+      "bwin_event_id": "7905158",
+      "bwin_url": "https://www.bwin.es/es/sports/eventos/lunes-combi-2:7905158",
+      "text": "Lunes Combi+Mañana / 1:15",
+      "text_observed_at_utc": "2026-11-02T20:33:43.956538+00:00",
+      "source_pages": [
+        "https://www.bwin.es/es/sports/f%C3%BAtbol-4/ma%C3%B1ana"
+      ]
+    },
+    {
+      "bwin_event_id": "7905812",
+      "bwin_url": "https://www.bwin.es/es/sports/eventos/martes-combi-2:7905812",
+      "text": "Martes Combi+Mañana / 18:45",
+      "text_observed_at_utc": "2026-11-02T20:33:43.956538+00:00",
+      "source_pages": [
+        "https://www.bwin.es/es/sports/f%C3%BAtbol-4/ma%C3%B1ana"
+      ]
+    },
+    {
+      "bwin_event_id": "7905813",
+      "bwin_url": "https://www.bwin.es/es/sports/eventos/martes-combi-2:7905813",
+      "text": "Martes Combi+Mañana / 20:45",
+      "text_observed_at_utc": "2026-11-02T20:33:43.956538+00:00",
+      "source_pages": [
+        "https://www.bwin.es/es/sports/f%C3%BAtbol-4/ma%C3%B1ana"
+      ]
+    },
+    {
+      "bwin_event_id": "7905814",
+      "bwin_url": "https://www.bwin.es/es/sports/eventos/martes-combi-2:7905814",
+      "text": "Martes Combi+Mañana / 21:00",
+      "text_observed_at_utc": "2026-11-02T20:33:43.956538+00:00",
+      "source_pages": [
+        "https://www.bwin.es/es/sports/f%C3%BAtbol-4/ma%C3%B1ana"
+      ]
+    },
+    {
+      "bwin_event_id": "7905815",
+      "bwin_url": "https://www.bwin.es/es/sports/eventos/martes-combi-2:7905815",
+      "text": "Martes Combi+Mañana / 21:00",
+      "text_observed_at_utc": "2026-11-02T20:33:43.956538+00:00",
+      "source_pages": [
+        "https://www.bwin.es/es/sports/f%C3%BAtbol-4/ma%C3%B1ana"
+      ]
+    },
+    {
+      "bwin_event_id": "7909413",
+      "bwin_url": "https://www.bwin.es/es/sports/eventos/martes-combi-2:7909413",
+      "text": "Martes Combi+Mañana / 21:00",
+      "text_observed_at_utc": "2026-11-02T20:33:43.956538+00:00",
+      "source_pages": [
+        "https://www.bwin.es/es/sports/f%C3%BAtbol-4/ma%C3%B1ana"
+      ]
+    },
+    {
+      "bwin_event_id": "7905816",
+      "bwin_url": "https://www.bwin.es/es/sports/eventos/martes-combi-2:7905816",
+      "text": "Martes Combi+Mañana / 23:30",
+      "text_observed_at_utc": "2026-11-02T20:33:43.956538+00:00",
+      "source_pages": [
+        "https://www.bwin.es/es/sports/f%C3%BAtbol-4/ma%C3%B1ana"
+      ]
+    },
+    {
+      "bwin_event_id": "7905674",
+      "bwin_url": "https://www.bwin.es/es/sports/eventos/rotherham-united-newcastle-united-sub-21-2:7905674",
+      "text": "Rotherham United Newcastle Sub-21Mañana / 20:00 CA",
+      "text_observed_at_utc": "2026-11-02T20:33:43.956538+00:00",
+      "source_pages": [
+        "https://www.bwin.es/es/sports/f%C3%BAtbol-4/ma%C3%B1ana"
+      ]
+    },
+    {
+      "bwin_event_id": "7905689",
+      "bwin_url": "https://www.bwin.es/es/sports/eventos/newport-county-crystal-palace-sub-21-2:7905689",
+      "text": "Newport County Crystal Palace Sub-21Mañana / 20:00 CA",
+      "text_observed_at_utc": "2026-11-02T20:33:43.956538+00:00",
+      "source_pages": [
+        "https://www.bwin.es/es/sports/f%C3%BAtbol-4/ma%C3%B1ana"
+      ]
+    },
+    {
+      "bwin_event_id": "7905690",
+      "bwin_url": "https://www.bwin.es/es/sports/eventos/cambridge-united-brighton-and-hove-albion-sub-21-2:7905690",
+      "text": "Cambridge United Brighton And Hove Albion Sub-21Mañana / 20:00 CA",
+      "text_observed_at_utc": "2026-11-02T20:33:43.956538+00:00",
+      "source_pages": [
+        "https://www.bwin.es/es/sports/f%C3%BAtbol-4/ma%C3%B1ana"
+      ]
+    },
+    {
+      "bwin_event_id": "7905692",
+      "bwin_url": "https://www.bwin.es/es/sports/eventos/rochdale-doncaster-rovers-fc-2:7905692",
+      "text": "Rochdale Doncaster Rovers FC Mañana / 20:00 CA",
+      "text_observed_at_utc": "2026-11-02T20:33:43.956538+00:00",
+      "source_pages": [
+        "https://www.bwin.es/es/sports/f%C3%BAtbol-4/ma%C3%B1ana"
+      ]
+    },
+    {
+      "bwin_event_id": "7904356",
+      "bwin_url": "https://www.bwin.es/es/sports/eventos/fk-otrant-olympic-ulcinj-fk-arsenal-tivat-2:7904356",
+      "text": "FK Otrant-Olympic Ulcinj FK Arsenal Tivat Mañana / 13:00 CA",
+      "text_observed_at_utc": "2026-11-02T20:33:43.956538+00:00",
+      "source_pages": [
+        "https://www.bwin.es/es/sports/f%C3%BAtbol-4/ma%C3%B1ana"
+      ]
+    },
+    {
+      "bwin_event_id": "7902458",
+      "bwin_url": "https://www.bwin.es/es/sports/eventos/sevilla-alav%C3%A9s-2:7902458",
+      "text": "Sevilla Alavés 6/11/26 21:00 CA",
+      "text_observed_at_utc": "2026-11-02T20:33:47.313878+00:00",
+      "source_pages": [
+        "https://www.bwin.es/es/sports/f%C3%BAtbol-4"
+      ]
+    },
+    {
+      "bwin_event_id": "7903871",
+      "bwin_url": "https://www.bwin.es/es/sports/eventos/m%C3%A1laga-cf-racing-santander-2:7903871",
+      "text": "Málaga CF Racing Santander 7/11/26 14:00 CA",
+      "text_observed_at_utc": "2026-11-02T20:33:47.313878+00:00",
+      "source_pages": [
+        "https://www.bwin.es/es/sports/f%C3%BAtbol-4"
+      ]
+    },
+    {
+      "bwin_event_id": "7903627",
+      "bwin_url": "https://www.bwin.es/es/sports/eventos/espanyol-deportivo-la-coru%C3%B1a-2:7903627",
+      "text": "Espanyol Deportivo La Coruña 7/11/26 16:15",
+      "text_observed_at_utc": "2026-11-02T20:33:47.313878+00:00",
+      "source_pages": [
+        "https://www.bwin.es/es/sports/f%C3%BAtbol-4"
+      ]
+    },
+    {
+      "bwin_event_id": "7903872",
+      "bwin_url": "https://www.bwin.es/es/sports/eventos/osasuna-athletic-club-2:7903872",
+      "text": "Osasuna Athletic Club 7/11/26 18:30",
+      "text_observed_at_utc": "2026-11-02T20:33:47.313878+00:00",
+      "source_pages": [
+        "https://www.bwin.es/es/sports/f%C3%BAtbol-4"
+      ]
+    },
+    {
+      "bwin_event_id": "7903873",
+      "bwin_url": "https://www.bwin.es/es/sports/eventos/valencia-real-madrid-2:7903873",
+      "text": "Valencia Real Madrid 7/11/26 21:00",
+      "text_observed_at_utc": "2026-11-02T20:33:47.313878+00:00",
+      "source_pages": [
+        "https://www.bwin.es/es/sports/f%C3%BAtbol-4"
+      ]
+    },
+    {
+      "bwin_event_id": "7904031",
+      "bwin_url": "https://www.bwin.es/es/sports/eventos/elche-real-betis-2:7904031",
+      "text": "Elche Real Betis 8/11/26 14:00",
+      "text_observed_at_utc": "2026-11-02T20:33:47.313878+00:00",
+      "source_pages": [
+        "https://www.bwin.es/es/sports/f%C3%BAtbol-4"
+      ]
+    },
+    {
+      "bwin_event_id": "7904029",
+      "bwin_url": "https://www.bwin.es/es/sports/eventos/r-sociedad-rayo-2:7904029",
+      "text": "Real Sociedad Rayo Vallecano 8/11/26 16:15",
+      "text_observed_at_utc": "2026-11-02T20:33:47.313878+00:00",
+      "source_pages": [
+        "https://www.bwin.es/es/sports/f%C3%BAtbol-4"
+      ]
+    },
+    {
+      "bwin_event_id": "7904030",
+      "bwin_url": "https://www.bwin.es/es/sports/eventos/villarreal-getafe-2:7904030",
+      "text": "Villarreal Getafe 8/11/26 18:30",
+      "text_observed_at_utc": "2026-11-02T20:33:47.313878+00:00",
+      "source_pages": [
+        "https://www.bwin.es/es/sports/f%C3%BAtbol-4"
+      ]
+    },
+    {
+      "bwin_event_id": "7904043",
+      "bwin_url": "https://www.bwin.es/es/sports/eventos/at-madrid-bar%C3%A7a-2:7904043",
+      "text": "Atlético Madrid FC Barcelona 8/11/26 21:00",
+      "text_observed_at_utc": "2026-11-02T20:33:47.313878+00:00",
+      "source_pages": [
+        "https://www.bwin.es/es/sports/f%C3%BAtbol-4"
+      ]
+    },
+    {
+      "bwin_event_id": "7905296",
+      "bwin_url": "https://www.bwin.es/es/sports/eventos/waterhouse-fc-cavalier-fc-2:7905296",
+      "text": "Waterhouse FC Cavalier FC Mañana / 2:00 CA",
+      "text_observed_at_utc": "2026-11-02T20:33:53.657591+00:00",
+      "source_pages": [
+        "https://www.bwin.es/es/sports/f%C3%BAtbol-4/apuestas/jamaica-138"
+      ]
+    },
+    {
+      "bwin_event_id": "7906431",
+      "bwin_url": "https://www.bwin.es/es/sports/eventos/sv-bubali-sv-caiquetio-2:7906431",
+      "text": "SV Bubali SV Caiquetio Mañana / 1:30 CA",
+      "text_observed_at_utc": "2026-11-02T20:33:56.848483+00:00",
+      "source_pages": [
+        "https://www.bwin.es/es/sports/f%C3%BAtbol-4/apuestas/aruba-76"
+      ]
+    }
+  ],
+  "source_batches": [
+    "/Users/antonio/Projects/scraper/outputs/discovery/2026-11-02_1500_0300/prospective_trial/bwin/batches/1/bwin_discovery.json",
+    "/Users/antonio/Projects/scraper/outputs/discovery/2026-11-02_1500_0300/prospective_trial/bwin/batches/2/bwin_discovery.json",
+    "/Users/antonio/Projects/scraper/outputs/discovery/2026-11-02_1500_0300/prospective_trial/bwin/batches/3/bwin_discovery.json"
+  ]
+}

@@ -1,0 +1,38 @@
+{
+  "schema_version": "1.0-selector-order-comparison",
+  "original_bwin_order_fixture_ids": [
+    1493215,
+    1492442,
+    1549844,
+    1493223,
+    1493212,
+    1559695,
+    1648245,
+    1493220,
+    1603416,
+    1505550,
+    1648246,
+    1646903,
+    1647117
+  ],
+  "proposed_fixture_sport_priority": [
+    "1493215",
+    "1549844",
+    "1559695",
+    "1493212",
+    "1492442",
+    "1493220",
+    "1505550",
+    "1646903",
+    "1493223",
+    "1603416",
+    "1648246",
+    "1648245",
+    "1647117"
+  ],
+  "reasons": [
+    "SPORT_QUEUE_INDEPENDENT_FROM_BWIN",
+    "FAMILY_DIVERSIFICATION",
+    "OPERATIONAL_BWIN_ORDER_UNCHANGED"
+  ]
+}

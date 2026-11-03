@@ -1,0 +1,24 @@
+{
+  "deterministic_json_sha256": {
+    "run1": {
+      "coverage_matrix": "56d455aa1453d786c82d3973736664792ad5823dde081e9e5f046447e77eacc2",
+      "pattern_discovery": "f29a76aa1127f2d13c3bed5a520c3d677e8ccf712f8ed009abda4bb76b9b8f54",
+      "research_queue_sport": "2b2d1451780ebc0da392f7a8dd2d70c6f80d6f4b56d57886ac09bf27e84bbf53",
+      "commercial_link_report": "5d8db052e20afe9fc4a2355649064c52c19bac37cf2f41cb01e8d154113a0782",
+      "selector_order_comparison": "4380f6aaeef4be193644bdc90d106ae0c1e7117589fe9534e1c32088d8d6edca"
+    },
+    "run2": {
+      "coverage_matrix": "56d455aa1453d786c82d3973736664792ad5823dde081e9e5f046447e77eacc2",
+      "pattern_discovery": "f29a76aa1127f2d13c3bed5a520c3d677e8ccf712f8ed009abda4bb76b9b8f54",
+      "research_queue_sport": "2b2d1451780ebc0da392f7a8dd2d70c6f80d6f4b56d57886ac09bf27e84bbf53",
+      "commercial_link_report": "5d8db052e20afe9fc4a2355649064c52c19bac37cf2f41cb01e8d154113a0782",
+      "selector_order_comparison": "4380f6aaeef4be193644bdc90d106ae0c1e7117589fe9534e1c32088d8d6edca"
+    }
+  },
+  "source_sha256": {
+    "budget_assignment.json": "a4ac51af2730c928370117c8581f12cc9abfc2dcb9cb5b0d6e85004d68716fc1",
+    "bwin_discovery.json": "5de47060988366ee23db0fcba7fa0dabb6d1eacad094521fc2ef0262c0f0cd13",
+    "enriched/preselection.json": "20218d6ef05c505428709f74b43749f0375de4e4c67035f14dbafbd3821c237e",
+    "opportunity_scan.json": "fb64b7c0145c57bbad0cfe86e51222ea66822e4bf81a8c16980925b306b60840"
+  }
+}
