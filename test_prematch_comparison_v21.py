@@ -13,10 +13,12 @@ class RevisionTests(unittest.TestCase):
         data=observations(9)
         for rows in data.values():
             for row in rows[7:]:row['statistics_requested']=False
-        summary=analyze_fixture(fixture(),NOW,data)['coverage_summary']
-        for row in [summary,*summary['by_metric_team_denominator']]:
-            self.assertEqual(row['historical_matches_available'],row['historical_matches_detailed']+row['historical_matches_not_detailed'])
-        self.assertNotEqual(summary['representative_series']['metric'],'xg')
+        analysis=analyze_fixture(fixture(),NOW,data)
+        summary=analysis['coverage_summary']
+        self.assertEqual(summary['basis'],'MINIMUM_ACROSS_PRODUCTION_AND_CONCESSION_SERIES')
+        for signal in analysis['signals']:
+            for row in (signal['own'],signal['opponent_conceded']):
+                self.assertEqual(row['historical_matches_available'],row['historical_matches_detailed']+row['historical_matches_not_detailed'])
     def test_deduplicated_supported_links(self):
         link={'market':'Total','selection':'Over','odd':2,'line':2.5,'relation':'INDIRECT_TEAM_TO_MATCH_TOTAL'}
         signals=[{'metric':'goals','status':'SUPPORTED_DESCRIPTIVE_SIGNAL','markets':[link]},

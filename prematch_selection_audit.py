@@ -309,6 +309,8 @@ def build_selection_audit(run_dir: Path, artifacts: dict[str, dict[str, Any]], s
     bwin_map = fixture_map(data(artifacts, "bwin"), "matches")
     bwin_found = {fid for fid, x in bwin_map.items() if x.get("bwin_event_id")}
     scanner = data(artifacts, "scanner")
+    asof = parse_dt(data(artifacts, "tactical").get("asof_madrid")) or parse_dt(scanner.get("asof_madrid"))
+    artifact_temporal = {name: temporal_status(meta["data"], asof) for name, meta in artifacts.items()}
     captured, scanner_verified = scanner_fixture_sets(scanner)
     handoff = data(artifacts, "scan_handoff") or data(artifacts, "handoff")
     finalists = set()
@@ -322,6 +324,8 @@ def build_selection_audit(run_dir: Path, artifacts: dict[str, dict[str, Any]], s
     ):
         finalists.add(str(handoff["fixture_id"]))
     ledger_doc = data(artifacts, "scan_ledger") or data(artifacts, "ledger")
+    ledger_artifact = "scan_ledger" if data(artifacts, "scan_ledger") else "ledger"
+    ledger_known_asof = artifact_temporal.get(ledger_artifact) == "VERIFIED_NOT_AFTER_ASOF"
     ledger_map = fixture_map(ledger_doc, "fixtures")
     summary = data(artifacts, "summary")
     eval_deferred = set_from(summary, "evaluation_deferred_ids")
@@ -356,6 +360,8 @@ def build_selection_audit(run_dir: Path, artifacts: dict[str, dict[str, Any]], s
             "stages": stages, "original_state": ledger.get("state"), "original_stage": ledger.get("stage"),
             "original_reason": ledger.get("reason"), "history": ledger.get("history", []),
             "classification": classification,
+            "classification_scope": "KNOWN_AS_OF" if ledger_known_asof else "RETROSPECTIVE_OUTCOME_POST_ASOF",
+            "classification_asof": classification if ledger_known_asof else "NO_VERIFICABLE_AS_OF",
         })
     stages = [
         stage("discovered", discovered if "fixtures" in artifacts else None, None),
@@ -366,13 +372,13 @@ def build_selection_audit(run_dir: Path, artifacts: dict[str, dict[str, Any]], s
         stage("within_scope_horizon", set(trial_map) if "trial_scope" in artifacts else None, set(eligible_map)),
         stage("basic_evaluation", set(pre_map) if "preselection" in artifacts else None, set(trial_map)),
         stage("statistics_details", details if "preselection" in artifacts else None, set(pre_map)),
-        stage("patterns_with_evidence", patterns_with_evidence if "pattern_engine" in artifacts else None, set(pre_map)),
+        stage("fixtures_with_nonempty_pattern_rows", patterns_with_evidence if "pattern_engine" in artifacts else None, set(pre_map),
+              "No equivale a señales sustentadas; consultar pattern_metrics."),
         stage("bwin_discovery", bwin_found if "bwin" in artifacts else None, set(pre_map)),
         stage("snapshot_capture", captured if "scanner" in artifacts else None, bwin_found),
         stage("scanner_verified", scanner_verified if "scanner" in artifacts else None, captured),
         stage("finalists_or_handoff", finalists if handoff else None, scanner_verified),
     ]
-    asof = parse_dt(data(artifacts, "tactical").get("asof_madrid")) or parse_dt(scanner.get("asof_madrid"))
     identity = {}
     for name, key in (("major", "fixtures"), ("trial_scope", "fixtures"), ("preselection", "matches"),
                       ("pattern_engine", "fixtures"), ("tactical", "fixtures"), ("bwin", "matches"),
@@ -384,6 +390,12 @@ def build_selection_audit(run_dir: Path, artifacts: dict[str, dict[str, Any]], s
                 "conflicts": identity_conflicts(discovered_map, fixture_map(doc, key)),
             }
     classification_counts = Counter(x["classification"] for x in fixture_rows)
+    classification_asof_counts = Counter(x["classification_asof"] for x in fixture_rows)
+    tactical_signals=[s for f in tactical_map.values() for s in f.get("signals",[]) if isinstance(s,dict)]
+    supported=[s for s in tactical_signals if s.get("status")=="SUPPORTED_DESCRIPTIVE_SIGNAL"]
+    supported_fixture_ids={str(s.get("signal_id","")).split(':')[0] for s in supported}
+    supported_market=[s for s in supported if s.get("markets")]
+    window_rows=[x for x in fixture_rows if str(x["fixture_id"]) in discovered]
     return {
         "schema_version": SCHEMA, "run_dir": str(run_dir),
         "selected_scan_run": str(scan_run) if scan_run else None,
@@ -391,7 +403,7 @@ def build_selection_audit(run_dir: Path, artifacts: dict[str, dict[str, Any]], s
         "offline_read_only_sources": True, "actionable_bet": False,
         "artifacts": {
             name: {"path": meta["path"], "sha256": meta["sha256"],
-                   "temporal_status": temporal_status(meta["data"], asof)}
+                   "temporal_status": artifact_temporal[name]}
             for name, meta in artifacts.items()
         },
         "missing_artifacts": [name for name in (
@@ -400,6 +412,14 @@ def build_selection_audit(run_dir: Path, artifacts: dict[str, dict[str, Any]], s
         ) if name not in artifacts and not (name == "handoff" and "scan_handoff" in artifacts)],
         "hash_checks": verify_hash_links(artifacts), "identity_checks": identity,
         "stage_summary": stages,
+        "discovered_window_only": {"count": len(discovered), "fixture_ids": sorted(discovered),
+                                   "fixtures": window_rows},
+        "expanded_artifact_union": {"count": len(all_ids),
+                                    "note": "Incluye fixture_audit y desenlaces retrospectivos; no es el denominador de la ventana."},
+        "pattern_metrics": {"pattern_rows": len(tactical_signals),
+                            "supported_signal_rows": len(supported),
+                            "supported_fixture_count": len(supported_fixture_ids),
+                            "supported_with_verified_market_count": len(supported_market)},
         "budget": {
             "max_matches_is_batch_size": data(artifacts, "ledger").get("scope", {}).get("max_matches_batch_size"),
             "evaluation_fixture_ids": sorted(evaluation_ids), "bwin_order_fixture_ids": sorted(bwin_order_ids),
@@ -407,10 +427,11 @@ def build_selection_audit(run_dir: Path, artifacts: dict[str, dict[str, Any]], s
             "deferred_is_not_excluded": True,
         },
         "classification_counts_exclusive": dict(sorted(classification_counts.items())),
+        "classification_counts_asof": dict(sorted(classification_asof_counts.items())),
         "fixtures": fixture_rows,
         "limitations": [
             "Las categorías de cada etapa pueden solaparse; no deben sumarse entre etapas.",
-            "Las clasificaciones terminales son exclusivas y conservan estado/motivo original.",
+            "Las clasificaciones terminales son desenlaces retrospectivos si su artefacto es POST_ASOF.",
             "NO_VERIFICABLE se usa cuando falta el artefacto o el vínculo necesario; no se estima.",
         ],
     }
@@ -530,10 +551,14 @@ def selection_markdown(audit: dict[str, Any]) -> str:
              "## Embudo por etapa", "", "| Etapa | Numerador | Denominador | Estado | Nota |", "|---|---:|---:|---|---|"]
     for item in audit["stage_summary"]:
         lines.append(f"| {esc(item['stage'])} | {esc(item['numerator'])} | {esc(item['denominator'])} | {esc(item['status'])} | {esc(item['note'])} |")
-    lines += ["", "Los conteos entre etapas pueden solaparse y no se suman como categorías exclusivas.", "",
-              "## Clasificación terminal exclusiva", "", "| Clasificación | Fixtures |", "|---|---:|"]
+    pm=audit.get('pattern_metrics',{})
+    lines += ["", "Los conteos entre etapas pueden solaparse y no se suman como categorías exclusivas.",
+              f"Ventana descubierta: **{audit.get('discovered_window_only',{}).get('count')}**; unión ampliada de artefactos: **{audit.get('expanded_artifact_union',{}).get('count')}**.",
+              f"Filas de señal: **{pm.get('pattern_rows')}**; sustentadas: **{pm.get('supported_signal_rows')}** en **{pm.get('supported_fixture_count')}** fixture(s); sustentadas con mercado verificado: **{pm.get('supported_with_verified_market_count')}**.", "",
+              "## Desenlace terminal retrospectivo", "", "| Clasificación | Fixtures |", "|---|---:|"]
     for name, count in audit["classification_counts_exclusive"].items():
         lines.append(f"| {esc(name)} | {count} |")
+    lines += ["", f"Estado conocido al corte `asof`: `{json.dumps(audit.get('classification_counts_asof',{}),ensure_ascii=False,sort_keys=True)}`. Los ledger/handoff `POST_ASOF` no se presentan como conocidos antes del corte."]
     lines += ["", "## Dónde desaparece cada candidato", "",
               "| Fixture | Partido | Competición | Alcance | API/detalles | Patrones | Bwin | Captura/scanner | Estado original | Clasificación |",
               "|---:|---|---|---|---|---|---|---|---|---|"]

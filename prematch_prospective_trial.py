@@ -209,7 +209,7 @@ def prepare(root,folder,day,args):
     from prematch_audit import CandidateLedger
     from preselect_matches import save_report, assign_ranks
     check_files(root,['discover_fixtures.py','filter_major_leagues.py','preselect_matches.py',
-                      'prematch_pattern_engine.py','bwin_discovery.py'])
+                      'prematch_pattern_engine.py','prematch_pattern_discovery.py','bwin_discovery.py'])
     if (folder/'prospective_trial/enriched/preselection.json').exists():
         archive=root/'outputs/discovery/archives'/f'{folder.name}_{now_madrid():%Y%m%dT%H%M%S%f}'
         shutil.copytree(folder,archive)
@@ -276,6 +276,9 @@ def prepare(root,folder,day,args):
     pre['api_errors']={f'batch_{i}_{k}':v for i,d in enumerate(batch_docs) for k,v in d.get('api_errors',{}).items()}
     pre['history_seasons_used']={k:v for d in batch_docs for k,v in d.get('history_seasons_used',{}).items()}
     assign_ranks(pre['matches']);outpre=base/'enriched';save_report(pre,outpre);prepath=outpre/'preselection.json'
+    # Sidecar deportivo V2: determinista, offline y anterior a cualquier dato Bwin.
+    run(root,'prematch_pattern_discovery.py',['--preselection',str(prepath),
+        '--output-dir',str(base/'patterns_v2')],logs)
     for f in pre['matches']:
         ready=f.get('data_readiness_score') is not None and f.get('details_checked')
         ledger.record(f,'PENDIENTE_BWIN' if ready else 'SIN_COBERTURA','preselection',f.get('data_readiness_status'))
@@ -322,6 +325,8 @@ def prepare(root,folder,day,args):
         'evaluation_deferred_ids':[f['fixture_id'] for f in all_selection if str(f['fixture_id']) not in selected_ids],
         'discovery_deferred_ids':[f['fixture_id'] for f in discovery_deferred],
         'sources':{'preselection':str(prepath),'pattern':str(patternfolder/'pattern_engine.json'),
+                   'pattern_discovery_v2':str(base/'patterns_v2/pattern_discovery.json'),
+                   'research_queue_sport':str(base/'patterns_v2/research_queue_sport.json'),
                    'discovery':str(bwinfolder/'bwin_discovery.json')}}
     dump(base/'prospective_test_summary.json',summary)
     return summary
@@ -362,8 +367,8 @@ def main(argv=None):
     p.add_argument('--details',type=int,default=8)
     p.add_argument('--min-lead',type=int,default=60)
     args=p.parse_args(argv)
-    if args.evaluation_budget<0 or args.discovery_budget<0 or not __import__("math").isfinite(args.horizon_hours) or args.horizon_hours<0 or args.discovery_retries<0 or args.max_odds_age<1 or args.max_matches<1 or args.bwin_top<1 or args.max_scrapes<0 or args.history<4 or args.details<1 or args.details>args.history or args.min_lead<45:
-        p.error('Límites inválidos: max-matches/bwin-top >0, max-scrapes >=0, history>=4, 1<=details<=history y min-lead>=45')
+    if args.evaluation_budget<0 or args.discovery_budget<0 or not __import__("math").isfinite(args.horizon_hours) or args.horizon_hours<0 or args.discovery_retries<0 or args.max_odds_age<1 or args.max_matches<1 or args.bwin_top<1 or args.max_scrapes<0 or not 4<=args.history<=50 or args.details<1 or args.details>args.history or args.min_lead<45:
+        p.error('Límites inválidos: max-matches/bwin-top >0, max-scrapes >=0, history 4..50, 1<=details<=history y min-lead>=45')
     if args.date is not None:
         try:
             day = parse_date_relative(args.date)

@@ -27,9 +27,10 @@ class CSVTests(unittest.TestCase):
    ledger=CandidateLedger(base/'candidate_ledger.json');ledger.record(f,'EXCLUIDO_POR_LIMITE_ANTERIOR','select_fixtures','LEGACY_TOP5');ledger.write()
    row=next(r for r in export_daily(base) if r['fixture_id']==1490590)
    self.assertEqual(row['estado_final'],'NO_EVALUADO_POR_LIMITE');self.assertEqual(row['motivo_exclusion_o_pendiente'],'LEGACY_TOP5')
- def test_default_config_is_15_to_03(self):
+ def test_default_config_profiles(self):
   c,_,_=t.load_window_config(Path(__file__).parent)
-  for name in ('normal','ampliada'):
-   _,start,end=t.resolve_window(c,name);self.assertEqual((str(start),str(end)),('15:00:00','03:00:00'))
+  expected={'normal':('16:00:00','02:00:00'),'ampliada':('15:00:00','03:00:00')}
+  for name,hours in expected.items():
+   _,start,end=t.resolve_window(c,name);self.assertEqual((str(start),str(end)),hours)
 
 if __name__=='__main__':unittest.main()

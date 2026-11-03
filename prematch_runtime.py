@@ -30,6 +30,14 @@ def reusable_preparation(root, folder, day, args):
     """Revalidate the source chain; legacy preparations need no invented hashes."""
     base = folder / 'prospective_trial'
     summary = trial.read(base / 'prospective_test_summary.json')
+    methodology = summary.get('preselection', {}).get('methodology', {})
+    if not methodology:
+        methodology = trial.read(base / 'enriched/preselection.json').get('methodology', {})
+    requested_history = getattr(args, 'history', None)
+    requested_details = getattr(args, 'details', None)
+    if ((requested_history is not None and methodology.get('sample_history_cap') != requested_history) or
+            (requested_details is not None and methodology.get('sample_details_cap') != requested_details)):
+        raise trial.TrialError('PREPARATION_DEPTH_MISMATCH')
     begin, end = trial.local_window(day, args.start, args.end)
     if (summary.get('day'), summary.get('window_start_madrid'), summary.get('window_end_madrid')) != (
             day.isoformat(), begin.isoformat(), end.isoformat()):
@@ -510,6 +518,11 @@ def scan(root, folder, day, args):
                 ledger.record(fixture,'SIN_CUOTAS','opportunity_scanner',str(exc))
             ready = [];scanner_path=None
             failures.append({'phase': 'scanner', 'reason': str(exc)})
+    # Enlace comercial sidecar: nunca participa en tiers ni en write_handoff.
+    sport_queue=base/'patterns_v2/research_queue_sport.json'
+    if sport_queue.is_file():
+        from prematch_pattern_discovery import commercial_link
+        commercial_link(sport_queue,scanner_path,base/'bwin/bwin_discovery.json',run_dir/'patterns_v2')
     # Revalidate after subprocesses and before publishing the final handoff.
     final_ready = []
     for fixture, _, path in ready:

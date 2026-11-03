@@ -78,13 +78,13 @@ class TrialTests(unittest.TestCase):
 class ConfigProfileTests(unittest.TestCase):
     def test_default_profile(self):
         name,start,end=resolve_window(DEFAULT_WINDOW_CONFIG)
-        self.assertEqual((name,start,end),('normal',time(15),time(3)))
+        self.assertEqual((name,start,end),('normal',time(16),time(2)))
     def test_extended_profile(self):
         name,start,end=resolve_window(DEFAULT_WINDOW_CONFIG,'ampliada')
         self.assertEqual((name,start,end),('ampliada',time(15),time(3)))
     def test_override_end(self):
         name,start,end=resolve_window(DEFAULT_WINDOW_CONFIG,'normal',end_override=time(4))
-        self.assertEqual((name,start,end),('normal',time(15),time(4)))
+        self.assertEqual((name,start,end),('normal',time(16),time(4)))
     def test_override_start(self):
         _,start,end=resolve_window(DEFAULT_WINDOW_CONFIG,'ampliada',start_override=time(19))
         self.assertEqual((start,end),(time(19),time(3)))
@@ -105,11 +105,11 @@ class ConfigProfileTests(unittest.TestCase):
             self.assertTrue(used)
             self.assertEqual(path,cfg)
             self.assertEqual(resolve_window(x,'ampliada')[2],time(3))
-    def test_no_file_preserves_previous_default(self):
+    def test_no_file_uses_bundled_default(self):
         with TemporaryDirectory() as td:
             x,used,_=load_window_config(Path(td))
             self.assertFalse(used)
-            self.assertEqual(resolve_window(x)[2],time(3))
+            self.assertEqual(resolve_window(x)[2],time(2))
     def test_missing_explicit_config_fails(self):
         with TemporaryDirectory() as td:
             with self.assertRaises(TrialError):load_window_config(Path(td),Path('config/noexiste.json'))

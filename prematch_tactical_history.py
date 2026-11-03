@@ -9,8 +9,9 @@ from preselect_matches import read_stat_block, numeric
 import prematch_prospective_trial as t
 
 
-def observations_from_games(games, team_id, details):
+def observations_from_games(games, team_id, details, requested_ids=None):
     rows=[]
+    requested=set(details if requested_ids is None else requested_ids)
     for g in games:
         other=g['away_id'] if g['home_id']==team_id else g['home_id']
         raw=details.get(g['id'],{})
@@ -25,9 +26,12 @@ def observations_from_games(games, team_id, details):
         # Only regular-time FT games enter the tactical sample.
         if g.get('status')!='FT':continue
         own['goals']=g['team_goals'];opp['goals']=g['opponent_goals']
+        request_status=('NOT_REQUESTED' if g['id'] not in requested else
+                        'VALID' if bool(raw.get('statistics')) and (own or opp) else 'REQUESTED_MISSING')
         rows.append({'fixture_id':g['id'],'team_id':team_id,'opponent_id':other,
                      'kickoff_utc':g['date_utc'],'league_id':g['league_id'],'season':g['season'],
-                     'venue':g['venue'],'status':'FT','statistics_requested':bool(raw.get('statistics')),'own':own,'conceded':opp})
+                     'venue':g['venue'],'status':'FT','statistics_requested':g['id'] in requested,
+                     'statistics_request_status':request_status,'own':own,'conceded':opp})
     return rows
 
 
@@ -49,19 +53,21 @@ class LocalHistoryCache:
                         self.records[fid]=(key,raw,p)
             except (ValueError,OSError,TypeError):continue
 
-    def for_team(self,team_id,league_id,cutoff,limit=20):
+    def for_team(self,team_id,league_id,cutoff,limit=20,season=None):
         from preselect_matches import prepare_history
         chosen=[];details={};refs={}
         for _,raw,path in self.records.values():
             teams=raw.get('teams',{});ids=[teams.get(s,{}).get('id') for s in ('home','away')]
             at=t.dt(raw['fixture']['date'])
             if team_id not in ids or raw.get('league',{}).get('id')!=league_id or not at or at>=cutoff:continue
+            if season is not None and raw.get('league',{}).get('season')!=season:continue
             chosen.append(raw);details[raw['fixture']['id']]=raw
             refs[raw['fixture']['id']]=path
         games=prepare_history(chosen,team_id,cutoff,limit)
         # prepare_history now preserves FT status; backward compatibility with old snapshots is explicit.
         for g in games:g['status']='FT'
-        observations=observations_from_games(games,team_id,details)
+        requested={fid for fid,raw in details.items() if isinstance(raw.get('statistics'),list)}
+        observations=observations_from_games(games,team_id,details,requested)
         used=sorted({refs[g['fixture_id']] for g in observations})
         for path in used:self.sources[str(path)]={'path':str(path),'sha256':self.loaded_sha[str(path)]}
         return observations

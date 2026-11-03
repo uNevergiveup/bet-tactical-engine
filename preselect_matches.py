@@ -189,6 +189,28 @@ def team_detail(games:list[dict[str,Any]],team_id:int,details:dict[int,dict[str,
       'missing_not_zero':True}
 
 
+def select_detail_games(games:list[dict[str,Any]],league_id:int,season:int,
+                        cutoff:datetime,limit:int) -> tuple[list[dict[str,Any]],dict[str,Any]]:
+    """Elige la muestra que el motor táctico realmente admite sin alterar el histórico general."""
+    eligible=[];rejected=Counter()
+    for game in games:
+        try:at=utc_datetime(game.get('date_utc'))
+        except ValueError:
+            rejected['INVALID_DATE']+=1;continue
+        if at>=cutoff:rejected['AT_OR_AFTER_CUTOFF']+=1
+        elif game.get('status')!='FT':rejected['NON_REGULAR_TIME_FT']+=1
+        elif game.get('league_id')!=league_id:rejected['DIFFERENT_COMPETITION']+=1
+        elif game.get('season')!=season:rejected['DIFFERENT_SEASON']+=1
+        else:eligible.append(game)
+    eligible.sort(key=lambda x:x['date_utc'],reverse=True)
+    selected=eligible[:limit]
+    return selected,{'policy':'SAME_LEAGUE_SEASON_FT_BEFORE_CUTOFF','requested_cap':limit,
+        'eligible_n':len(eligible),'selected_n':len(selected),
+        'selected_fixture_ids':[g['id'] for g in selected],
+        'alternative_sources_used':[],'rejected_reasons':dict(sorted(rejected.items())),
+        'shortfall_n':max(0,limit-len(selected))}
+
+
 def standing_for(raw:list[dict[str,Any]],team_id:int) -> dict[str,Any]:
     matches=[]
     for obj in raw:
@@ -317,14 +339,16 @@ def score_readiness(h:dict[str,Any],a:dict[str,Any],s1:dict[str,Any],
 def evaluate_fixture(f:dict[str,Any],histories:dict[int,list[dict[str,Any]]],
   details:dict[int,dict[str,Any]],standings:dict[tuple[int,int],list[dict[str,Any]]],
   errors:dict[str,str],now:datetime,detail_limit:int,
-  details_selected:bool=True) -> dict[str,Any]:
+  details_selected:bool=True,detail_requested_ids:set[int]|None=None) -> dict[str,Any]:
     lid=f['league_id'];season=f['season'];hid=f['home_id'];aid=f['away_id']
     cutoff=min(now,utc_datetime(f['kickoff_utc']))
     h=[g for g in histories.get(hid,[]) if utc_datetime(g['date_utc'])<cutoff]
     a=[g for g in histories.get(aid,[]) if utc_datetime(g['date_utc'])<cutoff]
     hb=team_basic(h,lid,cutoff);ab=team_basic(a,lid,cutoff)
-    hd=team_detail(h[:detail_limit],hid,details) if details_selected else None
-    ad=team_detail(a[:detail_limit],aid,details) if details_selected else None
+    hdetail,hselection=select_detail_games(h,lid,season,cutoff,detail_limit)
+    adetail,aselection=select_detail_games(a,lid,season,cutoff,detail_limit)
+    hd=team_detail(hdetail,hid,details) if details_selected else None
+    ad=team_detail(adetail,aid,details) if details_selected else None
     standings_rows=standings.get((lid,season),[])
     hs=standing_for(standings_rows,hid);ass=standing_for(standings_rows,aid)
     prelim=preliminary_score(hb,ab,hs,ass)
@@ -341,10 +365,12 @@ def evaluate_fixture(f:dict[str,Any],histories:dict[int,list[dict[str,Any]]],
     if f'{lid}:{season}' in errors:
         notes.append('Tabla no consultada por error de API')
     from prematch_tactical_history import observations_from_games
-    observed={'home':observations_from_games(h,hid,details) if details_selected else [],
-              'away':observations_from_games(a,aid,details) if details_selected else []}
+    requested=detail_requested_ids or set()
+    observed={'home':observations_from_games(h,hid,details,requested) if details_selected else [],
+              'away':observations_from_games(a,aid,details,requested) if details_selected else []}
     return {'fixture_id':f['fixture_id'],'kickoff_madrid':f['kickoff_madrid'],
       'home_id':hid,'away_id':aid,'statistical_observations':observed,
+      'detail_selection':{'home':hselection,'away':aselection},
       'home':f['home'],'away':f['away'],'country':f['country'],'league':f['league'],
       'league_id':lid,'season':season,'gender':f['gender'],'region':f['region'],
       'region_priority':f['region_priority'],'analysis_cutoff_utc':cutoff.isoformat(),
@@ -562,7 +588,8 @@ def run_evaluator(doc:dict[str,Any],client:Any,now:datetime,history_limit:int=20
         for tid in (f['home_id'],f['away_id']):
             cutoff=min(now,utc_datetime(f['kickoff_utc']))
             subset=[g for g in histories.get(tid,[]) if utc_datetime(g['date_utc'])<cutoff]
-            detail_ids.update(g['id'] for g in subset[:detail_limit])
+            selected,_=select_detail_games(subset,f['league_id'],f['season'],cutoff,detail_limit)
+            detail_ids.update(g['id'] for g in selected)
     details={};detail_list=sorted(detail_ids)
     for i in range(0,len(detail_list),20):
         batch=detail_list[i:i+20]
@@ -577,7 +604,7 @@ def run_evaluator(doc:dict[str,Any],client:Any,now:datetime,history_limit:int=20
             print(f'  Detalle estadístico: {min(i+20,len(detail_list))}/{len(detail_list)} partidos',flush=True)
     print(f'  Modo: {mode} | Detalle completo solicitado: {len(detail_selected)}/{len(fixtures)}',flush=True)
     result=[evaluate_fixture(f,histories,details,standings,errors,now,detail_limit,
-                              f['fixture_id'] in detail_selected) for f in fixtures]
+                              f['fixture_id'] in detail_selected,detail_ids) for f in fixtures]
     # Un error de detalle por lote puede crear una falsa puntuación baja:
     # suspender la puntuación de los partidos cuyos históricos afectados
     # pertenecen a lotes fallidos, en lugar de fingir 'datos escasos'.
@@ -593,7 +620,9 @@ def run_evaluator(doc:dict[str,Any],client:Any,now:datetime,history_limit:int=20
                 match['warnings'].append(f'{label}: {supplement_warnings[str(tid)]}')
                 if match['data_readiness_score'] is not None:
                     match['data_readiness_status']='REVISION_PARCIAL_API'
-            if any(g['id'] in failed_detail_ids for g in histories.get(tid,[])[:detail_limit]):
+            selection_key='home' if label=='LOCAL' else 'away'
+            selected_ids=set(match.get('detail_selection',{}).get(selection_key,{}).get('selected_fixture_ids',[]))
+            if selected_ids & failed_detail_ids:
                 match['warnings'].append(f'{label}: lote de estadísticas detalladas fallido')
                 match['data_readiness_score']=None
                 match['research_priority_score']=None

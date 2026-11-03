@@ -363,6 +363,26 @@ def diversified_order(fixtures,score=None):
     return result
 
 
+def market_link_counts(signals):
+    """Compatibility view of signal-to-market links; it does not rank them."""
+    def key(m):
+        return (m.get('bwin_event_id'),m.get('market'),m.get('selection'),m.get('line'),m.get('odd'))
+    raw=[m for s in signals for m in s.get('markets',[])]
+    supported=[m for s in signals if s.get('status')=='SUPPORTED_DESCRIPTIVE_SIGNAL' and s.get('metric')!='xg' for m in s.get('markets',[])]
+    return {'raw_signal_market_links':len(raw),'unique_market_selections':len({key(m) for m in raw}),
+            'direct_raw_unique':len({key(m) for m in raw if m.get('relation')=='DIRECT_TEAM_MARKET'}),
+            'indirect_raw_unique':len({key(m) for m in raw if m.get('relation')=='INDIRECT_TEAM_TO_MATCH_TOTAL'}),
+            'supported_signal_market_links':len(supported),'unique_supported_selections':len({key(m) for m in supported}),
+            'direct_supported':len({key(m) for m in supported if m.get('relation')=='DIRECT_TEAM_MARKET'}),
+            'indirect_supported':len({key(m) for m in supported if m.get('relation')=='INDIRECT_TEAM_TO_MATCH_TOTAL'})}
+
+
+def capture_age_score(capture,asof,limit=120):
+    """Compatibility helper for the unchanged capture-freshness calculation."""
+    age=(asof-capture).total_seconds()/60 if capture else None
+    return 10 if age is not None and 0<=age<=limit else 0
+
+
 def selection_rows(fixtures,tactical,scanner,asof):
     rows=[];audits={str(a['fixture_id']):a for a in (scanner or {}).get('audits',[])}
     reviews_by_fid=defaultdict(list)
@@ -389,15 +409,13 @@ def selection_rows(fixtures,tactical,scanner,asof):
         capture_times=[t.dt(m.get('capture_madrid')) for m in links]
         capture_times=[v for v in capture_times if v]
         capture=max(capture_times,key=lambda value:value.timestamp()) if capture_times else None
-        age=(asof-capture).total_seconds()/60 if capture else None
-        capture_fresh=bool(capture is not None and 0<=age<=120)
         # Operational readiness is independent from the historical score and does
         # not grow with the number of quoted selections.
         readiness_parts={'identity_and_preflight':25 if validation.get('verified_preflights',0)>0 else 0,
                          'scanner':20 if audits.get(fid,{}).get('status')=='VERIFIED' else 0,
                          'statistical_join':15 if verified else 0,
                          'market_correspondence':20 if direct else 12 if indirect else 8 if unclassified else 0,
-                         'capture_age':10 if capture_fresh else 0,
+                         'capture_age':capture_age_score(capture,asof),
                          'temporal_margin':10 if lead>=45 else 0}
         readiness=round(sum(readiness_parts.values()),2)
         reason=[]
@@ -525,10 +543,21 @@ def run_engine(preselection,pattern,out,root=None,preflights=(),scanner=None,pro
             for key in ('home_id','away_id'):
                 if key in f and f[key]!=identity.get(key):raise ValueError('CANONICAL_TEAM_ID_MISMATCH')
                 f[key]=identity.get(key)
-        observations=f.get('statistical_observations',{})
-        if not observations and cache:
+        observations=f.get('statistical_observations',{}) or {}
+        if cache:
             cutoff=min(t.dt(f.get('analysis_cutoff_utc')) or asof,t.dt(f['kickoff_madrid']))
-            observations={side:cache.for_team(f.get(side+'_id'),f['league_id'],cutoff) if f.get(side+'_id') is not None else [] for side in ('home','away')}
+            cap=int(pre.get('methodology',{}).get('sample_history_cap') or 20)
+            merged={}
+            for side in ('home','away'):
+                existing=observations.get(side,[]) if isinstance(observations,dict) else []
+                cached=cache.for_team(f.get(side+'_id'),f['league_id'],cutoff,cap,f.get('season')) if f.get(side+'_id') is not None else []
+                byid={str(row.get('fixture_id')):row for row in existing if isinstance(row,dict)}
+                for row in cached:
+                    key=str(row.get('fixture_id'));previous=byid.get(key)
+                    quality=lambda x:sum(v is not None for block in (x.get('own',{}),x.get('conceded',{})) for v in block.values())
+                    if previous is None or quality(row)>quality(previous):byid[key]=row
+                merged[side]=sorted(byid.values(),key=lambda x:str(x.get('kickoff_utc','')),reverse=True)[:cap]
+            observations=merged
         x=analyze_fixture(f,asof,observations,profiles)
         x['market_validation']=market_links(f,x['signals'],prepath,preflights,asof,120) if x['status']=='EVALUATED' else {'verified_preflights':0,'block_reasons':x['block_reasons']}
         x['market_hypotheses_count']=sum(s['metric']!='xg' and s['status']=='SUPPORTED_DESCRIPTIVE_SIGNAL' for s in x['signals'])

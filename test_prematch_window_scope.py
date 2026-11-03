@@ -34,15 +34,15 @@ class WindowBoundaryTests(unittest.TestCase):
     def test_trial_default_uses_active_window(self):
         with patch.object(trial,'now_madrid',return_value=OBS),contextlib.redirect_stdout(io.StringIO()) as output:
             self.assertEqual(trial.main(['--show-config']),0)
-        self.assertIn('2026-11-01_1500_0300',output.getvalue())
+        self.assertIn('2026-11-01_1600_0200',output.getvalue())
     def test_daily_manual_date_and_horizon(self):
         with patch.object(trial,'now_madrid',return_value=OBS),contextlib.redirect_stdout(io.StringIO()) as output:
             self.assertEqual(daily.main(['--date','2026-11-02','--horizon-hours','0','--dry-run']),0)
-        self.assertIn('2026-11-02_1500_0300',output.getvalue())
+        self.assertIn('2026-11-02_1600_0200',output.getvalue())
     def test_daily_default_never_promotes_next_window(self):
         with patch.object(trial,'now_madrid',return_value=OBS),contextlib.redirect_stdout(io.StringIO()) as output:
             daily.main(['--dry-run'])
-        self.assertIn('2026-11-01_1500_0300',output.getvalue())
+        self.assertIn('2026-11-01_1600_0200',output.getvalue())
     def test_dst_elapsed_minutes_not_wall_clock(self):
         now=datetime(2026,10,25,2,40,tzinfo=trial.TZ,fold=0)
         fixture={'kickoff_madrid':'2026-10-25T02:30:00+01:00'}

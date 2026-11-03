@@ -136,6 +136,11 @@ class SelectionAuditTests(unittest.TestCase):
         write(run / "fixtures.json", doc)
         selection, _, _ = audit.run_audit(run)
         self.assertEqual(selection["artifacts"]["fixtures"]["temporal_status"], "POST_ASOF")
+        # Ledger outcome is retained retrospectively but is not backdated to asof.
+        ledger_path=run / "prospective_trial/candidate_ledger.json"
+        ledger=json.loads(ledger_path.read_text());ledger["generated_madrid"]="2026-11-04T12:00:00+01:00";write(ledger_path,ledger)
+        selection, _, _ = audit.run_audit(run)
+        self.assertEqual(selection["fixtures"][0]["classification_asof"], "NO_VERIFICABLE_AS_OF")
 
     def test_null_is_not_converted_to_zero_and_no_duplicates(self):
         row = signal(1, "home", "xg", "INSUFFICIENT_DATA", own_n=0, opp_n=0, mean=None)

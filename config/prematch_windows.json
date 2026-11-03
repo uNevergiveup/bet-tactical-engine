@@ -4,8 +4,8 @@
   "default_profile": "normal",
   "profiles": {
     "normal": {
-      "start": "15:00",
-      "end": "03:00"
+      "start": "16:00",
+      "end": "02:00"
     },
     "ampliada": {
       "start": "15:00",

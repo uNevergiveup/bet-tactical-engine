@@ -89,14 +89,16 @@ def main(argv=None):
     parser.add_argument('--review', type=Path, help='Revalidar el handoff antes de continuar manualmente')
     parser.add_argument('--root', type=Path, default=Path(__file__).resolve().parent)
     parser.add_argument('--max-matches', type=int, default=5,help='Tamaño del lote de evaluación API; todos los candidatos del horizonte se evalúan')
+    parser.add_argument('--history', type=int, default=20, help='Históricos por equipo (4..50; default 20)')
+    parser.add_argument('--details', type=int, default=8, help='Detalles por equipo (1..history; default 8)')
     parser.add_argument('--max-scrapes', type=int, default=0, help='Presupuesto de capturas verificadas; 0 = todos los candidatos del horizonte')
     parser.add_argument('--refresh-existing-odds',action='store_true',help='Autoriza recaptura con archivo SHA de snapshots caducados del mismo evento')
     parser.add_argument('--discovery-retries', type=int, default=2)
     parser.add_argument('--min-lead', type=int, default=45)
     parser.add_argument('--max-odds-age', type=int, default=120)
     args = parser.parse_args(argv)
-    if args.evaluation_budget<0 or args.discovery_budget<0 or not __import__("math").isfinite(args.horizon_hours) or args.horizon_hours<0 or args.bwin_top<1 or args.max_scrapes<0 or min(args.max_matches,args.max_odds_age)<1 or args.min_lead<45 or args.discovery_retries<0:
-        parser.error('Límites inválidos; margen mínimo 45 minutos')
+    if args.evaluation_budget<0 or args.discovery_budget<0 or not __import__("math").isfinite(args.horizon_hours) or args.horizon_hours<0 or args.bwin_top<1 or args.max_scrapes<0 or min(args.max_matches,args.max_odds_age)<1 or args.min_lead<45 or args.discovery_retries<0 or not 4 <= args.history <= 50 or not 1 <= args.details <= args.history:
+        parser.error('Límites inválidos; history 4..50, details 1..history y margen mínimo 45 minutos')
     if args.date and args.next_window:
         parser.error('--date y --next-window son alternativas')
     if args.check_final_odds and not args.review:
@@ -115,7 +117,7 @@ def main(argv=None):
         print(f'PERFIL {profile}: {begin.isoformat()} → {finish.isoformat()} | HORIZONTE {args.horizon_hours} h (0=toda la ventana)\nSALIDA {folder}', flush=True)
         if args.dry_run:
             return 0
-        args.team=[]; args.history=20; args.details=8
+        args.team=[]
         # This lock is shared with trial scan and remains as an inert file after closing.
         lock_path = root / 'outputs/.prematch_daily.lock'
         lock_path.parent.mkdir(parents=True, exist_ok=True)
