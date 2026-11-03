@@ -13,6 +13,7 @@ from pathlib import Path
 
 import prematch_prospective_trial as trial
 from bwin_market_preflight import validate_match
+from market_quality_gate import is_period, is_player_market
 from prematch_opportunity_scanner import match_identity, validate_snapshot
 
 
@@ -108,9 +109,11 @@ def verified_preflight(root, path, fixture, prepath, args):
     gate = match.get('quality_gate', {})
     if gate.get('join_status') != 'MATCHED_FIXTURE_TEAMS_GENDER_KICKOFF':
         raise trial.TrialError('STATISTICAL_JOIN_INVALID')
-    if not gate.get('researchable_after_data_gate'):
-        raise trial.TrialError('NO_RESEARCHABLE_MARKETS')
+    # A commercial shortlist is narrower than a verified research market.
+    # Keep the identity, quote, SHA and scanner gates; the tactical selector
+    # decides later whether a quote can support conditional research.
     # Compare exported market tables with their claimed counts as well.
+    usable=0
     for name, count in [('market_selection_review.csv', snapshot['selection_triplets_verified']),
                         ('market_research_shortlist.csv', gate['researchable_after_data_gate'])]:
         with (path.parent / name).open(encoding='utf-8-sig', newline='') as handle:
@@ -118,6 +121,15 @@ def verified_preflight(root, path, fixture, prepath, args):
         if len(rows) != count or any(str(r['fixture_id']) != str(fixture['fixture_id']) or
                 str(r['bwin_event_id']) != str(match['bwin_event_id']) for r in rows):
             raise trial.TrialError('MARKET_TABLE_COUNT_OR_ID_MISMATCH')
+        if name=='market_selection_review.csv':
+            usable=sum(r.get('market_kind') not in ('other','combined_or_builder','goalscorers','assists','half_full_time')
+                and not is_period(r.get('market',''))
+                and not is_player_market(r.get('market',''),r.get('market_kind',''))
+                and not any(token in r.get('market','').casefold() for token in ('live','en vivo','en directo','resto del partido','marcador actual','prorroga'))
+                and r.get('data_status') not in ('IDENTITY_MISMATCH','NO_STATISTICAL_SOURCE','DETAIL_NOT_EVALUATED')
+                for r in rows)
+    if not usable:raise trial.TrialError('NO_USABLE_VERIFIED_MARKET')
+    match['research_usable_market_selections']=usable
     return match
 
 
@@ -519,22 +531,29 @@ def scan(root, folder, day, args):
     qualified=[]
     for fixture,match,path in final_ready:
         row=rank.get(str(fixture['fixture_id']),{})
-        if row.get('eligible'):qualified.append((fixture,match,path))
+        if row.get('research_eligible'):qualified.append((fixture,match,path))
         else:
-            failures.append({'fixture_id':fixture['fixture_id'],'phase':'tactical_selection','reason':','.join(row.get('reasons',['TACTICAL_ENGINE_UNAVAILABLE']))})
-    qualified.sort(key=lambda row:-rank[str(row[0]['fixture_id'])]['research_priority'])
+            failures.append({'fixture_id':fixture['fixture_id'],'phase':'tactical_selection','reason':','.join(row.get('hard_block_reasons',['TACTICAL_ENGINE_UNAVAILABLE']))})
+    qualified.sort(key=lambda item:({'A':0,'B':1}[rank[str(item[0]['fixture_id'])]['selection_tier']],
+                                    -rank[str(item[0]['fixture_id'])]['research_priority'],str(item[0]['fixture_id'])))
     final_ready=qualified
     doc = write_handoff(root, run_dir, final_ready, failures, scanner_path, args.min_lead, args.max_odds_age)
     if doc.get('fixture_id') is not None:
         selected=next(f for f,_,_ in final_ready if str(f['fixture_id'])==str(doc['fixture_id']))
         ledger.record(selected,'SELECCIONADO','handoff','MANUAL_RESEARCH_ONLY',str(run_dir/'handoff_prematch.json'))
+        chosen=rank[str(doc['fixture_id'])]
+        doc.update(selection_tier=chosen['selection_tier'],research_eligible=True,
+                   eligible=chosen['eligible'],research_missing_evidence=chosen['research_missing_evidence'],
+                   hard_block_reasons=chosen['hard_block_reasons'],research_evidence=chosen['research_evidence'])
+        if chosen['selection_tier']=='B':
+            doc['coverage_warnings']+=['NIVEL_B: investigación condicionada; carencias: '+', '.join(chosen['research_missing_evidence'])]
     doc['tactical_report']=str(run_dir/'tactical/TACTICAL_SELECTION_REPORT.md')
     if doc.get('fixture_id') is not None:
         detail=tactical['fixtures'][str(doc['fixture_id'])]
         doc['tactical_signal_json']=detail['detail_json']
         doc['tactical_signal_sha256']=detail['detail_sha256']
         brief=Path(doc['research_brief'])
-        brief.write_text(brief.read_text(encoding='utf-8')+f"\nSeñales descriptivas (no EV): `{doc['tactical_signal_json']}`.\nReporte de prioridad: `{doc['tactical_report']}`.\n",encoding='utf-8')
+        brief.write_text(brief.read_text(encoding='utf-8')+f"\nNivel {doc['selection_tier']}; elegible comercial actual: {doc['eligible']}; carencias: {doc['research_missing_evidence']}.\nSeñales descriptivas (no EV): `{doc['tactical_signal_json']}`.\nReporte de prioridad: `{doc['tactical_report']}`.\n",encoding='utf-8')
     doc['tactical_selection_ranking']=tactical['ranking']
     if doc.get('fixture_id') is not None:
         doc['routing_reason']='Prioridad conjunta de señal, cobertura por familia, diversidad, identidad, margen y scanner; ver ranking y reporte táctico. No representa valor financiero.'
@@ -542,7 +561,8 @@ def scan(root, folder, day, args):
     doc['candidate_ledger']=str(run_dir/'candidate_ledger.json')
     doc['comparison_incomplete_due_to_budget']=any(r['state']=='DIFERIDO_POR_PRESUPUESTO' for r in ledger.rows.values())
     doc['capture_target_reached']=len(comparison_ready)>=3
-    doc['eligible_candidate_target_reached']=len(qualified)>=3
+    doc['eligible_candidate_target_reached']=sum(r.get('eligible',False) for r in tactical['ranking'])>=3
+    doc['research_candidate_target_reached']=len(qualified)>=3
     doc['snapshot_comparison_status']='SNAPSHOT_COMPARISON_COMPLETE' if doc['capture_target_reached'] else 'COMPARISON_INCOMPLETE'
     doc['evidence_comparison_status']='EVIDENCE_COMPARISON_COMPLETE' if doc['eligible_candidate_target_reached'] else 'COMPARISON_INCOMPLETE'
     doc['comparison_status']=doc['evidence_comparison_status']

@@ -25,8 +25,9 @@ from datetime import datetime, timezone
 from pathlib import Path
 from urllib.parse import urlsplit, unquote
 from zoneinfo import ZoneInfo
+from prematch_prospective_trial import TrialError
 
-VERSION = '0.1-single-execution'
+VERSION = '0.1-single-execution-early-selection-fix'
 TZ = ZoneInfo('Europe/Madrid')
 RE_CAPTURE = re.compile(r'(?im)^Captura:\s*(\S+)\s*$')
 RE_EVENT = re.compile(r'(?im)^Event ID:\s*(\d{6,})\s*$')
@@ -101,9 +102,21 @@ def validate_selected(selected: dict, decision: dict):
     families=selected.get('market_families_ready_for_research') or []
     if set(families)!=set(found.get('market_families_ready') or []):
         raise ValueError('Familias investigables no coinciden con la decisión')
+    tier=selected.get('selection_tier',found.get('selection_tier','A'))
+    if tier not in ('A','B') or tier!=found.get('selection_tier',tier):
+        raise ValueError('Nivel de investigación inválido o contradictorio')
+    for field in ('research_eligible','eligible','research_missing_evidence','hard_block_reasons'):
+        if field in selected or field in found:
+            if selected.get(field)!=found.get(field):raise ValueError('Selección/decisión discrepan: '+field)
+    if tier=='B' and (selected.get('eligible') is not False or selected.get('research_eligible') is not True
+                      or not selected.get('research_missing_evidence') or selected.get('hard_block_reasons')):
+        raise ValueError('Nivel B carece de advertencias o contiene bloqueo crítico')
+    if tier=='A' and selected.get('eligible',True) is not True:
+        raise ValueError('Nivel A debe conservar elegibilidad comercial')
     if fid<1 or not eid.isdigit():raise ValueError('Identificadores inválidos')
     return {'fixture_id':fid,'event_id':eid,'url':url,'kickoff':kickoff,'home':selected['home'],
-            'away':selected['away'],'families':families,'selection_time':dt(selected['selection_asof_madrid'],'selection_asof_madrid')}
+            'away':selected['away'],'families':families,'selection_tier':tier,
+            'selection_time':dt(selected['selection_asof_madrid'],'selection_asof_madrid')}
 
 
 def load_context(args):
@@ -122,14 +135,16 @@ def load_context(args):
     return record
 
 
-def freshness(ctx, *, min_lead=0, max_selection_age=60):
+def freshness(ctx, *, min_lead=0, max_selection_age=0):
     now=local_now()
     remain=(ctx['kickoff']-now).total_seconds()/60
     age=(now-ctx['selection_time']).total_seconds()/60
     if age < -2: raise ValueError(f'Selección futura respecto al reloj actual ({age:.1f} min); comprueba zonas horarias')
     if remain <= 0: raise ValueError(f'El kickoff pasó ({ctx["kickoff"].astimezone(TZ).isoformat()}); PREMATCH bloqueado')
     if remain < min_lead: raise ValueError(f'Tiempo restante {remain:.1f} min < mínimo {min_lead} min')
-    if age>max_selection_age:
+    # La selección estratégica puede ser temprana. Si se pide explícitamente un
+    # máximo positivo, se conserva la comprobación tradicional como opción.
+    if max_selection_age > 0 and age > max_selection_age:
         raise ValueError(f'Selección caducada: {age:.1f} min > {max_selection_age} min; repite el selector')
     return remain,age
 
@@ -169,7 +184,7 @@ def match_manifest(ctx, *, check_files=True):
     if ident:
         obj=read_json(Path(ident['path']))
         if (str(obj.get('bwin_event_id'))!=ctx['event_id'] or
-            int(obj.get('api_fixture_id') or 0)!=ctx['fixture_id']):
+                int(obj.get('api_fixture_id') or 0)!=ctx['fixture_id']):
             raise ValueError('match_identity.json contradice selección (Bwin/API fixture)')
         kick=dt(obj.get('kickoff_utc'),'match_identity.kickoff_utc')
         if abs((kick-ctx['kickoff']).total_seconds())>180:
@@ -186,6 +201,14 @@ def match_manifest(ctx, *, check_files=True):
                 raise ValueError('Selección/contexto discrepan en team ID: '+side)
     elif manifest.get('status') in ('PREPARADO','VALIDADO','FINALIZADO'):
         raise ValueError('Manifest preparado sin identidad canónica verificada')
+    research=manifest.get('research_selection')
+    if research:
+        selected=ctx.get('selection',{})
+        if (research.get('selection_tier')!=ctx['selection_tier'] or
+                research.get('research_missing_evidence')!=selected.get('research_missing_evidence',[]) or
+                research.get('selected_sha256')!=ctx['selected_sha'] or
+                research.get('decision_sha256')!=ctx['decision_sha']):
+            raise ValueError('Manifest y selección investigadora discrepan')
     return manifest
 
 
@@ -258,6 +281,11 @@ def cmd_prepare(ctx,args):
         for folder in ('inputs','validation','probabilistic','analysis'):
             source=ctx['directory']/folder
             if source.is_dir():shutil.copytree(source,archive/folder)
+        for name in ('single_execution.json','release_state.json'):
+            source=ctx['directory']/name
+            if source.is_file():
+                archive.mkdir(parents=True,exist_ok=True)
+                shutil.move(str(source),str(archive/name))
     cmd=[sys.executable,str(multi),'--root',str(ctx['root']),'prepare','--url',ctx['url'],
          '--workers','1','--api-minute',str(args.api_minute),'--api-second',str(args.api_second)]
     if args.reuse_odds:cmd+=['--reuse-odds-selected',str(ctx['selected_path'])]
@@ -265,6 +293,14 @@ def cmd_prepare(ctx,args):
     if code:raise ValueError(f'prepare devolvió código {code}; revisa outputs/matches/{ctx["event_id"]}/logs/')
     manifest=match_manifest(ctx)
     if manifest.get('status')!='PREPARADO':raise ValueError(f'prepare no terminó PREPARADO: {manifest.get("status")}')
+    manifest['research_selection']={'selection_tier':ctx['selection_tier'],
+        'research_eligible':True,'eligible':ctx['selection'].get('eligible',True),
+        'research_missing_evidence':ctx['selection'].get('research_missing_evidence',[]),
+        'hard_block_reasons':ctx['selection'].get('hard_block_reasons',[]),
+        'selected_sha256':ctx['selected_sha'],'decision_sha256':ctx['decision_sha'],
+        'actionable_bet':False}
+    atomic_json(mpath,manifest)
+    manifest=match_manifest(ctx)
     oddspath=Path(manifest['inputs']['odds']['path'])
     snap=snapshot_info(oddspath,ctx,max_age=args.max_odds_age_minutes)
     update_state(ctx,'prepare','OK',{'old_odds_archived':str(old_backup) if old_backup else None,
@@ -325,7 +361,7 @@ def cmd_refresh(ctx,args):
         m.setdefault('steps',{})['scraper_refresh']=0
         m['odds_refresh_at_utc']=iso_utc()
         m['invalidated_by_odds_refresh']={'previous_status':m.get('status'),'previous_sha256':previous['sha256'],
-            'invalidated_at_utc':iso_utc(),'stages':['validation','probabilistic','codex_analysis','final_review']}
+                                          'invalidated_at_utc':iso_utc(),'stages':['validation','probabilistic','codex_analysis','final_review']}
         m['status']='PREPARADO'
         m.pop('codex_prompt',None)
         m.pop('validation_state',None)
@@ -449,7 +485,8 @@ def main(argv=None):
     p.add_argument('--selected',type=Path,required=True,help='selected_match.json definitivo del selector')
     p.add_argument('--decision',type=Path,help='selection_decision.json (si no, junto al selected_match.json)')
     p.add_argument('--multi',type=Path,default=Path('prematch_multi.py'),help='Pipeline anterior, sin modificar')
-    p.add_argument('--max-selection-age-minutes',type=int,default=60)
+    p.add_argument('--max-selection-age-minutes',type=int,default=0,
+                   help='0 = sin caducidad de selección; el kickoff y cuotas mantienen sus límites')
     p.add_argument('--max-odds-age-minutes',type=int,default=60)
     p.add_argument('--min-lead-minutes',type=int,default=45,help='Margen mínimo para prepare/check')
     p.add_argument('--min-refresh-lead-minutes',type=int,default=5,help='Margen mínimo para actualizar cuotas')
@@ -472,14 +509,15 @@ def main(argv=None):
     ff.add_argument('--report',type=Path,help='Reporte cualitativo del seleccionado')
     ff.add_argument('--historical',action='store_true',help='Solo auditoría posterior al inicio: nunca Codex accionable')
     args=p.parse_args(argv)
-    if (args.max_selection_age_minutes<1 or args.max_odds_age_minutes<1 or
-        min(args.min_lead_minutes,args.min_refresh_lead_minutes,args.min_finish_lead_minutes)<0):
-        p.error('Límites de frescura inválidos')
+    if (args.max_selection_age_minutes<0 or args.max_odds_age_minutes<1 or
+            args.min_lead_minutes<45 or args.min_refresh_lead_minutes<5 or
+            args.min_finish_lead_minutes<20):
+        p.error('Límites de frescura inválidos: check/prepare >=45, refresh >=5 y finish >=20 minutos')
     try:
         ctx=load_context(args)
         if args.action=='check':
             remain,age=freshness(ctx,min_lead=args.min_lead_minutes,max_selection_age=args.max_selection_age_minutes)
-            print(f'SELECCIÓN VÁLIDA: {ctx["home"]} - {ctx["away"]}; Bwin {ctx["event_id"]}; fixture {ctx["fixture_id"]}')
+            print(f'SELECCIÓN VÁLIDA PARA INVESTIGACIÓN NIVEL {ctx["selection_tier"]}: {ctx["home"]} - {ctx["away"]}; Bwin {ctx["event_id"]}; fixture {ctx["fixture_id"]}')
             print(f'Kickoff {ctx["kickoff"].astimezone(TZ).isoformat()} | margen {remain:.1f} min | selección hace {age:.1f} min')
             print('No se ha ejecutado el scraper ni API-Football.')
             return 0
@@ -488,7 +526,7 @@ def main(argv=None):
         if args.action=='refresh-odds':return cmd_refresh(ctx,args)
         if args.action in ('retry-context','retry-scraper'):return cmd_retry(ctx,args,args.action)
         if args.action=='finish':return cmd_finish(ctx,args)
-    except (ValueError,KeyError,TypeError,OSError) as exc:
+    except (ValueError,KeyError,TypeError,OSError,TrialError) as exc:
         print('BLOQUEADO:',exc,file=sys.stderr)
         return 2
     return 2

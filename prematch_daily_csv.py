@@ -10,7 +10,7 @@ from pathlib import Path
 from datetime import datetime, timedelta
 import prematch_prospective_trial as t
 
-TACTICAL_FIELDS='tactical_engine_evaluado tactical_signal_count tactical_signal_families tactical_confidence_level tactical_data_coverage tactical_profile_status tactical_contradictions tactical_priority_score tactical_reason historical_matches_available historical_matches_detailed historical_matches_not_detailed metric_observations_valid metric_observations_missing requested_data_coverage_pct historical_effective_coverage_pct tactical_research_score market_execution_readiness direct_market_hypotheses indirect_market_hypotheses unmodelled_market_count scanner_status evaluation_completeness comparison_rank final_decision_reason market_hypotheses_count market_hypotheses_verified research_priority tactical_json tactical_mode'.split()
+TACTICAL_FIELDS='tactical_engine_evaluado tactical_signal_count tactical_signal_families tactical_confidence_level tactical_data_coverage tactical_profile_status tactical_contradictions tactical_priority_score tactical_reason historical_matches_available historical_matches_detailed historical_matches_not_detailed metric_observations_valid metric_observations_missing requested_data_coverage_pct historical_effective_coverage_pct tactical_research_score market_execution_readiness direct_market_hypotheses indirect_market_hypotheses unmodelled_market_count scanner_status evaluation_completeness comparison_rank final_decision_reason market_hypotheses_count market_hypotheses_verified research_priority tactical_json tactical_mode selection_tier research_eligible research_missing_evidence hard_block_reasons'.split()
 FIELDS='fecha_ventana inicio_ventana_madrid fin_ventana_madrid fixture_id kickoff_madrid pais liga league_id temporada local visitante liga_elegible motivo_filtro_liga prematch_elegible minutos_hasta_kickoff_en_captura fase_maxima estado_final motivo_exclusion_o_pendiente detalle_evidencia preselection_evaluada preselection_score cobertura_api patrones_detectados patrones_resumen bwin_busqueda_estado bwin_event_id bwin_url identidad_bwin_estado evidencia_horaria_estado cuotas_capturadas captura_madrid sha256_snapshot cuotas_elegibles mercados_investigables opportunity_evaluado opportunity_estado mejor_hipotesis_mercado mejor_hipotesis_cuota score_oportunidad seleccionado razon_seleccion_o_no_seleccion actualizado_madrid'.split()
 
 
@@ -135,6 +135,10 @@ def export_daily(base):
                        final_decision_reason=handoff.get('routing_reason','') if selected else ' | '.join(rank.get('reasons',[])) or reason,
                        market_hypotheses_count=tx['market_hypotheses_count'],market_hypotheses_verified=tx['market_hypotheses_verified'],
                        research_priority=rank.get('research_priority',''),tactical_json=tx['detail_json'],tactical_mode=tactical['mode'])
+            row.update(selection_tier=rank.get('selection_tier',''),
+                       research_eligible=str(rank.get('research_eligible',False)).lower() if rank else '',
+                       research_missing_evidence='|'.join(rank.get('research_missing_evidence',[])),
+                       hard_block_reasons='|'.join(rank.get('hard_block_reasons',[])))
         rows.append(row)
     rows.sort(key=lambda r:(r['kickoff_madrid'],str(r['fixture_id'])))
     stream=io.StringIO(newline='');w=csv.DictWriter(stream,fieldnames=FIELDS,delimiter=';');w.writeheader();w.writerows(rows)

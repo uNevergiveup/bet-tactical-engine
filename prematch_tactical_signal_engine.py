@@ -18,6 +18,7 @@ import prematch_prospective_trial as t
 from prematch_pattern_engine import source_sides
 from prematch_opportunity_scanner import norm,match_identity,validate_snapshot,parse_line
 from prematch_tactical_history import LocalHistoryCache
+from market_quality_gate import market_kind, is_period, is_player_market
 
 VERSION='2.0-descriptive-tactical-signals'
 METRICS=('goals','corners','shots','on_target','fouls','yellow','offsides','xg')
@@ -235,7 +236,7 @@ def classify_market(market,fixture):
 
 def market_links(fixture,signals,prepath,paths,asof,age_limit):
     from bwin_market_preflight import validate_match
-    reasons=[];verified=0;direct=0;indirect=0;player_markets=0
+    reasons=[];verified=0;direct=0;indirect=0;player_markets=0;usable_markets=0;commercial_shortlist=0
     for p in paths:
         doc=t.read(Path(p));matches=[m for m in doc.get('matches',[]) if str(m.get('fixture_id'))==str(fixture['fixture_id'])]
         if not matches:continue
@@ -254,7 +255,14 @@ def market_links(fixture,signals,prepath,paths,asof,age_limit):
         except (OSError,ValueError,KeyError,TypeError) as exc:errors.append(str(exc))
         if errors:reasons+=errors;continue
         verified+=1
+        commercial_shortlist+=m.get('quality_gate',{}).get('researchable_after_data_gate',0)
         for q in quotes:
+            kind=market_kind(q['market'])
+            label=norm(q['market'])
+            if (kind not in ('other','combined_or_builder','goalscorers','assists','half_full_time')
+                    and not is_period(q['market']) and not is_player_market(q['market'],kind)
+                    and not any(token in label for token in ('live','en vivo','en directo','resto del partido','marcador actual','prorroga'))):
+                usable_markets+=1
             if any(token in norm(q['market']) for token in ('jugador','goleador')):
                 # Deliberately record the observed market but never connect a
                 # team signal to it: player ID, minutes, role and XI are absent.
@@ -284,6 +292,8 @@ def market_links(fixture,signals,prepath,paths,asof,age_limit):
                 sig['market_status']='NO_VERIFIED_MARKET'
             no_verified+=1
     return {'verified_preflights':verified,'block_reasons':sorted(set(reasons)),
+            'usable_verified_market_selections':usable_markets,
+            'commercial_researchable_selections':commercial_shortlist,
             'direct_team_market_hypotheses':direct,
             'indirect_team_to_match_total_hypotheses':indirect,
             'player_market_requires_exposure_and_xi':player_markets,
@@ -427,8 +437,42 @@ def selection_rows(fixtures,tactical,scanner,asof):
             completeness='MERCADO_CAPTURADO_PENDIENTE_SCANNER'
         else:
             completeness='COMPLETAMENTE_EVALUADO_PARA_INVESTIGACION'
+        research_signals=sorted((s for s in x.get('signals',[]) if s.get('metric')!='xg'
+            and s.get('status') in ('SUPPORTED_DESCRIPTIVE_SIGNAL','PARTIAL_EVIDENCE','UNSTABLE_PATTERN')
+            and min(s.get('own',{}).get('n',0),s.get('opponent_conceded',{}).get('n',0))>=4
+            and min(s.get('own',{}).get('historical_effective_coverage_pct') or 0,
+                    s.get('opponent_conceded',{}).get('historical_effective_coverage_pct') or 0)>=50),
+            key=lambda s:(-s['priority_score'],s['signal_id']))
+        validation_blocks=validation.get('block_reasons',[])
+        hard=list(x.get('block_reasons',[]))
+        if x.get('status')!='EVALUATED' and not hard:hard.append('TACTICAL_ENGINE_NOT_VALID')
+        if lead<45:hard.append('INSUFFICIENT_PREMATCH_MARGIN')
+        if not verified:hard.append('SCANNER_OR_BWIN_NOT_VERIFIED')
+        if validation_blocks:hard.append('MARKET_SOURCE_INTEGRITY_ERROR')
+        if validation.get('usable_verified_market_selections',0)<1:hard.append('NO_USABLE_VERIFIED_MARKET')
+        if not research_signals:hard.append('INSUFFICIENT_HISTORICAL_RESEARCH_EVIDENCE')
+        eligible=not reason and not hard
+        missing=[] if eligible else [r for r in reason if r not in hard]
+        if not eligible and not validation.get('commercial_researchable_selections',0):
+            missing.append('NO_COMMERCIAL_SHORTLIST')
+        if not eligible and not validation.get('direct_team_market_hypotheses',0):missing.append('NO_DIRECT_TEAM_MARKET_HYPOTHESIS')
+        if research_signals and research_signals[0]['status']!='SUPPORTED_DESCRIPTIVE_SIGNAL':
+            missing.append('HISTORICAL_SIGNAL_NOT_FULLY_SUPPORTED')
+        tier='A' if eligible else 'B' if not hard else 'C'
+        conditional_score=round(mean(s['priority_score'] for s in research_signals[:3]),2) if research_signals else 0.0
+        if tier=='B':
+            score=max(0,.60*conditional_score+.40*readiness
+                      -min(15,3*len(x.get('contradictions',[])))+opportunity_adj)
+        evidence=[{'signal_id':s['signal_id'],'status':s['status'],'score':s['priority_score'],
+                   'own_n':s['own']['n'],'opponent_n':s['opponent_conceded']['n'],
+                   'own_effective_coverage_pct':s['own']['historical_effective_coverage_pct'],
+                   'opponent_effective_coverage_pct':s['opponent_conceded']['historical_effective_coverage_pct']}
+                  for s in research_signals[:3]]
         rows.append({'fixture_id':f['fixture_id'],'research_priority':round(score,2),'joint_research_priority':round(score,2),'components':readiness_parts,
-                     'eligible':not reason,'reasons':reason,'matched_families':sorted(families),
+                     'eligible':eligible,'research_eligible':tier in ('A','B'),'selection_tier':tier,
+                     'conditional_research_score':conditional_score,
+                     'research_missing_evidence':sorted(set(missing)),'hard_block_reasons':sorted(set(hard)),
+                     'research_evidence':evidence,'reasons':reason,'matched_families':sorted(families),
                      'tactical_priority':x.get('priority_score',0),'tactical_research_score':x.get('tactical_research_score',x.get('priority_score',0)),
                      'market_execution_readiness':readiness,'direct_market_hypotheses':direct,
                      'indirect_market_hypotheses':indirect,'unmodelled_market_count':unmodelled,
@@ -437,7 +481,7 @@ def selection_rows(fixtures,tactical,scanner,asof):
                      'opportunity_score_adjustment':opportunity_adj,
                      'scanner_status':audits.get(fid,{}).get('status','NO_EVALUADO'),
                      'evaluation_completeness':completeness,'lead_minutes':round(lead,2)})
-    return sorted(rows,key=lambda r:(not r['eligible'],-r['research_priority'],str(r['fixture_id'])))
+    return sorted(rows,key=lambda r:({'A':0,'B':1,'C':2}[r['selection_tier']],-r['research_priority'],str(r['fixture_id'])))
 
 
 def write_report(doc,out):
@@ -446,14 +490,14 @@ def write_report(doc,out):
            '',f"Selección de investigación: {doc.get('selected_fixture_id') or 'NINGUNA'}",'']
     for r in doc['ranking']:
         x=doc['fixtures'][str(r['fixture_id'])]
-        lines += [f"## {x['home']}–{x['away']} ({r['fixture_id']})",f"Tactical Research Score: {r['tactical_research_score']}; Market Execution Readiness: {r['market_execution_readiness']}; Ajuste Oportunidad: {r.get('opportunity_score_adjustment', 0.0)}; orden conjunto: {r['research_priority']}; elegible: {r['eligible']}; motivos: {r['reasons']}",
+        lines += [f"## {x['home']}–{x['away']} ({r['fixture_id']})",f"Nivel: {r['selection_tier']}; research_eligible: {r['research_eligible']}; Tactical Research Score: {r['tactical_research_score']}; Market Execution Readiness: {r['market_execution_readiness']}; Ajuste Oportunidad: {r.get('opportunity_score_adjustment', 0.0)}; orden conjunto: {r['research_priority']}; elegible comercial: {r['eligible']}; carencias: {r['research_missing_evidence']}; bloqueos: {r['hard_block_reasons']}",
                   f"Señales: {x['signal_count']}; familias: {x['signal_families']}; perfiles: {x['profile_status']}",
                   f"Cobertura mínima por serie: {x['coverage_summary']}; contradicciones: {x['contradictions']}; mercados: directos={r['direct_market_hypotheses']}, indirectos={r['indirect_market_hypotheses']}, sin modelo={r['unmodelled_market_count']}, player/XI={r['player_market_requires_exposure_and_xi']}."]
         best=sorted((s for s in x['signals'] if s['status']=='SUPPORTED_DESCRIPTIVE_SIGNAL'),key=lambda s:-s['priority_score'])[:3]
         for sig in best:
             lines.append(f"- {sig['metric']} / {sig['team_side']}: {sig['hypothesis']} n={sig['own']['n']}/{sig['opponent_conceded']['n']}; media={sig['own']['mean']}/{sig['opponent_conceded']['mean']}; CV={sig['own']['cv']}/{sig['opponent_conceded']['cv']}; prioridad={sig['priority_score']}; fuente={sig['source_mode']}; mercado={sig['market_status']}.")
         lines += ['- Debilidades: '+', '.join(x['limitations']), '']
-    eligible=[r for r in doc['ranking'] if r['eligible']]
+    eligible=[r for r in doc['ranking'] if r['research_eligible']]
     if eligible:
         lines += ['## Justificación de prioridad',f"Primero: {eligible[0]['fixture_id']}, orden conjunto {eligible[0]['research_priority']}. Componentes operativos: {eligible[0]['components']}.",
                   'Comparación siguiente: '+str([{'fixture_id':r['fixture_id'],'score':r['research_priority'],'reasons':r['reasons']} for r in doc['ranking'][1:4]]),
@@ -506,7 +550,7 @@ def run_engine(preselection,pattern,out,root=None,preflights=(),scanner=None,pro
     if cache:
         for ref in cache.sources.values():
             if t.sha(Path(ref['path']))!=ref['sha256']:raise ValueError('RAW_CACHE_CHANGED_DURING_RUN')
-    ranking=selection_rows(fixtures,results,scan,asof);eligible=[r for r in ranking if r['eligible']]
+    ranking=selection_rows(fixtures,results,scan,asof);eligible=[r for r in ranking if r['research_eligible']]
     doc={'schema_version':VERSION,'asof_madrid':asof.isoformat(),'mode':'RETROSPECTIVE_AUDIT' if historical else 'PREMATCH_RESEARCH_SCREEN',
          'sources':{'preselection':str(prepath.resolve()),'preselection_sha256':t.sha(prepath),'pattern_sha256':t.sha(Path(pattern)) if pattern else None,
                     'profiles_sha256':t.sha(Path(profiles)) if profiles and Path(profiles).is_file() else None,

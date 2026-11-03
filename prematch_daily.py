@@ -37,6 +37,14 @@ def review(path, root=None, check_final_odds=False):
     capture = trial.dt(doc.get('capture_madrid'))
     if doc.get('status') != 'READY_FOR_MANUAL_RESEARCH':
         raise trial.TrialError(doc.get('status', 'HANDOFF_INVALID'))
+    if doc.get('selection_tier'):
+        rank=next((r for r in doc.get('tactical_selection_ranking',[])
+                   if str(r.get('fixture_id'))==str(doc.get('fixture_id'))),None)
+        if (not rank or rank.get('selection_tier')!=doc['selection_tier']
+                or not rank.get('research_eligible') or rank.get('hard_block_reasons')
+                or rank.get('research_missing_evidence')!=doc.get('research_missing_evidence')
+                or bool(rank.get('eligible'))!=bool(doc.get('eligible'))):
+            raise trial.TrialError('HANDOFF_SELECTION_TIER_CONFLICT')
     if not kickoff or (kickoff-now).total_seconds() < doc.get('minimum_lead_minutes',45)*60:
         raise trial.TrialError('HANDOFF_EXPIRED: partido iniciado o sin margen PREMATCH')
     if not capture or not timedelta(0) <= now-capture <= timedelta(minutes=doc.get('max_odds_age_minutes',120)):
