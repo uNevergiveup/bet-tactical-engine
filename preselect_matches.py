@@ -70,9 +70,13 @@ def summarize(values:list[float]) -> dict[str,Any]:
 
 class ApiFootball:
     """Cache por consulta, límite simple 3 rps, errores explícitos, nunca almacena claves."""
-    def __init__(self,api_key:str,base_url:str,root:Path,timeout:int=25,refresh:bool=False):
+    def __init__(self,api_key:str,base_url:str,root:Path,timeout:int=25,refresh:bool=False,
+                 request_budget:int=0,request_reserve:int=0):
         self.root=root;self.base_url=base_url.rstrip('/');self.timeout=timeout
         self.refresh=refresh;self.last_request=0.0;self.requests_sent=0;self.cache_hits=0
+        if request_budget<0 or request_reserve<0 or request_budget and request_reserve>=request_budget:
+            raise PreselectionError('Presupuesto API inválido: reserve debe ser menor que budget')
+        self.request_budget=request_budget;self.request_reserve=request_reserve;self.request_ledger=[]
         self.session=requests.Session()
         self.session.headers.update({'x-apisports-key':api_key,'Accept':'application/json',
                                      'User-Agent':f'prematch-preselection/{VERSION}'})
@@ -86,11 +90,24 @@ class ApiFootball:
                 obj=json.loads(cache.read_text(encoding='utf-8'))
                 stamp=utc_datetime(obj['retrieved_at_utc'])
                 if datetime.now(UTC)-stamp < timedelta(hours=12) and isinstance(obj.get('response'),list):
-                    self.cache_hits+=1;return obj['response']
+                    self.cache_hits+=1
+                    self.request_ledger.append({'request_id':key,'endpoint':route,'parameters':dict(sorted(params.items())),
+                        'requested_at_utc':datetime.now(UTC).isoformat(),'status':'CACHE_HIT','attempts':0,
+                        'cache_path':str(cache.resolve()),'cache_sha256':hashlib.sha256(cache.read_bytes()).hexdigest(),
+                        'response_sha256':hashlib.sha256(json.dumps(obj['response'],sort_keys=True,separators=(',',':')).encode()).hexdigest(),
+                        'first_observed_at_utc':obj['retrieved_at_utc']})
+                    return obj['response']
             except (OSError,ValueError,TypeError,KeyError):pass
+        if self.request_budget and self.requests_sent>=self.request_budget-self.request_reserve:
+            self.request_ledger.append({'request_id':key,'endpoint':route,'parameters':dict(sorted(params.items())),
+                'requested_at_utc':datetime.now(UTC).isoformat(),'status':'BLOCKED_BY_REQUEST_RESERVE',
+                'attempts':0,'budget':self.request_budget,'reserve':self.request_reserve})
+            raise PreselectionError('API_REQUEST_BUDGET_RESERVE_REACHED')
         last_error=''
         for attempt in range(3):
             try:
+                if self.request_budget and self.requests_sent>=self.request_budget-self.request_reserve:
+                    raise PreselectionError('API_REQUEST_BUDGET_RESERVE_REACHED')
                 elapsed=time.monotonic()-self.last_request
                 if elapsed < 0.36:time.sleep(0.36-elapsed)
                 self.last_request=time.monotonic()
@@ -111,12 +128,21 @@ class ApiFootball:
                 cache.parent.mkdir(parents=True,exist_ok=True)
                 tmp=cache.with_name(f'.{cache.name}.{os.getpid()}.tmp')
                 tmp.write_text(json.dumps({'retrieved_at_utc':datetime.now(UTC).isoformat(),
+                                           'endpoint':route,'parameters':dict(sorted(params.items())),
                                            'response':rows},ensure_ascii=False),encoding='utf-8')
                 tmp.replace(cache)
+                self.request_ledger.append({'request_id':key,'endpoint':route,'parameters':dict(sorted(params.items())),
+                    'requested_at_utc':datetime.now(UTC).isoformat(),'status':'NETWORK_OK','attempts':attempt+1,
+                    'http_status':resp.status_code,'cache_path':str(cache.resolve()),
+                    'cache_sha256':hashlib.sha256(cache.read_bytes()).hexdigest(),
+                    'response_sha256':hashlib.sha256(json.dumps(rows,sort_keys=True,separators=(',',':')).encode()).hexdigest(),
+                    'first_observed_at_utc':json.loads(cache.read_text(encoding='utf-8'))['retrieved_at_utc']})
                 return rows
             except (requests.RequestException,ValueError) as exc:
                 last_error=str(exc)
                 if attempt<2:time.sleep(attempt+1)
+        self.request_ledger.append({'request_id':key,'endpoint':route,'parameters':dict(sorted(params.items())),
+            'requested_at_utc':datetime.now(UTC).isoformat(),'status':'NETWORK_ERROR','attempts':3,'error':last_error})
         raise PreselectionError(f'Falló /{route}?{query}: {last_error}')
 
 
@@ -366,8 +392,11 @@ def evaluate_fixture(f:dict[str,Any],histories:dict[int,list[dict[str,Any]]],
         notes.append('Tabla no consultada por error de API')
     from prematch_tactical_history import observations_from_games
     requested=detail_requested_ids or set()
-    observed={'home':observations_from_games(h,hid,details,requested) if details_selected else [],
-              'away':observations_from_games(a,aid,details,requested) if details_selected else []}
+    # Always preserve FT goal histories for every eligible fixture, even when
+    # adaptive acquisition did not request detailed match statistics.  The
+    # observation adapter labels all unrequested metrics NOT_REQUESTED, never 0.
+    observed={'home':observations_from_games(h,hid,details,requested),
+              'away':observations_from_games(a,aid,details,requested)}
     return {'fixture_id':f['fixture_id'],'kickoff_madrid':f['kickoff_madrid'],
       'home_id':hid,'away_id':aid,'statistical_observations':observed,
       'detail_selection':{'home':hselection,'away':aselection},
@@ -508,7 +537,7 @@ def run_evaluator(doc:dict[str,Any],client:Any,now:datetime,history_limit:int=20
     if mode not in ('full','quick','adaptive'):
         raise PreselectionError('mode debe ser full, quick o adaptive')
     if detail_top<1:raise PreselectionError('detail-top debe ser >=1')
-    fixtures=doc['fixtures']
+    input_fixtures=list(doc['fixtures']);fixtures=list(input_fixtures)
     if fixture_id is not None:
         fixtures=[f for f in fixtures if f['fixture_id']==fixture_id]
         if not fixtures:raise PreselectionError(f'Fixture {fixture_id} no está en el filtro elegible')
@@ -628,6 +657,17 @@ def run_evaluator(doc:dict[str,Any],client:Any,now:datetime,history_limit:int=20
                 match['research_priority_score']=None
                 match['data_readiness_status']='EVALUACION_INCOMPLETA'
     assign_ranks(result)
+    evaluated_ids={m['fixture_id'] for m in result};stale_ids={f['fixture_id'] for f in stale}
+    fixture_ledger=[]
+    for f in input_fixtures:
+        fid=f['fixture_id']
+        if fid in evaluated_ids:status='EVALUATED'
+        elif fid in stale_ids:status='EXCLUDED_TEMPORAL'
+        elif fixture_id is not None or fixture_ids is not None:status='NOT_SELECTED_EXPLICIT_SCOPE'
+        elif max_matches>0:status='NOT_EVALUATED_MAX_MATCHES_LIMIT'
+        else:status='NOT_EVALUATED_UNKNOWN'
+        fixture_ledger.append({'fixture_id':fid,'home':f.get('home'),'away':f.get('away'),
+                               'kickoff_madrid':f.get('kickoff_madrid'),'status':status})
     return {'schema_version':VERSION,'generated_at_utc':now.isoformat(),
       'source_filter_sha256':None,'source_filter_generated_at_utc':doc.get('generated_at_utc'),
       'counts':{'input_filter':len(doc['fixtures']),'evaluated':len(result),
@@ -639,7 +679,11 @@ def run_evaluator(doc:dict[str,Any],client:Any,now:datetime,history_limit:int=20
                 'fully_evaluated':sum(m['data_readiness_score'] is not None for m in result),
                 'pending_detail':len(fixtures)-len(detail_selected)},
       'api_errors':errors,'api_usage':{'requests_sent':getattr(client,'requests_sent',None),
-                                    'cache_hits':getattr(client,'cache_hits',None)},
+                                    'cache_hits':getattr(client,'cache_hits',None),
+                                    'request_budget':getattr(client,'request_budget',0),
+                                    'request_reserve':getattr(client,'request_reserve',0)},
+      'api_request_ledger':getattr(client,'request_ledger',[]),
+      'fixture_evaluation_ledger':fixture_ledger,
       'history_seasons_used':history_seasons_used,
       'methodology':{'ranking':'COVERAGE_AND_STABILITY_HEURISTICS_NOT_BET_VALUE',
         'stage':mode,'detail_top':detail_top,
@@ -791,6 +835,8 @@ def main(argv=None):
     p.add_argument('--history-seasons',type=int,default=3,help='1..3 temporadas; completa si la actual tiene pocos históricos')
     p.add_argument('--detail-limit',type=int,default=8)
     p.add_argument('--refresh',action='store_true')
+    p.add_argument('--request-budget',type=int,default=0,help='0=sin límite adicional; reserva excluida del uso normal')
+    p.add_argument('--request-reserve',type=int,default=0,help='Capacidad que esta ejecución no consumirá')
     p.add_argument('--mode',choices=('quick','full','adaptive'),default='full',
                    help='quick=solo históricos/tabla; full=todo; adaptive=detalle TOP sin excluir resto')
     p.add_argument('--detail-top',type=int,default=30,
@@ -802,7 +848,7 @@ def main(argv=None):
         p.error('Usa --fixture-id o --fixture-ids-file, no ambos')
     if args.merge_report and not args.fixture_ids_file and not args.fixture_id:
         p.error('--merge-report requiere --fixture-ids-file o --fixture-id')
-    if args.max_matches<0 or not 4<=args.history_limit<=50 or not 1<=args.detail_limit<=args.history_limit or not 1<=args.history_seasons<=3 or args.detail_top<1:
+    if args.max_matches<0 or not 4<=args.history_limit<=50 or not 1<=args.detail_limit<=args.history_limit or not 1<=args.history_seasons<=3 or args.detail_top<1 or args.request_budget<0 or args.request_reserve<0 or args.request_budget and args.request_reserve>=args.request_budget:
         p.error('history-limit 4..50, history-seasons 1..3, detail-limit 1..history-limit, max-matches >=0')
     try:
         if args.rescore_json:
@@ -818,7 +864,8 @@ def main(argv=None):
         if not API_KEY:raise PreselectionError('No se encontró API_KEY en config.constants')
         raw=args.input.read_bytes();doc=json.loads(raw)
         chosen_ids=read_fixture_ids_file(args.fixture_ids_file) if args.fixture_ids_file else None
-        client=ApiFootball(API_KEY,FOOTBALL_BASE_URL,args.root,REQUEST_TIMEOUT,args.refresh)
+        client=ApiFootball(API_KEY,FOOTBALL_BASE_URL,args.root,REQUEST_TIMEOUT,args.refresh,
+                           args.request_budget,args.request_reserve)
         try:report=run_evaluator(doc,client,datetime.now(UTC),args.history_limit,
                          args.detail_limit,args.max_matches,args.fixture_id,args.history_seasons,
                          args.mode,args.detail_top,chosen_ids)

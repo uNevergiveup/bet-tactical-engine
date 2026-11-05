@@ -6,6 +6,7 @@ import argparse
 import contextlib
 import fcntl
 import json
+import os
 import shutil
 import sys
 from datetime import timedelta, timezone
@@ -80,10 +81,12 @@ def main(argv=None):
     parser.add_argument('--evaluation-budget',type=int,default=0,help='0=todos; límite explícito con filas pendientes')
     parser.add_argument('--discovery-budget',type=int,default=0,help='0=todos; límite explícito con filas pendientes')
     parser.add_argument('--date', help='Forzar fecha inicial Madrid: YYYY-MM-DD, hoy o mañana')
-    parser.add_argument('--horizon-hours',type=float,default=3,help='Próximas N horas; 0 permite preparar toda la ventana con antelación')
+    parser.add_argument('--horizon-hours',type=float,default=0,help='Próximas N horas; 0 permite preparar toda la ventana con antelación')
     parser.add_argument('--bwin-top',type=int,default=5,help='Tamaño de lote Bwin; sin recorte global')
     parser.add_argument('--check-final-odds',action='store_true',help='Con --review: exigir una captura cercana al kickoff y fresca')
     parser.add_argument('--window', choices=['normal','ampliada'])
+    parser.add_argument('--competition-scope',choices=['adult-open','domestic-top-tier'],default='adult-open',
+                        help='adult-open: todas las competiciones adultas; domestic-top-tier: filtro legado')
     parser.add_argument('--dry-run', '--show-config', dest='dry_run', action='store_true')
     parser.add_argument('--next-window', action='store_true', help='Preparar la siguiente franja si la actual ya no tiene candidatos útiles')
     parser.add_argument('--review', type=Path, help='Revalidar el handoff antes de continuar manualmente')
@@ -127,6 +130,12 @@ def main(argv=None):
             except BlockingIOError:
                 raise trial.TrialError('PREMATCH_ALREADY_RUNNING') from None
             try:
+                major = folder / 'fixtures_major.json'
+                if major.is_file():
+                    existing_policy = trial.read(major).get('policy',{}).get('competition_tier')
+                    expected_policy = 'ADULT_OPEN' if args.competition_scope == 'adult-open' else 'DOMESTIC_TOP_TIER'
+                    if existing_policy != expected_policy:
+                        raise trial.TrialError('COMPETITION_SCOPE_CHANGED: preparacion anterior no reutilizable')
                 reusable_preparation(root, folder, day, args)
                 print('Preparación existente íntegra: reutilizada sin consultas API.', flush=True)
             except (trial.TrialError, OSError, ValueError, KeyError) as exc:
@@ -136,7 +145,15 @@ def main(argv=None):
                     transcript.parent.mkdir(parents=True, exist_ok=True)
                     print(f'Preparando API, patrones y Bwin; registro: {transcript}', flush=True)
                     with transcript.open('w', encoding='utf-8') as output, contextlib.redirect_stdout(output):
-                        trial.prepare(root, folder, day, args)
+                        previous_scope = os.environ.get('PREMATCH_COMPETITION_SCOPE')
+                        os.environ['PREMATCH_COMPETITION_SCOPE'] = args.competition_scope
+                        try:
+                            trial.prepare(root, folder, day, args)
+                        finally:
+                            if previous_scope is None:
+                                os.environ.pop('PREMATCH_COMPETITION_SCOPE', None)
+                            else:
+                                os.environ['PREMATCH_COMPETITION_SCOPE'] = previous_scope
                 except trial.TrialError as exc:
                     # An empty candidate set is a normal, explicit terminal state.
                     status = 'NO_VALID_CANDIDATE' if str(exc).startswith('No hay partidos futuros') else 'INSUFFICIENT_EVIDENCE'

@@ -236,6 +236,7 @@ _BWIN_COMPETITION_LABELS = (
     r"(?:serie|série)\s+[abcd]", r"(?:ligue)\s+[12]",
     r"(?:la\s*liga|laliga)(?:\s+ea\s+sports|\s+hypermotion)?",
     r"(?:premier\s+league|championship|league\s+(?:one|two))",
+    r"(?:jupiler\s+pro\s+league)",
     r"(?:eredivisie|eerste\s+divisie|primeira\s+liga)",
     r"(?:(?:saudi|uae|emirates|qatar|egyptian|english|scottish|belgian|turkish|french|german|brazilian|colombian|portuguese|spanish|italian)\s+)?"
     r"(?:pro\s+league|professional\s+league|premier\s+league|super\s+league|superliga|liga\s+pro)",
@@ -408,7 +409,7 @@ def _club_identity_tokens(value: str) -> list[str]:
 # Se aplican solo al PRINCIPIO del nombre, y conservan números sustantivos:
 # Mainz 05 != Mainz 07; Elversberg B != Elversberg.
 _OPTIONAL_CLUB_PREFIXES = {
-    'sv', 'fsv', 'fc', 'sc', 'cf', 'cd', 'afc', 'ac', 'as',
+    'sv', 'fsv', 'kv', 'fc', 'sc', 'cf', 'cd', 'afc', 'ac', 'as',
     'fk', 'bk', 'bsc', 'vfb', 'tsg', 'ca', 'rc', 'ssc', 'ud', 'sd',
 }
 
