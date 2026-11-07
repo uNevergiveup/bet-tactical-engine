@@ -16,6 +16,24 @@ from types import SimpleNamespace
 import prematch_prospective_trial as trial
 from prematch_runtime import reusable_preparation, scan, stamp, verified_preflight
 
+# Existing discovery/preparation remains conservative (T-45).  Revalidation
+# of an already prepared handoff is a lighter operation and may run until T-5;
+# it still requires fresh quotes and all identity/integrity checks.
+REVIEW_MIN_LEAD_MINUTES = 5
+
+
+def review_minimum_lead(doc, default=REVIEW_MIN_LEAD_MINUTES):
+    """Return the safe T-5 gate for an already prepared handoff.
+
+    ``minimum_lead_minutes`` remains the historical preparation gate and is
+    intentionally not consulted here.  Malformed/legacy values never relax
+    the floor.
+    """
+    try:
+        return max(REVIEW_MIN_LEAD_MINUTES, int(doc.get('review_minimum_lead_minutes', default)))
+    except (TypeError, ValueError):
+        return REVIEW_MIN_LEAD_MINUTES
+
 
 def automatic_day(now, start, end):
     return trial.automatic_day(now,start,end)
@@ -31,7 +49,7 @@ def final_odds_check(doc, now):
         raise trial.TrialError('FINAL_ODDS_REFRESH_REQUIRED: recapturar y revalidar cuotas antes del análisis final')
 
 
-def review(path, root=None, check_final_odds=False):
+def review(path, root=None, check_final_odds=False, review_min_lead=REVIEW_MIN_LEAD_MINUTES):
     doc = trial.read(path)
     now = trial.now_madrid()
     kickoff = trial.dt(doc.get('kickoff_madrid'))
@@ -46,8 +64,13 @@ def review(path, root=None, check_final_odds=False):
                 or rank.get('research_missing_evidence')!=doc.get('research_missing_evidence')
                 or bool(rank.get('eligible'))!=bool(doc.get('eligible'))):
             raise trial.TrialError('HANDOFF_SELECTION_TIER_CONFLICT')
-    if not kickoff or (kickoff-now).total_seconds() < doc.get('minimum_lead_minutes',45)*60:
-        raise trial.TrialError('HANDOFF_EXPIRED: partido iniciado o sin margen PREMATCH')
+    # ``minimum_lead_minutes`` records the original preparation gate (T-45).
+    # Reviewing/revalidating an already prepared handoff is a separate
+    # operation and only needs the T-5 safety margin.  Old handoffs without the
+    # new field therefore get the safe default, never a relaxed zero margin.
+    configured_review_min = review_minimum_lead(doc, review_min_lead)
+    if not kickoff or (kickoff-now).total_seconds() < configured_review_min*60:
+        raise trial.TrialError(f'HANDOFF_EXPIRED: partido iniciado o sin margen PREMATCH para review (T-{configured_review_min} min)')
     if not capture or not timedelta(0) <= now-capture <= timedelta(minutes=doc.get('max_odds_age_minutes',120)):
         raise trial.TrialError('HANDOFF_EXPIRED: snapshot caducado')
     if trial.sha(Path(doc['odds_txt'])) != doc['odds_sha256']:
@@ -61,7 +84,7 @@ def review(path, root=None, check_final_odds=False):
     project = root or Path(__file__).resolve().parent
     pf = trial.read(Path(doc['preflight']))
     verified = verified_preflight(project, Path(doc['preflight']), fixture,
-                Path(pf['source_preselection']), SimpleNamespace(min_lead=doc['minimum_lead_minutes'],
+                Path(pf['source_preselection']), SimpleNamespace(min_lead=configured_review_min,
                                                                max_odds_age=doc['max_odds_age_minutes']))
     if any(str(verified[k]) != str(doc[k]) for k in ('bwin_event_id','bwin_url','home','away','kickoff_madrid')):
         raise trial.TrialError('HANDOFF_EVENT_IDENTITY_MISMATCH')
@@ -84,6 +107,8 @@ def main(argv=None):
     parser.add_argument('--horizon-hours',type=float,default=0,help='Próximas N horas; 0 permite preparar toda la ventana con antelación')
     parser.add_argument('--bwin-top',type=int,default=5,help='Tamaño de lote Bwin; sin recorte global')
     parser.add_argument('--check-final-odds',action='store_true',help='Con --review: exigir una captura cercana al kickoff y fresca')
+    parser.add_argument('--review-min-lead',type=int,default=REVIEW_MIN_LEAD_MINUTES,
+                        help='Margen mínimo para revalidar un handoff ya preparado (>=5; no cambia la preparación T-45)')
     parser.add_argument('--window', choices=['normal','ampliada'])
     parser.add_argument('--competition-scope',choices=['adult-open','domestic-top-tier'],default='adult-open',
                         help='adult-open: todas las competiciones adultas; domestic-top-tier: filtro legado')
@@ -100,15 +125,15 @@ def main(argv=None):
     parser.add_argument('--min-lead', type=int, default=45)
     parser.add_argument('--max-odds-age', type=int, default=120)
     args = parser.parse_args(argv)
-    if args.evaluation_budget<0 or args.discovery_budget<0 or not __import__("math").isfinite(args.horizon_hours) or args.horizon_hours<0 or args.bwin_top<1 or args.max_scrapes<0 or min(args.max_matches,args.max_odds_age)<1 or args.min_lead<45 or args.discovery_retries<0 or not 4 <= args.history <= 50 or not 1 <= args.details <= args.history:
-        parser.error('Límites inválidos; history 4..50, details 1..history y margen mínimo 45 minutos')
+    if args.evaluation_budget<0 or args.discovery_budget<0 or not __import__("math").isfinite(args.horizon_hours) or args.horizon_hours<0 or args.bwin_top<1 or args.max_scrapes<0 or min(args.max_matches,args.max_odds_age)<1 or args.min_lead<45 or args.review_min_lead<REVIEW_MIN_LEAD_MINUTES or args.discovery_retries<0 or not 4 <= args.history <= 50 or not 1 <= args.details <= args.history:
+        parser.error('Límites inválidos; history 4..50, details 1..history, preparación >=45 y review >=5 minutos')
     if args.date and args.next_window:
         parser.error('--date y --next-window son alternativas')
     if args.check_final_odds and not args.review:
         parser.error('--check-final-odds requiere --review')
     try:
         if args.review:
-            return review(args.review, args.root.expanduser().resolve(),args.check_final_odds)
+            return review(args.review, args.root.expanduser().resolve(),args.check_final_odds,args.review_min_lead)
         root = args.root.expanduser().resolve()
         config, _, _ = trial.load_window_config(root)
         profile, args.start, args.end = trial.resolve_window(config, args.window,args.start,args.end)

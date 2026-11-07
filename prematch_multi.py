@@ -23,6 +23,8 @@ from urllib.parse import unquote, urlsplit
 from match_identity import write_identity, validate_identity
 
 PRINT_LOCK = threading.Lock()
+UTC = timezone.utc
+FINISH_MIN_LEAD_MINUTES = 5
 
 
 def say(message: str) -> None:
@@ -43,6 +45,11 @@ def identifier(url: str) -> str:
 
 def utc_now() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+def utc_now_dt() -> datetime:
+    """Injectable clock seam for operation-window checks and offline tests."""
+    return datetime.now(UTC)
 
 
 def sha(path: Path) -> str:
@@ -73,6 +80,75 @@ def load_manifest(root: Path, event: str) -> dict:
     if obj.get('event_id') != event or identifier(obj.get('url', '')) != event:
         raise ValueError(f'Manifiesto del evento {event} inconsistente')
     return obj
+
+
+def _kickoff_from_manifest(root: Path, event: str, state: dict) -> datetime:
+    """Resolve kickoff only from this Event ID's pinned identity/context.
+
+    Direct ``prematch_multi.py`` invocations retain the same temporal safety as
+    ``prematch_single.py``. If no canonical kickoff is available, fail closed
+    instead of guessing from a filename or another event.
+    """
+    inputs = state.get('inputs') or {}
+    candidates = []
+    for key in ('identity', 'context_json'):
+        entry = inputs.get(key) or {}
+        path = Path(entry.get('path') or '')
+        if not path.is_file():
+            continue
+        try:
+            obj = json.loads(path.read_text(encoding='utf-8-sig'))
+        except (OSError, ValueError, TypeError):
+            continue
+        candidates.extend([
+            obj.get('kickoff_utc'),
+            (obj.get('fixture') or {}).get('date'),
+            (obj.get('match') or {}).get('kickoff_utc'),
+        ])
+    # A failed retry deliberately removes manifest references to the context
+    # before regenerating it, but the event-scoped files remain intact.  Use
+    # those same-event files as a read-only clock source so a later retry is
+    # still possible; never search globally or borrow another Event ID.
+    if not candidates:
+        for path in (event_dir(root, event) / 'inputs' / 'match_identity.json',
+                     event_dir(root, event) / 'inputs' / f'match_engine_{event}.json'):
+            if not path.is_file():
+                continue
+            try:
+                obj = json.loads(path.read_text(encoding='utf-8-sig'))
+            except (OSError, ValueError, TypeError):
+                continue
+            candidates.extend([
+                obj.get('kickoff_utc'),
+                (obj.get('fixture') or {}).get('date'),
+                (obj.get('match') or {}).get('kickoff_utc'),
+            ])
+    parsed = []
+    for raw in candidates:
+        try:
+            value = datetime.fromisoformat(str(raw).replace('Z', '+00:00'))
+            if value.tzinfo is not None and value.utcoffset() is not None:
+                parsed.append(value.astimezone(UTC))
+        except (TypeError, ValueError, OverflowError):
+            continue
+    if not parsed:
+        raise ValueError(f'{event}: FINISH_KICKOFF_UNVERIFIED; falta kickoff canónico del propio evento')
+    if any(abs((value - parsed[0]).total_seconds()) > 60 for value in parsed[1:]):
+        raise ValueError(f'{event}: KICKOFF_IDENTITY_CONFLICT; no se ejecuta la operación')
+    return parsed[0]
+
+
+def ensure_event_operation_window(root: Path, event: str, state: dict,
+                                  *, min_lead: int = FINISH_MIN_LEAD_MINUTES,
+                                  operation: str = 'operation', now: datetime | None = None) -> float:
+    """Allow an operation only while the fixture is future and >= T-min_lead."""
+    kickoff = _kickoff_from_manifest(root, event, state)
+    remaining = (kickoff - (now or utc_now_dt()).astimezone(UTC)).total_seconds() / 60
+    if remaining <= 0:
+        raise ValueError(f'{event}: {operation.upper()}_AFTER_KICKOFF; PREMATCH bloqueado')
+    if remaining < min_lead:
+        raise ValueError(f'{event}: {operation.upper()}_WINDOW_EXPIRED; quedan {remaining:.1f} min, se requieren {min_lead}')
+    return remaining
 
 
 def match_header(path: Path, event: str) -> bool:
@@ -275,17 +351,20 @@ def prepare_one(root: Path, url: str, python: str, shared_file: Path,
             state['error'] = str(exc)
     if api_code == 0 and state['status'] != 'ERROR_ARCHIVOS':
         try:
-            bind_identity(root,event,state)
+            identity_status = bind_identity(root,event,state)
+            if identity_status == 'API_FIXTURE_VERIFIED_BWIN_TIME_UNKNOWN':
+                state['status'] = 'PREPARADO_PROVISIONAL'
+                state.setdefault('warnings', []).append('BWIN_KICKOFF_UNVERIFIED: contexto aislado sin vínculo temporal Bwin verificado')
         except (OSError,ValueError,KeyError) as exc:
             state['status']='ERROR_ARCHIVOS'
             state['error']='Identidad: '+str(exc)
     state['finished_at'] = utc_now()
     save_manifest(root,event,state)
     say(f'[{event}] PREPARACIÓN: {state["status"]}')
-    return state['status']=='PREPARADO'
+    return state['status'] in {'PREPARADO', 'PREPARADO_PROVISIONAL'}
 
 
-def bind_identity(root: Path, event: str, state: dict) -> None:
+def bind_identity(root: Path, event: str, state: dict) -> str:
     """Vincula identidad comprobando el JSON de contexto y el snapshot SHA."""
     entry=(state.get('inputs') or {}).get('context_json')
     if not entry:
@@ -300,11 +379,18 @@ def bind_identity(root: Path, event: str, state: dict) -> None:
     validate_identity(obj,json.loads(j.read_text(encoding='utf-8')),event,state['url'])
     state['inputs']['identity']={'path':str(dst.resolve()),'sha256':sha(dst),
                                  'generated_from':str(j.resolve())}
+    state['identity_status'] = obj.get('identity_status')
+    return str(obj.get('identity_status'))
 
 
 def finish_one(root: Path, event: str, python: str, override_report: str | None = None,
                allow_no_odds: bool = False, historical: bool = False) -> bool:
     state = load_manifest(root,event)
+    if not historical:
+        ensure_event_operation_window(root, event, state,
+                                      min_lead=FINISH_MIN_LEAD_MINUTES, operation='finish')
+    if state.get('status') == 'PREPARADO_PROVISIONAL':
+        raise ValueError('API_FIXTURE_VERIFIED_BWIN_TIME_UNKNOWN: contexto provisional; no procede finish ni picks finales')
     if state.get('status') not in {'PREPARADO','PARCIAL_SIN_CUOTAS','VALIDADO','FINALIZADO',
                                    'BLOQUEADO_VALIDACION','ERROR_VALIDACION','ERROR_MOTOR','AUDITORIA_HISTORICA'}:
         raise ValueError(f'Evento {event}: preparación incompleta ({state.get("status")})')
@@ -463,7 +549,9 @@ def retry_context_one(root: Path, event: str, python: str, shared_file: Path,
     reintento conserva el snapshot Bwin y permite reintentar de nuevo.
     """
     state = load_manifest(root, event)
-    if state.get('status') not in {'ERROR_CONTEXTO', 'ERROR_ARCHIVOS'}:
+    ensure_event_operation_window(root, event, state,
+                                  min_lead=FINISH_MIN_LEAD_MINUTES, operation='retry-context')
+    if state.get('status') not in {'ERROR_CONTEXTO', 'ERROR_ARCHIVOS', 'PREPARADO_PROVISIONAL'}:
         raise ValueError(f'{event}: estado={state.get("status")}. '
                          'retry-context es solo para fallos previos del contexto.')
     if state.get('steps', {}).get('scraper') != 0:
@@ -556,16 +644,18 @@ def retry_context_one(root: Path, event: str, python: str, shared_file: Path,
         return False
 
     try:
-        bind_identity(root,event,state)
+        identity_status = bind_identity(root,event,state)
     except (OSError,ValueError,KeyError) as exc:
         state['status']='ERROR_ARCHIVOS'
         state['error']='Identidad: '+str(exc)
         save_manifest(root,event,state)
         return False
-    state['status'] = 'PREPARADO'
+    state['status'] = ('PREPARADO_PROVISIONAL'
+                       if identity_status == 'API_FIXTURE_VERIFIED_BWIN_TIME_UNKNOWN'
+                       else 'PREPARADO')
     state.pop('error', None)
     save_manifest(root, event, state)
-    say(f'[{event}] CONTEXTO RECUPERADO; cuotas originales preservadas; listo para finish.')
+    say(f'[{event}] CONTEXTO RECUPERADO; cuotas originales preservadas; estado={state["status"]}.')
     return True
 
 
@@ -576,6 +666,8 @@ def retry_scraper_one(root: Path, event: str, python: str) -> bool:
     producido en ESTE intento. Solo para partidas sin snapshot de cuotas válido.
     """
     state = load_manifest(root, event)
+    ensure_event_operation_window(root, event, state,
+                                  min_lead=FINISH_MIN_LEAD_MINUTES, operation='retry-scraper')
     if state.get('status') not in {'PARCIAL_SIN_CUOTAS', 'ERROR_ARCHIVOS'}:
         raise ValueError(f'{event}: estado={state.get("status")}; '
                          'retry-scraper requiere contexto válido y cuotas ausentes.')

@@ -14,6 +14,10 @@ from pathlib import Path
 from urllib.parse import unquote, urlsplit
 
 VERSION='1.0-fixture-bound'
+IDENTITY_TIME_VERIFIED='FIXTURE_AND_BWIN_TIME_VERIFIED'
+IDENTITY_API_ONLY='API_FIXTURE_VERIFIED_BWIN_TIME_UNKNOWN'
+IDENTITY_UNVERIFIED='FIXTURE_UNVERIFIED'
+LEGACY_IDENTITY='FIXTURE_VERIFIED_BY_GENERATOR'
 LEGAL={'fc','cf','ec','sc','ac','afc','fk','bk','cd','ca','ss','ssc','club','de','del','do','da'}
 FEMALE={'w','women','woman','f','femenino','femenina','feminino','feminina','frauen','damen'}
 CATEGORY={'b','ii','iii','reserves','reserve',*FEMALE}
@@ -75,8 +79,11 @@ def identity_from_payload(payload):
         raise ValueError('URL Bwin no coincide con Event ID')
     dt=datetime.fromisoformat(str(fx.get('date') or '').replace('Z','+00:00'))
     if dt.tzinfo is None: raise ValueError('Fixture sin timezone')
+    source_status=str((match.get('identity_status') or LEGACY_IDENTITY))
+    if source_status not in {IDENTITY_TIME_VERIFIED, IDENTITY_API_ONLY, LEGACY_IDENTITY}:
+        raise ValueError('Contexto sin estado de identidad temporal verificable')
     out={
-        'schema_version':VERSION,'identity_status':'FIXTURE_VERIFIED_BY_GENERATOR',
+        'schema_version':VERSION,'identity_status':source_status,
         'provenance':'generate_context.py: fixture validado y persistido; no equivale a vínculo oficial publicado por Bwin',
         'bwin_event_id':eid,'bwin_url':url,'api_fixture_id':fid,
         'league_id':fx.get('league_id'),'season':fx.get('season'),'league_name':fx.get('league_name'),
@@ -93,7 +100,8 @@ def identity_from_payload(payload):
     return out
 
 def validate_identity(identity, payload=None, event=None, url=None):
-    if identity.get('identity_status')!='FIXTURE_VERIFIED_BY_GENERATOR':raise ValueError('Estado de identidad inválido')
+    if identity.get('identity_status') not in {IDENTITY_TIME_VERIFIED, IDENTITY_API_ONLY, LEGACY_IDENTITY}:
+        raise ValueError('Estado de identidad inválido')
     if event is not None and str(identity.get('bwin_event_id'))!=str(event):raise ValueError('Event ID de identidad diferente')
     if url and identity.get('bwin_url')!=url:raise ValueError('URL de identidad diferente')
     if payload is not None:

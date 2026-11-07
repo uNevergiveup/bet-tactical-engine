@@ -190,7 +190,22 @@ def write_handoff(root, run_dir, ready, failures, scanner=None, min_lead=45, max
            'requires_pre_kickoff_odds_refresh': True,
            'final_odds_policy': {'capture_within_kickoff_minutes':60,'max_age_minutes':15},
            'ready_to_bet': False,
-           'minimum_lead_minutes': min_lead, 'max_odds_age_minutes': max_odds_age, 'discard_reasons': failures,
+           # Keep the original preparation gate for auditability, while
+           # documenting the narrower gates for later operations.  A handoff
+           # can therefore be revalidated/refreshed at T-5 without claiming
+           # that its original deep preparation happened that late.
+           'minimum_lead_minutes': min_lead,
+           'review_minimum_lead_minutes': 5,
+           'refresh_minimum_lead_minutes': 5,
+           'finish_minimum_lead_minutes': 5,
+           'operation_windows': {
+               'preparation': {'minimum_lead_minutes': min_lead, 'purpose': 'full discovery/context/preflight'},
+               'review': {'minimum_lead_minutes': 5, 'purpose': 'revalidate prepared handoff'},
+               'refresh_odds': {'minimum_lead_minutes': 5, 'purpose': 'new Bwin capture'},
+               'retry_context': {'minimum_lead_minutes': 5, 'purpose': 'new API context without scraper'},
+               'finish': {'minimum_lead_minutes': 5, 'purpose': 'validation and engine before kickoff'}
+           },
+           'max_odds_age_minutes': max_odds_age, 'discard_reasons': failures,
            'scanner': str(scanner) if scanner else None,
            'warning': 'Investigación manual únicamente; sin ventaja, probabilidad calibrada ni apuesta acreditadas.'}
     if valid:

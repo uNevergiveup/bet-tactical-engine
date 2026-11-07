@@ -27,8 +27,15 @@ from urllib.parse import urlsplit, unquote
 from zoneinfo import ZoneInfo
 from prematch_prospective_trial import TrialError
 
-VERSION = '0.1-single-execution-early-selection-fix'
+VERSION = '0.2-single-operation-windows'
 TZ = ZoneInfo('Europe/Madrid')
+# Temporal gates are deliberately operation-specific.  Full preparation and
+# the initial selector still require the conservative 45-minute margin; data
+# refreshes and the final validation path may run until T-5, never at/after
+# kickoff.  Identity, SHA, Bwin-time and freshness checks remain independent.
+PREPARE_MIN_LEAD_MINUTES = 45
+REFRESH_MIN_LEAD_MINUTES = 5
+FINISH_MIN_LEAD_MINUTES = 5
 RE_CAPTURE = re.compile(r'(?im)^Captura:\s*(\S+)\s*$')
 RE_EVENT = re.compile(r'(?im)^Event ID:\s*(\d{6,})\s*$')
 RE_URL = re.compile(r'(?im)^URL:\s*(https://\S+)\s*$')
@@ -189,8 +196,12 @@ def match_manifest(ctx, *, check_files=True):
         kick=dt(obj.get('kickoff_utc'),'match_identity.kickoff_utc')
         if abs((kick-ctx['kickoff']).total_seconds())>180:
             raise ValueError('Kickoff del fixture API no coincide con el seleccionado')
-        if obj.get('identity_status')!='FIXTURE_VERIFIED_BY_GENERATOR':
-            raise ValueError('match_identity no está verificado por generador')
+        if obj.get('identity_status') not in {
+                'FIXTURE_AND_BWIN_TIME_VERIFIED',
+                'API_FIXTURE_VERIFIED_BWIN_TIME_UNKNOWN',
+                'FIXTURE_VERIFIED_BY_GENERATOR',
+        }:
+            raise ValueError('match_identity no tiene un estado verificable')
         selected=ctx.get('selection',{})
         for field in ('league_id','season'):
             if selected.get(field) is not None and str(selected[field])!=str(obj.get(field)):
@@ -386,7 +397,7 @@ def cmd_retry(ctx,args,kind):
     ensure_prematch(ctx,min_lead=args.min_refresh_lead_minutes)
     multi=ensure_root(ctx,args.multi)
     manifest=match_manifest(ctx)
-    permitted={'retry-context':{'ERROR_CONTEXTO','ERROR_ARCHIVOS'},
+    permitted={'retry-context':{'ERROR_CONTEXTO','ERROR_ARCHIVOS','PREPARADO_PROVISIONAL'},
                'retry-scraper':{'PARCIAL_SIN_CUOTAS','ERROR_ARCHIVOS'}}
     if manifest.get('status') not in permitted[kind]:
         raise ValueError(f'{kind} no procede con manifest={manifest.get("status")}')
@@ -397,7 +408,8 @@ def cmd_retry(ctx,args,kind):
     code=run(cmd,ctx['root'])
     if code:raise ValueError(f'{kind} falló, código {code}; revisar logs del mismo evento')
     m=match_manifest(ctx)
-    if m.get('status')!='PREPARADO':raise ValueError(f'Estado tras {kind}: {m.get("status")}')
+    if m.get('status') not in {'PREPARADO', 'PREPARADO_PROVISIONAL'}:
+        raise ValueError(f'Estado tras {kind}: {m.get("status")}')
     update_state(ctx,kind,'OK',{'manifest_sha256':sha(ctx['directory']/'manifest.json')})
     print(f'{kind} correcto para {ctx["event_id"]}; evento único conservado.')
     return 0
@@ -488,9 +500,9 @@ def main(argv=None):
     p.add_argument('--max-selection-age-minutes',type=int,default=0,
                    help='0 = sin caducidad de selección; el kickoff y cuotas mantienen sus límites')
     p.add_argument('--max-odds-age-minutes',type=int,default=60)
-    p.add_argument('--min-lead-minutes',type=int,default=45,help='Margen mínimo para prepare/check')
-    p.add_argument('--min-refresh-lead-minutes',type=int,default=5,help='Margen mínimo para actualizar cuotas')
-    p.add_argument('--min-finish-lead-minutes',type=int,default=20,help='Margen mínimo para iniciar finish')
+    p.add_argument('--min-lead-minutes',type=int,default=PREPARE_MIN_LEAD_MINUTES,help='Margen mínimo para prepare/check')
+    p.add_argument('--min-refresh-lead-minutes',type=int,default=REFRESH_MIN_LEAD_MINUTES,help='Margen mínimo para actualizar cuotas/contexto')
+    p.add_argument('--min-finish-lead-minutes',type=int,default=FINISH_MIN_LEAD_MINUTES,help='Margen mínimo para iniciar finish (T-5 por defecto)')
     s=p.add_subparsers(dest='action',required=True)
     s.add_parser('check',help='Validar selección y tiempo; no usar herramientas externas')
     s.add_parser('status',help='Estado del único evento seleccionado')
@@ -511,8 +523,8 @@ def main(argv=None):
     args=p.parse_args(argv)
     if (args.max_selection_age_minutes<0 or args.max_odds_age_minutes<1 or
             args.min_lead_minutes<45 or args.min_refresh_lead_minutes<5 or
-            args.min_finish_lead_minutes<20):
-        p.error('Límites de frescura inválidos: check/prepare >=45, refresh >=5 y finish >=20 minutos')
+            args.min_finish_lead_minutes<FINISH_MIN_LEAD_MINUTES):
+        p.error('Límites de frescura inválidos: check/prepare >=45, refresh >=5 y finish >=5 minutos')
     try:
         ctx=load_context(args)
         if args.action=='check':
