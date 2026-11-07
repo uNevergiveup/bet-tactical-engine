@@ -166,6 +166,7 @@ class BwinMatch:
     # ambos clubes + orden + ventana horaria durante el rescate.
     verified_fixture_id: Optional[int] = None
     identity_status: str = IDENTITY_UNVERIFIED
+    temporal_identity_evidence: Optional[dict[str, Any]] = None
 
 
 @dataclass
@@ -4649,6 +4650,28 @@ def main() -> int:
     except Exception as exc:
         LOG.error(f"Error parseando Bwin: {exc}")
         return 1
+
+    selected_contract=os.environ.get('PREMATCH_TEMPORAL_IDENTITY_SELECTED','').strip()
+    if selected_contract:
+        try:
+            from prematch_single import load_context, validate_temporal_identity_evidence
+            from types import SimpleNamespace
+            selected_ctx=load_context(SimpleNamespace(
+                root=Path.cwd(),selected=Path(selected_contract),decision=None))
+            if str(match.event_id)!=selected_ctx['event_id'] or match.url!=selected_ctx['url']:
+                raise ValueError('Event ID/URL del contrato no coincide con la ejecución')
+            evidence=validate_temporal_identity_evidence(selected_ctx,max_age_minutes=180)
+            match.event_date=evidence['bwin_kickoff_madrid']
+            match.identity_status=IDENTITY_TIME_VERIFIED
+            match.temporal_identity_evidence=evidence
+            LOG.ok(
+                'BWIN_KICKOFF_ACCEPTED source=PHASE3_VERIFIED_CONTRACT '
+                f'event_id={match.event_id} local={match.event_date} '
+                f'preflight_sha256={evidence["preflight_sha256"]}'
+            )
+        except Exception as exc:
+            LOG.error(f'PHASE3_TEMPORAL_IDENTITY_CONTRACT_REJECTED: {exc}')
+            return 1
 
     LOG.ok(f"Evento Bwin: {match.event_id}")
     LOG.info(f"Partido detectado: {match.home_name_raw} vs {match.away_name_raw}")

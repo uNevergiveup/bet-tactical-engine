@@ -3,6 +3,7 @@
 from __future__ import annotations
 import argparse
 import contextlib
+import hashlib
 import io
 import json
 import os
@@ -14,9 +15,6 @@ import zipfile
 from datetime import timezone
 from pathlib import Path
 from unittest.mock import patch
-from generar_prompt_gemini import generar as generar_prompt_gemini
-from generar_prompt_grok import generar as generar_prompt_grok
-
 import prematch_daily as daily
 import prematch_prospective_trial as t
 import prematch_single as single
@@ -100,94 +98,131 @@ def selected_context(root,path):
     return ctx
 
 
+def _price_blind(value):
+    if isinstance(value,dict):
+        blocked=('odds','prediction','price','ev_valid','stake')
+        return {k:_price_blind(v) for k,v in value.items()
+                if not any(token in k.casefold() for token in blocked)}
+    if isinstance(value,list):return [_price_blind(v) for v in value]
+    return value
+
+
+def _create_identical_or_fail(path,content):
+    """Creation-only output: idempotent for identical bytes, never overwrite."""
+    encoded=content.encode('utf-8') if isinstance(content,str) else content
+    if path.exists():
+        if not path.is_file() or path.read_bytes()!=encoded:
+            raise ValueError('RESEARCH_KIT_V2_WOULD_OVERWRITE: '+str(path))
+        return False
+    path.parent.mkdir(parents=True,exist_ok=True)
+    with path.open('xb') as handle:handle.write(encoded)
+    return True
+
+
+def _research_identity(ctx,manifest):
+    entry=(manifest.get('inputs') or {}).get('identity') or {}
+    path=Path(entry.get('path') or '')
+    if not path.is_file() or not entry.get('sha256') or t.sha(path)!=entry['sha256']:
+        raise ValueError('RESEARCH_IDENTITY_SHA_INVALID')
+    identity=t.read(path)
+    if (str(identity.get('bwin_event_id'))!=ctx['event_id'] or
+            int(identity.get('api_fixture_id') or 0)!=ctx['fixture_id'] or
+            identity.get('bwin_url')!=ctx['url']):
+        raise ValueError('RESEARCH_IDENTITY_EVENT_MISMATCH')
+    if identity.get('identity_status') not in {'FIXTURE_AND_BWIN_TIME_VERIFIED','FIXTURE_VERIFIED_BY_GENERATOR'}:
+        raise ValueError('RESEARCH_IDENTITY_NOT_FULLY_VERIFIED')
+    kickoff=t.dt(identity.get('kickoff_utc'))
+    if not kickoff or kickoff.astimezone(timezone.utc)!=ctx['kickoff'].astimezone(timezone.utc):
+        raise ValueError('RESEARCH_IDENTITY_KICKOFF_MISMATCH')
+    if not identity.get('league_name') or identity.get('league_id') is None or identity.get('season') is None:
+        raise ValueError('RESEARCH_COMPETITION_METADATA_MISSING')
+    return identity,path
+
+
 def research_kit(root,path):
+    """Create three specialized V2 prompts without touching active research."""
     ctx=selected_context(root,path);single.ensure_prematch(ctx)
     manifest=single.match_manifest(ctx)
     if manifest.get('status')!='PREPARADO':raise ValueError('Full event context must be PREPARADO')
-    folder=ctx['directory']/'research'/'external';folder.mkdir(parents=True,exist_ok=True)
-    eid=ctx['event_id'];s=ctx['selection']
-    # External first-pass research receives a price-blind projection: the full
-    # generator JSON also contains API odds/predictions and must not prime it.
+    identity,identity_path=_research_identity(ctx,manifest)
+    eid=ctx['event_id'];folder=ctx['directory']/'research'/'prompts_v2'
+    external=ctx['directory']/'research'/'external'
     raw_context=Path(manifest['inputs']['context_json']['path'])
-    def price_blind(value):
-        if isinstance(value,dict):
-            return {k:price_blind(v) for k,v in value.items() if not any(token in k.casefold() for token in ('odds','prediction','price','ev_valid','stake'))}
-        if isinstance(value,list):return [price_blind(v) for v in value]
-        return value
-    research_context=folder/f'contexto_sin_cuotas_{eid}.json'
-    if research_context.exists():
-        previous=t.read(research_context).get('source',{})
-        if previous.get('sha256')!=t.sha(raw_context):
-            reports=[folder/f'{provider}_{eid}.md' for provider in ('grok','gemini','fusion','reporte_cualitativo')]
-            if any(p.is_file() and 'STATUS: PENDIENTE_MANUAL' not in p.read_text(encoding='utf-8-sig',errors='replace') for p in reports):
-                raise ValueError('RESEARCH_CONTEXT_CHANGED_AFTER_MANUAL_WORK')
-            archive=ctx['directory']/'archives'/('research_projection_'+t.now_madrid().strftime('%Y%m%dT%H%M%S%f'))
-            archive.mkdir(parents=True,exist_ok=False)
-            old_sha=t.sha(research_context)
-            research_context.replace(archive/research_context.name)
-            if t.sha(archive/research_context.name)!=old_sha:raise ValueError('RESEARCH_PROJECTION_ARCHIVE_SHA_MISMATCH')
-    if not research_context.exists():
-        t.dump(research_context,{'source':reference(raw_context),'projection':'RESEARCH_WITHOUT_ODDS_OR_PREDICTIONS',
-            'data':price_blind(t.read(raw_context))})
-    identity=f"Event ID: {eid}\nFixture ID: {ctx['fixture_id']}\nPartido: {ctx['home']}–{ctx['away']}\nLiga: {s.get('league')} ({s.get('league_id')}), temporada {s.get('season')}\nKickoff Madrid: {ctx['kickoff'].isoformat()}\n"
-    instructions=f'''{identity}
-Investiga exclusivamente este fixture antes del kickoff. Primera fase independiente de cuotas y picks.
-Incluir cabeceras Event ID y Fixture ID tal como se proporcionan; añadir cutoff_utc: ISO8601 con offset y report_generated_utc: ISO8601 con offset.
-Para cada hecho registra URL primaria, fecha/hora publicada y recuperada con offset, equipo/jugador ID cuando exista,
-hecho textual, nivel CONFIRMADO_OFICIAL/PUBLICADO_PREPARTIDO/PROBABLE/INFERIDO/NO_VERIFICADO y contraevidencia.
-No tratar prensa sin fecha como confirmación reciente. Distinguir fuentes independientes de sindicación/duplicación.
-Verificar equipos, liga/categoría, entrenadores actuales, XI (confirmado/probable), bajas, minutos/roles, calendario,
-localía y mecanismos tácticos de ambos equipos. Examinar guiones contrarios y factores que invalidarían la hipótesis.
-No inventar tácticas, probabilidades, EV ni datos ausentes. Excluir todo dato posterior al kickoff.
-Adjuntar únicamente este contexto de apoyo sin cuotas ni predicciones: {research_context}
-No adjuntar el TXT/JSON completo del generador, las cuotas Bwin ni rankings de selección.
-El contexto API es evidencia estructurada y no certificación oficial de XI.
+    if not raw_context.is_file() or t.sha(raw_context)!=manifest['inputs']['context_json']['sha256']:
+        raise ValueError('RESEARCH_CONTEXT_SHA_INVALID')
+    cutoff=ctx['selection_time'].astimezone(timezone.utc)
+    if cutoff>=ctx['kickoff'].astimezone(timezone.utc):raise ValueError('RESEARCH_CUTOFF_NOT_PREMATCH')
+    research_context=folder/f'contexto_cualitativo_{eid}.json'
+    projected={'schema_version':'2.0-price-blind-research-context','cutoff_utc':cutoff.isoformat(),
+        'source_context':reference(raw_context),'source_identity':reference(identity_path),
+        'projection':'QUALITATIVE_RESEARCH_WITHOUT_MARKET_PRICES_OR_PREDICTIONS',
+        'data':_price_blind(t.read(raw_context))}
+    context_bytes=(json.dumps(projected,ensure_ascii=False,indent=2)+'\n').encode('utf-8')
+    context_sha=hashlib.sha256(context_bytes).hexdigest()
+    common=f'''Contrato del evento (no reinterpretar):
+- Event ID Bwin: {eid}
+- Fixture ID API-Football: {ctx['fixture_id']}
+- Partido: {identity['home']['api_name']}–{identity['away']['api_name']}
+- Competición: {identity['league_name']} (League ID {identity['league_id']})
+- Temporada API-Football: {identity['season']}
+- Kickoff: {ctx['kickoff'].isoformat()} Europe/Madrid; {identity['kickoff_utc']} UTC
+- cutoff_utc estricto: {cutoff.isoformat()}
+
+Procedencia validada:
+- Identidad: {identity_path.resolve()} · SHA-256 {t.sha(identity_path)}
+- Contexto cualitativo: {research_context.resolve()} · SHA-256 {context_sha}
+
+Aplica tus instrucciones permanentes ya configuradas; este texto sólo especializa el encargo.
+Usa exclusivamente información publicada antes de cutoff_utc. Separa hechos, inferencias y datos no verificados.
+No produzcas picks, probabilidades, pronósticos ni recomendaciones financieras.
 '''
-    for provider in ('grok','gemini','fusion','reporte_cualitativo'):
-        dest=folder/f'{provider}_{eid}.md'
-        if not dest.exists():dest.write_text(f'# {provider}: {ctx["home"]}–{ctx["away"]}\n\nSTATUS: PENDIENTE_MANUAL\n{identity}\n\nNo contiene investigación realizada.\n',encoding='utf-8')
-    for provider in ('grok','gemini'):
-        dest=folder/f'ENTRADA_{provider.upper()}_{eid}.md'
-        if not dest.exists():dest.write_text(instructions+f'\nGuardar el informe independiente completo en {folder/provider}_{eid}.md\n',encoding='utf-8')
-    fusion=folder/f'ENTRADA_ARGON_{eid}.md'
-    if not fusion.exists():fusion.write_text(identity+f'''
-Aplicar el procedimiento Argon en la sesión disponible del usuario. No hay ejecutable/conector Argon descubierto en este proyecto.
-Entradas independientes: {folder/f'grok_{eid}.md'} y {folder/f'gemini_{eid}.md'}.
-Conservar ambos originales; no completar sus respuestas con supuestos.
-Comparar hecho por hecho: fuente, fecha, independencia, identidad, cutoff y nivel de confirmación.
-Registrar acuerdos, discrepancias, duplicaciones, hipótesis contrarias, asuntos no resueltos y efecto por mercado.
-Guardar fusión en {folder/f'fusion_{eid}.md'}; solo tras la auditoría producir {folder/f'reporte_cualitativo_{eid}.md'}.
-La versión canónica deberá declarar Event ID, fixture, liga, kickoff, report_generated_utc, cutoff y fuentes fechadas.
-No copiar cuotas ni picks a la investigación inicial. No afirmar que existe calibración o EV.
-Retirar STATUS: PENDIENTE_MANUAL únicamente después de completar realmente el informe.
-''',encoding='utf-8')
-    state={'version':VERSION,'status':'INCOMPLETO','stage':'WAITING_MANUAL_EXTERNAL_RESEARCH',
-           'fixture_id':ctx['fixture_id'],'bwin_event_id':eid,'kickoff_madrid':ctx['kickoff'].isoformat(),
-           'selection_tier':s.get('selection_tier','A'),'research_missing_evidence':s.get('research_missing_evidence',[]),
-           'source_refs':{'selection':reference(ctx['selected_path']),'manifest':reference(ctx['directory']/'manifest.json')},
-           'external_steps':{k:'PENDIENTE_MANUAL' for k in ('grok','gemini','argon','codex_final')},
-           'ready_to_bet':False,'actionable_bet':False,'updated_madrid':t.now_madrid().isoformat()}
-    t.dump(ctx['directory']/'release_state.json',state)
-    latest=root/'outputs/latest';latest.mkdir(parents=True,exist_ok=True)
-    for name,target in {'event':ctx['directory'],'selected_match.json':ctx['selected_path'],
-                        'selection_decision.json':ctx['decision_path'],'research':folder,'release_state.json':ctx['directory']/'release_state.json'}.items():
-        dest=latest/name
-        if dest.exists() and not dest.is_symlink():raise ValueError('Latest reference occupied: '+str(dest))
-        temporary=latest/(name+'.new')
-        temporary.symlink_to(target);temporary.replace(dest)
-    t.dump(latest/'ACTIVE_EVENT.json',{'fixture_id':ctx['fixture_id'],'bwin_event_id':eid,'directory':str(ctx['directory']),'selected':str(ctx['selected_path'])})
-    # Generar mensaje corto para Gemini Deep Research V5.0
-    prompt_gemini = generar_prompt_gemini(
-        ctx['selected_path'],
-        output_dir=folder
-    )
-    print(f"Prompt Gemini generado: {prompt_gemini}")
-    
-    prompt_grok = generar_prompt_grok(
-        ctx['selected_path'],
-        output_dir=folder
-    )
-    print(f"Prompt Grok generado: {prompt_grok}")
+    gemini=common+f'''
+Tarea Gemini — scouting táctico profundo:
+1. Analiza entrenadores y patrones realmente documentados, sin convertir una formación nominal en conducta demostrada.
+2. Reconstruye mecanismos colectivos con partidos históricos identificados por Fixture ID: salida, presión, bloque, transiciones, áreas de progresión y defensa del área.
+3. Examina roles individuales, continuidad, minutos, reemplazos y duelos plausibles sólo cuando exista evidencia suficiente.
+4. Contrasta localía, muestras recientes y anteriores, balón parado, faltas, córners y diferencias H1/H2 cuando las fuentes lo permitan.
+5. Formula escenarios contrapuestos. Para cada hipótesis incluye evidencia favorable, contraria, limitaciones y qué la confirmaría o refutaría.
+6. Cita fuente primaria, fecha de publicación y fecha del partido para cada afirmación material.
+
+Salida independiente prevista: {external/f'gemini_{eid}.md'}
+No leas ni completes el informe de Grok; conserva independencia investigadora.
+'''
+    grok=common+f'''
+Tarea Grok — actualidad verificable:
+1. Revisa cuentas oficiales en X, webs de clubes y competición, ruedas de prensa y prensa local fechada.
+2. Verifica entrenadores actuales, declaraciones, lesiones, sanciones, dudas, convocatoria, viajes y disponibilidad.
+3. Distingue XI oficial, XI probable y mera especulación; identifica fuente y hora exacta de cada uno.
+4. Investiga cambios tácticos recientes sólo con testimonios o observaciones fechadas, indicando evidencia contraria.
+5. Registra posts individuales y URLs originales; separa fuentes independientes de republicaciones o sindicación.
+6. Señala expresamente qué actualidad no pudo corroborarse antes del cutoff.
+
+Salida independiente prevista: {external/f'grok_{eid}.md'}
+No leas ni completes el informe de Gemini; conserva independencia investigadora.
+'''
+    argon=common+f'''
+Tarea Argon — auditoría cruzada y síntesis canónica:
+- Entradas independientes: {external/f'gemini_{eid}.md'} y {external/f'grok_{eid}.md'}.
+- Verifica primero Event ID, Fixture ID, kickoff y cutoff de ambos archivos. Conserva sus bytes originales.
+- Audita afirmación por afirmación: fuente primaria, fecha, independencia, identidad de equipo/jugador y nivel CONFIRMADO, PROBABLE, INFERIDO o NO VERIFICADO.
+- Detecta acuerdos que proceden de una misma fuente, contradicciones reales, omisiones y afirmaciones posteriores al cutoff.
+- No rellenes hechos ausentes ni resuelvas contradicciones mediante suposiciones. Mantén explícito NO VERIFICADO cuando corresponda.
+- Produce una matriz de evidencia favorable/contraria y una síntesis cualitativa trazable, sin convertirla en pronóstico.
+
+Salidas previstas, sin alterar las entradas:
+- Auditoría de fusión: {external/f'fusion_{eid}.md'}
+- Informe cualitativo canónico compatible con finish: {external/f'reporte_cualitativo_{eid}.md'}
+El informe canónico debe conservar Event ID, Fixture ID, kickoff, cutoff_utc y registro de fuentes fechadas.
+'''
+    outputs={folder/f'PROMPT_GEMINI_{eid}.txt':gemini,
+             folder/f'PROMPT_GROK_{eid}.txt':grok,
+             folder/f'PROMPT_ARGON_{eid}.txt':argon}
+    # Check the complete transaction before writing a single byte.
+    candidates={research_context:context_bytes,**{p:body.encode('utf-8') for p,body in outputs.items()}}
+    for target,body in candidates.items():
+        if target.exists() and (not target.is_file() or target.read_bytes()!=body):
+            raise ValueError('RESEARCH_KIT_V2_WOULD_OVERWRITE: '+str(target))
+    for target,body in candidates.items():_create_identical_or_fail(target,body)
     return folder
 
 def analysis_input(root,path):

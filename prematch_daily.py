@@ -7,6 +7,7 @@ import contextlib
 import fcntl
 import json
 import os
+import re
 import shutil
 import sys
 from datetime import timedelta, timezone
@@ -97,9 +98,319 @@ def review(path, root=None, check_final_odds=False, review_min_lead=REVIEW_MIN_L
     return 0
 
 
+def bwin_ranking_links(canonical, catalog, when, source, min_lead=45):
+    """Reutiliza identidad y preflight; no confunde catálogo con cuotas."""
+    from prematch_phase1 import identity_map, api_fixture_verification
+    from bwin_discovery import competition_similarity
+    from bwin_market_preflight import validate_match
+    mapped = identity_map(canonical, catalog)
+    associations = {str(r['api_fixture_id']): r for group in ('verified','pending','not_found','excluded') for r in mapped.get(group, [])}
+    rows = catalog.get('matches', [])
+    by_fixture = {}
+    event_fixtures = {}
+    for row in rows:
+        fid = str(row.get('fixture_id')); eid = str(row.get('bwin_event_id') or '')
+        by_fixture.setdefault(fid, []).append(row)
+        if eid: event_fixtures.setdefault(eid,set()).add(fid)
+    links = {}
+    for fixture in canonical.get('fixtures', []):
+        fid = str(fixture['fixture_id']); candidates = by_fixture.get(fid, [])
+        link = associations.get(fid, {}); row = candidates[0] if len(candidates)==1 else {}
+        inspection = row.get('inspection') or {}; raw = link.get('identity_status')
+        state = 'CANDIDATE_UNVERIFIED'; reason = link.get('reason','FIXTURE_NOT_EVALUATED_IN_CATALOG')
+        evidence = None
+        if len(candidates)>1 or len(event_fixtures.get(str(row.get('bwin_event_id')),set()))>1:
+            state='CONFLICT';reason='DUPLICATE_FIXTURE_OR_EVENT_ASSOCIATION'
+        elif raw=='AMBIGUOUS': state='AMBIGUOUS'
+        elif any(token in str(inspection.get('identity_status','')) for token in ('MISMATCH','CONFLICT')) or row.get('team_order_status') in ('AWAY_HOME_CONFLICT','AWAY_HOME_TOKEN_CONFLICT'):
+            state='CONFLICT';reason='BWIN_API_IDENTITY_OR_TIME_CONFLICT'
+        elif raw=='NOT_FOUND_IN_SCANNED_PAGES': state='NOT_FOUND'
+        elif row:
+            if any(row.get(k)!=fixture.get(k) for k in ('home_id','away_id','league_id','season')) or trial.dt(row.get('kickoff_madrid'))!=trial.dt(fixture.get('kickoff_madrid')):
+                links[fid]={'status':'CONFLICT','event_id':row.get('bwin_event_id'),'reason':'CATALOG_API_FIXTURE_FIELDS_CONFLICT','can_continue_deep_analysis':False}
+                continue
+            evidence=validate_match(row,catalog.get('catalog_observed',[]),when,min_lead,120)
+            api = dict(fixture);api.setdefault('category_status',api.get('filter_status'))
+            api_ok = api_fixture_verification(api,now=when)[0]=='API_FIXTURE_VERIFIED'
+            category_ok = (api.get('gender')=='M' and row.get('category_compatibility')=='COMPATIBLE_OR_UNKNOWN') or (api.get('gender')=='F' and row.get('category_compatibility')=='FEMALE_CORROBORATED')
+            competition_ok = competition_similarity(api.get('league',''), inspection.get('page_title',''))>=.82
+            order_ok = row.get('team_order_status') in ('HOME_AWAY','HOME_AWAY_TOKEN')
+            timezone_ok = evidence.get('time_evidence',{}).get('status')=='ABSOLUTE_TIME_VERIFIED' or catalog.get('user_time_reference')=='Europe/Madrid'
+            if api_ok and category_ok and competition_ok and order_ok and timezone_ok and evidence['status']=='READY_FOR_SCRAPER':
+                state='VERIFIED';reason='API_BWIN_IDENTITY_AND_ORIGINAL_TIME_EVIDENCE_REVALIDATED'
+            elif evidence['reasons']:
+                reason=','.join(evidence['reasons'])
+                if 'BWIN_API_KICKOFF_CONFLICT' in evidence['reasons']:state='CONFLICT'
+            elif not competition_ok: reason='EVENT_PAGE_COMPETITION_NOT_CORROBORATED'
+            elif not category_ok: reason='EVENT_CATEGORY_NOT_CORROBORATED'
+            elif not order_ok: reason='EVENT_HOME_AWAY_ORDER_NOT_CORROBORATED'
+            elif not timezone_ok: reason='BWIN_DISPLAY_TIMEZONE_NOT_VERIFIED'
+        links[fid]={'status':state,'event_id':row.get('bwin_event_id'),'url':row.get('bwin_url'),
+            'reason':reason,'evidence':evidence,'inspection':inspection,
+            'captured_at':catalog.get('generated_at_utc'),'source':str(Path(source).resolve()),
+            'source_sha256':trial.sha(source),'commercial_information':'HEADINGS_ONLY_NOT_QUOTES' if row.get('markets') else 'NOT_CAPTURED',
+            'can_continue_deep_analysis':state=='VERIFIED','actionable_bet':False}
+    return links, mapped
+
+
+def select_verified_bwin(args, root, out, ranked, prepath, bwin_path):
+    """Conecta los CLIs validados, sin reconstruir sus contratos JSON."""
+    import subprocess
+    from bwin_market_preflight import declared_capture_time
+    if args.asof: raise ValueError('RETROSPECTIVE_RUN_CANNOT_SELECT_OPERATIONALLY')
+    eligible = [r for r in ranked if r.get('bwin',{}).get('status')=='VERIFIED' and
+                (not args.fixture_id or r['fixture_id']==args.fixture_id)]
+    if not eligible: raise ValueError('NO_VERIFIED_BWIN_FIXTURE: conservar candidaturas; ver ranking.json')
+    chosen = eligible[0];fid=chosen['fixture_id'];event=str(chosen['bwin']['event_id'])
+    folder=out/'fixtures'/str(fid)/'selection_pipeline';folder.mkdir(parents=True)
+    def run(script, parameters, name):
+        with (folder/name).open('w',encoding='utf-8') as log:
+            result=subprocess.run([sys.executable,str(root/script),*map(str,parameters)],cwd=root,stdout=log,stderr=subprocess.STDOUT)
+        if result.returncode:raise ValueError(f'{script} BLOCKED: {folder/name}')
+    preflight=args.preflight
+    if preflight is None:
+        target=root/'outputs/matches'/event/'inputs'/f'cuotas_bwin_{event}.txt'
+        captured=declared_capture_time(target) if target.is_file() else None
+        now=trial.now_madrid()
+        if target.is_file() and (not captured or not 0 <= (now-captured).total_seconds() <= args.max_odds_age*60):
+            raise ValueError('EXISTING_ODDS_STALE: actualizar mediante refresh-odds; no sobrescribir snapshot')
+        run('bwin_market_preflight.py',['--discovery',bwin_path,'--preselection',prepath,'--fixture-id',fid,
+            '--root',root,'--output-dir',folder/'preflight','--min-lead-minutes',args.min_lead,
+            '--reuse-existing' if captured else '--run-scraper'],'preflight.log')
+        preflight=folder/'preflight/market_preflight.json'
+    fixture=next(r for r in trial.read(prepath)['matches'] if r['fixture_id']==fid)
+    verified_preflight(root,preflight,fixture,prepath,args)
+    run('select_single_match.py',['--preselection',prepath,'--discovery',bwin_path,'--preflight',preflight,
+        '--output-dir',folder,'--root',root,'--min-comparable-matches','1',
+        '--min-lead-minutes',args.min_lead,'--max-snapshot-age-minutes',args.max_odds_age],'selector.log')
+    selected=folder/'selected_match.json'
+    doc=trial.read(selected)
+    if doc['fixture_id']!=fid or str(doc['bwin_event_id'])!=event:raise ValueError('SELECTOR_CHANGED_FIXTURE_OR_EVENT')
+    run('prematch_single.py',['--root',root,'--selected',selected,'check'],'check.log')
+    return {'status':'SELECTED_AND_CHECKED_FOR_RESEARCH','fixture_id':fid,'bwin_event_id':event,
+        'selected_match':str(selected),'selection_decision':str(folder/'selection_decision.json'),
+        'preflight':str(preflight.resolve()),'check_log':str(folder/'check.log'),'actionable_bet':False,
+        'comparison_scope':'ONE_VERIFIED_FIXTURE_EXPLICIT_SINGLE_EVENT_PILOT'}
+
+
+def operational_research(args, now=None):
+    """Fase 3: ranking local y preparación aislada con los motores existentes."""
+    import prematch_phase1 as foundation
+    import prematch_phase2 as patterns
+    import prematch_tactical_signal_engine as tactical
+    root = args.root.resolve()
+    when = patterns._dt(args.asof) if args.asof else (now or trial.now_madrid())
+    if when is None: raise ValueError('ASOF_INVALID')
+    if args.online and args.asof: raise ValueError('SIMULATED_CLOCK_CANNOT_ACQUIRE_OPERATIONAL_DATA')
+    if args.max_api_calls < 0 or args.max_api_calls > 25: raise ValueError('API_BUDGET_REQUIRES_0_TO_25')
+    config, _, _ = trial.load_window_config(root)
+    _, start, end = trial.resolve_window(config, args.window, args.start, args.end)
+    day = trial.parse_date_relative(args.date, today=when.astimezone(trial.TZ).date()) if args.date else automatic_day(when, start, end)
+    begin, finish = trial.local_window(day, start, end)
+    prepath = args.preselection
+    if prepath is None:
+        prepath = trial.window_path(root, day, start, end) / 'prospective_trial/enriched/preselection.json'
+    prepath = prepath.resolve()
+    # Never search yesterday's directories as a fallback for a missing day.
+    for parent in prepath.parents:
+        label = re.fullmatch(r'(\d{4}-\d{2}-\d{2})_(\d{4})_(\d{4})', parent.name)
+        if label:
+            expected = f'{day.isoformat()}_{start:%H%M}_{end:%H%M}'
+            if parent.name != expected:
+                raise ValueError(f'PRESELECTION_WINDOW_MISMATCH: source={parent.name}, requested={expected}; specify its matching date/window explicitly')
+            break
+    pre = trial.read(prepath)
+    warnings = []
+    generated = patterns._dt(pre.get('generated_at_utc'))
+    if generated is None:
+        warnings.append('PRESELECTION_GENERATION_TIME_UNKNOWN')
+    elif generated > when:
+        warnings.append('PRESELECTION_GENERATED_AFTER_ASOF: retrospective reconstruction, not availability proven at cutoff')
+    elif (when-generated).total_seconds() > 7200:
+        warnings.append('PRESELECTION_OLDER_THAN_120_MINUTES: cached history only; current context requires refresh')
+    if not any(patterns._dt(m.get('kickoff_madrid')) and begin <= patterns._dt(m['kickoff_madrid']) < finish for m in pre.get('matches', [])):
+        warnings.append('NO_FIXTURES_IN_REQUESTED_WINDOW: no substitution with another matchday')
+    for warning in warnings:
+        print('AVISO: '+warning, file=sys.stderr)
+    canonical_path = args.fixtures_input or prepath.parent.parent / 'fixtures_major_test.json'
+    canonical = trial.read(canonical_path)
+    if pre.get('source_filter_sha256') and trial.sha(canonical_path) != pre['source_filter_sha256']:
+        raise ValueError('CANONICAL_IDENTITY_SHA_MISMATCH')
+    byid = {}
+    for row in canonical.get('fixtures', []):
+        if row['fixture_id'] in byid: raise ValueError('CANONICAL_FIXTURE_DUPLICATED')
+        byid[row['fixture_id']] = row
+    ledger = []; ranked = []; matches = {}
+    for fixture in pre.get('matches', []):
+        fid = fixture['fixture_id']
+        if fid in matches: raise ValueError('PRESELECTION_FIXTURE_DUPLICATED')
+        matches[fid] = fixture
+        identity = dict(byid.get(fid) or {})
+        identity.setdefault('category_status', identity.get('filter_status'))
+        status, reason = foundation.api_fixture_verification(identity, now=when)
+        ko = patterns._dt(fixture.get('kickoff_madrid'))
+        cutoff = patterns._dt(fixture.get('analysis_cutoff_utc'))
+        reasons = []
+        if status != 'API_FIXTURE_VERIFIED': reasons.append(reason)
+        for key in ('home_id', 'away_id', 'league_id', 'season', 'gender'):
+            if fixture.get(key) != identity.get(key): reasons.append('IDENTITY_CONFLICT_' + key.upper())
+        if ko != patterns._dt(identity.get('kickoff_utc') or identity.get('kickoff_madrid')): reasons.append('KICKOFF_CONFLICT')
+        if not cutoff or cutoff > when or ko and cutoff >= ko: reasons.append('INVALID_ANALYSIS_CUTOFF')
+        if not ko or (ko-when).total_seconds() < args.min_lead*60: reasons.append('PREPARATION_TEMPORAL_GATE')
+        manual = args.fixture_id == fid
+        if ko and not begin <= ko < finish and not manual: reasons.append('OUTSIDE_OPERATIONAL_WINDOW')
+        if reasons:
+            ledger.append({'fixture_id': fid, 'status': 'BLOCKED', 'reasons': sorted(set(reasons))}); continue
+        evaluated = tactical.analyze_fixture(fixture, when, fixture.get('statistical_observations') or {})
+        signals = evaluated['signals']
+        components = {'tactical_quality': evaluated['tactical_research_score'],
+                      'contradiction_penalty': min(20, 5*len(evaluated['contradictions'])),
+                      'small_sample_penalty': 10 if not evaluated['signal_count'] else 0}
+        player_evidence = {'status': 'NOT_AVAILABLE', 'bonus': 0}
+        player_path = root/'outputs/phase2'/str(fid)/'longitudinal'/f'player_patterns_{fid}.json'
+        if player_path.is_file():
+            pd = trial.read(player_path)
+            refs = {r['path']: r['sha256'] for obs in pd.get('observations', []) for r in obs.get('provenance', [])}
+            if (pd.get('fixture_id') == fid and patterns._dt(pd.get('cutoff_utc')) == cutoff and refs and
+                    all(Path(path).is_file() and trial.sha(Path(path)) == digest for path,digest in refs.items()) and
+                    pd.get('integrity_validation', {}).get('status') == 'PASS'):
+                supported_players = sum(any(v.get('per90_usable') for v in pl['metrics'].values()) and pl.get('performance_appearances',0)>=3 for pl in pd.get('patterns', []))
+                player_evidence = {'status': 'VERIFIED_CACHED_EVIDENCE', 'players_with_exposure': supported_players,
+                                   'source_sha256': trial.sha(player_path), 'bonus': min(3, supported_players*.25)}
+        components['player_evidence_bonus'] = player_evidence['bonus']
+        rests = {}
+        for side in ('home','away'):
+            rows = patterns.discovery.clean_observations(fixture, side, when)
+            rests[side] = round((ko-patterns._dt(rows[0]['kickoff_utc'])).total_seconds()/3600, 2) if rows else None
+        components['short_rest_penalty'] = 3 if any(v is not None and v < 72 for v in rests.values()) else 0
+        score = round(components['tactical_quality'] + components['player_evidence_bonus'] - sum(v for k,v in components.items() if k.endswith('penalty')), 4)
+        entry = {'fixture_id': fid, 'home': fixture['home'], 'away': fixture['away'], 'kickoff_madrid': ko.astimezone(trial.TZ).isoformat(),
+                 'research_priority': score, 'components': components, 'coverage': evaluated['coverage_summary'],
+                 'supported_signals': evaluated['signal_count'], 'contradictions': evaluated['contradictions'],
+                 'rest_hours': rests, 'status': 'RANKED', 'actionable_bet': False}
+        entry['player_evidence'] = player_evidence
+        entry['signal_evidence'] = [{k:s.get(k) for k in ('signal_id','metric','team_side','status','source_mode','own','opponent_conceded','contradictions')} for s in signals if s['status']=='SUPPORTED_DESCRIPTIVE_SIGNAL']
+        ranked.append(entry); ledger.append(entry)
+    ranked.sort(key=lambda r: (-r['research_priority'], r['kickoff_madrid'], r['fixture_id']))
+    out = ((args.output_dir or root/'outputs/phase3'/f'{day.isoformat()}_{start:%H%M}_{end:%H%M}') / 'runs' / stamp()).resolve()
+    out.mkdir(parents=True, exist_ok=False)
+    bwin_path = getattr(args, 'bwin_catalog', None)
+    if getattr(args, 'sync_bwin', False):
+        import subprocess
+        destination = out/'bwin_catalog'
+        result = subprocess.run([sys.executable, str(root/'bwin_discovery.py'), '--input', str(canonical_path),
+            '--top', '0', '--output-dir', str(destination), '--headless', '--max-country-pages', '8'], cwd=root)
+        if result.returncode != 0: raise ValueError('BWIN_DISCOVERY_FAILED: '+str(destination))
+        if not args.asof: when = trial.now_madrid()
+        bwin_path = destination/'bwin_discovery.json'
+    if bwin_path:
+        catalog = trial.read(bwin_path)
+        associations, identity_doc = bwin_ranking_links(canonical,catalog,when,bwin_path,args.min_lead)
+        trial.dump(out/'bwin_identity_map.json', identity_doc)
+        inventory=[]
+        for event in catalog.get('catalog_observed',[]):
+            linked=[r for r in catalog.get('matches',[]) if str(r.get('bwin_event_id'))==str(event.get('bwin_event_id'))]
+            inventory.append({**event,'browser_time_reference':catalog.get('user_time_reference'),
+                'api_fixture_ids':[r['fixture_id'] for r in linked],
+                'event_page_titles':[(r.get('inspection') or {}).get('page_title') for r in linked],
+                'binding_states':[associations.get(str(r['fixture_id']),{}).get('status') for r in linked]})
+        trial.dump(out/'bwin_event_inventory.json',{'catalog':str(Path(bwin_path).resolve()),'catalog_sha256':trial.sha(bwin_path),'events':inventory})
+        for entry in ledger:
+            entry['bwin'] = associations.get(str(entry['fixture_id']), {'status':'CANDIDATE_UNVERIFIED','reason':'FIXTURE_NOT_EVALUATED'})
+    else:
+        for entry in ledger:
+            entry['bwin'] = {'status': 'CANDIDATE_UNVERIFIED', 'event_id': None,
+                             'reason': 'CATALOG_NOT_PROVIDED_OR_SYNCED'}
+    ranking = {'asof_madrid': when.astimezone(trial.TZ).isoformat(), 'source_preselection_sha256': trial.sha(prepath),
+               'source_preselection': str(prepath), 'warnings': warnings,
+               'window': {'start': begin.isoformat(), 'end': finish.isoformat()}, 'shortlist': ranked[:5],
+               'ranking': ranked, 'ledger': ledger, 'api_calls': 0, 'actionable_bet': False}
+    from collections import Counter
+    ranking['counts']={'api_fixtures_received':len(matches),'ranked':len(ranked),'blocked':len(ledger)-len(ranked),
+        'bwin_events_discovered':len({str(r.get('bwin_event_id')) for r in catalog.get('catalog_observed',[]) if r.get('bwin_event_id')}) if bwin_path else 0,
+        'by_bwin_status':dict(Counter(r['bwin']['status'] for r in ledger))}
+    if bwin_path:
+        ranking['counts']['bwin_events_without_api_candidate']=sum(not e['api_fixture_ids'] for e in inventory)
+        ranking['counts']['bwin_fixtures_searched']=sum(not str(r.get('status','')).startswith('SKIPPED') for r in catalog.get('matches',[]))
+    for position, entry in enumerate(ranked,1):entry['position']=position
+    trial.dump(out/'ranking.json', ranking)
+    lines=['# Ranking deportivo y vinculación Bwin','',
+        '| Posición | Puntuación | Fixture | Partido | Evento Bwin | Estado | Motivo | Información comercial | Continuar profundo |',
+        '|---:|---:|---:|---|---|---|---|---|---|']
+    for row in ranked:
+        link=row['bwin']
+        lines.append(f"| {row['position']} | {row['research_priority']} | {row['fixture_id']} | {row['home']}–{row['away']} | {link.get('event_id') or '—'} | {link['status']} | {link.get('reason','')} | {link.get('commercial_information','NOT_CAPTURED')} | {link.get('can_continue_deep_analysis',False)} |")
+    (out/'ranking_bwin.md').write_text('\n'.join(lines)+'\n',encoding='utf-8')
+    if getattr(args,'select_verified',False):
+        result=select_verified_bwin(args,root,out,ranked,prepath,bwin_path)
+        trial.dump(out/'selection_result.json',result)
+        return result
+    if args.rank:
+        visible=[{k:r[k] for k in ('position','research_priority','fixture_id','home','away','kickoff_madrid','bwin')} for r in ranked[:5]]
+        return {'status': 'RANKING_READY', 'path': str(out), 'counts':ranking['counts'], 'shortlist': visible, 'warnings': warnings, 'source_preselection': str(prepath)}
+    selected = next((r for r in ranked if r['fixture_id'] == args.fixture_id), None) if args.fixture_id else next(iter(ranked), None)
+    if selected is None: raise ValueError('NO_ELIGIBLE_FIXTURE: consultar ranking.json en '+str(out))
+    fid = selected['fixture_id']; fixture = dict(matches[fid]); fixture['market_identity_ready'] = False
+    event_out = out/'fixtures'/str(fid); event_out.mkdir(parents=True)
+    isolated = {**pre, 'matches': [fixture]}
+    isolated.pop('source_filter_sha256', None)
+    trial.dump(event_out/'preselection.json', isolated)
+    if args.online:
+        from config.constants import FOOTBALL_BASE_URL
+        client = foundation.Phase1ApiClient(root/'outputs/.api_football_history_cache', offline=False,
+                                           max_new_calls=args.max_api_calls, base_url=FOOTBALL_BASE_URL)
+        acquisition = foundation.collect_longitudinal(client, event_out/'preselection.json', fid, when, event_out, 5)
+    else: acquisition = {'api_calls': 0, 'mode': 'CACHE_ONLY'}
+    patterns.run(event_out/'preselection.json', event_out, [fid], when, cache_root=root/'outputs/.api_football_history_cache')
+    tactical_doc = tactical.analyze_fixture(fixture, when, fixture.get('statistical_observations') or {})
+    trial.dump(event_out/'tactical_signals.json', tactical_doc)
+    player_doc = trial.read(event_out/f'player_patterns_{fid}.json')
+    market = {'verified': False, 'reason': 'BWIN_ORIGINAL_PREFLIGHT_NOT_PROVIDED', 'event_id': None}
+    if args.preflight:
+        if args.asof: market['reason'] = 'RETROSPECTIVE_RUN_NOT_OPERATIONAL'
+        elif not patterns._dt(canonical.get('generated_at_utc')) or not 0 <= (when-patterns._dt(canonical.get('generated_at_utc'))).total_seconds() <= 7200:
+            market['reason'] = 'API_IDENTITY_SNAPSHOT_STALE_OR_UNDATED_REQUIRES_REFRESH'
+        else:
+            try:
+                verified = verified_preflight(root, args.preflight, fixture, prepath, args)
+                market.update(verified=True, reason='ORIGINAL_PREFLIGHT_REVALIDATED', event_id=verified.get('bwin_event_id'))
+            except (ValueError, OSError, KeyError, trial.TrialError) as exc: market['reason'] = str(exc)
+    package = {'status': 'READY_FOR_QUALITATIVE_RESEARCH', 'fixture': fixture, 'selection': selected,
+        'warnings': warnings,
+        'context_age_minutes': round((when-patterns._dt(fixture['analysis_cutoff_utc'])).total_seconds()/60, 2),
+        'asof_madrid': when.astimezone(trial.TZ).isoformat(), 'mode': 'RETROSPECTIVE_REPLAY' if args.asof else 'PREMATCH_RESEARCH',
+        'sources': {'preselection': str(prepath), 'sha256': trial.sha(prepath), 'canonical': str(canonical_path.resolve()), 'canonical_sha256': trial.sha(canonical_path)},
+        'player_summary': player_doc['summary'], 'acquisition': acquisition, 'bwin_identity': market,
+        'market_identity_ready': market['verified'], 'actionable_bet': False,
+        'missing_information': ['XI y bajas actuales', 'Noticias y entrenadores fechados', 'Contexto táctico verificable',
+                                'Cuotas frescas y validación final obligatoria'],
+        'artifacts': [p.name for p in sorted(event_out.glob('*.json'))]}
+    trial.dump(event_out/'research_package.json', package)
+    (event_out/'research_brief.md').write_text('# Investigación PREMATCH\n\n'+
+        f"Fixture {fid}: {fixture['home']}–{fixture['away']}. Corte {fixture['analysis_cutoff_utc']}.\n\n"+
+        'Consultar research_package.json y patrones colectivos/individuales adjuntos. Verificar fuentes fechadas, evidencia favorable y contraria; separar hechos de inferencias.\n\n'+
+        'Investigar XI, bajas, entrenadores, cambios recientes y mecanismos compatibles con producción/concesión. No inferir tácticas de la formación nominal.\n\n'+
+        'Vinculación Bwin: '+market['reason']+'. Evaluación comercial pendiente.\n', encoding='utf-8')
+    return {'status': package['status'], 'fixture_id': fid, 'path': str(event_out), 'bwin_identity': market}
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--start',type=trial.parse_clock)
+    mode = parser.add_mutually_exclusive_group()
+    mode.add_argument('--rank', action='store_true')
+    mode.add_argument('--prepare-fixture', action='store_true')
+    parser.add_argument('--fixture-id', type=int)
+    parser.add_argument('--preselection', type=Path)
+    parser.add_argument('--fixtures-input', type=Path)
+    parser.add_argument('--output-dir', type=Path)
+    parser.add_argument('--asof')
+    parser.add_argument('--online', action='store_true')
+    parser.add_argument('--max-api-calls', type=int, default=0)
+    parser.add_argument('--preflight', type=Path)
+    parser.add_argument('--sync-bwin', action='store_true', help='Descubrimiento ligero Bwin sin cuotas profundas ni API-Football')
+    parser.add_argument('--bwin-catalog', type=Path, help='Catálogo Bwin existente; conserva fecha y SHA')
+    parser.add_argument('--select-verified', action='store_true', help='Tras ranking: un evento verificado -> preflight -> selector -> check, sin finish')
     parser.add_argument('--end',type=trial.parse_clock)
     parser.add_argument('--evaluation-budget',type=int,default=0,help='0=todos; límite explícito con filas pendientes')
     parser.add_argument('--discovery-budget',type=int,default=0,help='0=todos; límite explícito con filas pendientes')
@@ -125,6 +436,12 @@ def main(argv=None):
     parser.add_argument('--min-lead', type=int, default=45)
     parser.add_argument('--max-odds-age', type=int, default=120)
     args = parser.parse_args(argv)
+    if args.rank or args.prepare_fixture:
+        try:
+            if args.min_lead < 45: raise ValueError('PREPARATION_MINIMUM_45_MINUTES')
+            print(json.dumps(operational_research(args), ensure_ascii=False, indent=2)); return 0
+        except (ValueError, OSError, KeyError, TypeError, trial.TrialError) as exc:
+            print('ERROR: '+str(exc), file=sys.stderr); return 2
     if args.evaluation_budget<0 or args.discovery_budget<0 or not __import__("math").isfinite(args.horizon_hours) or args.horizon_hours<0 or args.bwin_top<1 or args.max_scrapes<0 or min(args.max_matches,args.max_odds_age)<1 or args.min_lead<45 or args.review_min_lead<REVIEW_MIN_LEAD_MINUTES or args.discovery_retries<0 or not 4 <= args.history <= 50 or not 1 <= args.details <= args.history:
         parser.error('Límites inválidos; history 4..50, details 1..history, preparación >=45 y review >=5 minutos')
     if args.date and args.next_window:

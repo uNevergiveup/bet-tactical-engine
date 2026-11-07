@@ -251,6 +251,13 @@ def execute(root: Path, event: str, name: str, command: list[str], env: dict | N
 def prepare_one(root: Path, url: str, python: str, shared_file: Path,
                 api_minute: int, api_second: int, reuse_odds: bool = False) -> bool:
     event = identifier(url)
+    if reuse_odds:
+        from prematch_single import load_context,freshness,validate_reuse_odds
+        from types import SimpleNamespace
+        before=load_context(SimpleNamespace(root=root,selected=Path(reuse_odds),decision=None))
+        if before['event_id']!=event or before['url']!=url:raise ValueError('REUSE_ODDS_SELECTION_IDENTITY_MISMATCH')
+        freshness(before,min_lead=45)
+        validate_reuse_odds(before,max_age=120)
     location = event_dir(root,event)
     location.mkdir(parents=True, exist_ok=True)
     # Archive stale identity/context before preparation; never allow a failed API
@@ -272,13 +279,13 @@ def prepare_one(root: Path, url: str, python: str, shared_file: Path,
     env['PREMATCH_EVENT_ID'] = event
     env['PREMATCH_EVENT_DATA_DIR'] = str((location/'inputs').resolve())
     if reuse_odds:
-        from prematch_single import snapshot_info,load_context,freshness,read_json
+        from prematch_single import snapshot_info,load_context,freshness,read_json,validate_reuse_odds
         from types import SimpleNamespace
         ctx=load_context(SimpleNamespace(root=root,selected=Path(reuse_odds),decision=None))
         if ctx['event_id']!=event or ctx['url']!=url:raise ValueError('REUSE_ODDS_SELECTION_IDENTITY_MISMATCH')
         freshness(ctx,min_lead=45)
-        snap=snapshot_info(location/'inputs'/f'cuotas_bwin_{event}.txt',ctx,max_age=120)
-        if snap['sha256']!=read_json(ctx['selected_path']).get('odds_sha256'):raise ValueError('REUSE_ODDS_SELECTION_SHA_MISMATCH')
+        snap=validate_reuse_odds(ctx,max_age=120)
+        env['PREMATCH_TEMPORAL_IDENTITY_SELECTED']=str(ctx['selected_path'])
         odds_code=0
         state['odds_reused']=True
     else:
@@ -542,7 +549,8 @@ Produce `outputs/matches/{event}/analysis/analisis_{event}.md` exclusivamente pa
 
 
 def retry_context_one(root: Path, event: str, python: str, shared_file: Path,
-                      api_minute: int, api_second: int, force: bool = False) -> bool:
+                      api_minute: int, api_second: int, force: bool = False,
+                      temporal_identity_selected: Path | None = None) -> bool:
     """Reintenta SOLO API-Football; conserva snapshot Bwin y su hash original.
 
     Nunca ejecuta scraper_bwin ni usa capturas de otro Event ID. Un fallo de
@@ -577,6 +585,8 @@ def retry_context_one(root: Path, event: str, python: str, shared_file: Path,
     env['PREMATCH_API_MAX_PER_SECOND'] = str(api_second)
     env['PREMATCH_EVENT_ID'] = event
     env['PREMATCH_EVENT_DATA_DIR'] = str((event_dir(root,event)/'inputs').resolve())
+    if temporal_identity_selected:
+        env['PREMATCH_TEMPORAL_IDENTITY_SELECTED']=str(temporal_identity_selected.resolve())
     command = [python, '-u', 'generate_context.py', state['url']]
     if force:
         command.append('--force')
@@ -742,6 +752,8 @@ def main(argv: list[str] | None = None) -> int:
     r.add_argument('--api-minute',type=int,default=180)
     r.add_argument('--api-second',type=int,default=3)
     r.add_argument('--force',action='store_true',help='Ignora caché API (usa más llamadas)')
+    r.add_argument('--temporal-identity-selected',type=Path,
+                   help='selected_match.json con evidencia temporal Fase 3 verificable')
     f=sub.add_parser('finish',help='Validación + motor para reportes cualitativos por evento')
     f.add_argument('--event-id',action='append',required=True)
     f.add_argument('--report',help='Ruta explícita del informe; solo con un --event-id')
@@ -805,7 +817,8 @@ def main(argv: list[str] | None = None) -> int:
         shared.parent.mkdir(parents=True, exist_ok=True)
         with concurrent.futures.ThreadPoolExecutor(max_workers=args.workers) as pool:
             future_map = {pool.submit(retry_context_one, root, event, python, shared,
-                                      args.api_minute, args.api_second, args.force):event for event in ids}
+                                      args.api_minute, args.api_second, args.force,
+                                      args.temporal_identity_selected):event for event in ids}
             results = []
             for task in concurrent.futures.as_completed(future_map):
                 try:
