@@ -81,6 +81,32 @@ class TemporalWindowTests(unittest.TestCase):
             self.assertEqual(doc['operation_windows']['preparation']['minimum_lead_minutes'], 45)
             self.assertEqual(doc['operation_windows']['finish']['minimum_lead_minutes'], 5)
 
+    def test_daily_status_reads_handoff_and_ignores_missing_multi_manifest(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            missing = daily.discovery_status(root, '2026-11-12')
+            self.assertEqual(missing['status'], 'NO_DAILY_HANDOFF')
+            self.assertFalse(missing['artifacts']['handoff']['present'])
+            self.assertFalse((root / 'outputs' / 'matches').exists())
+            folder = Path(missing['folder'])
+            handoff = folder / 'prospective_trial' / 'handoff_prematch.json'
+            handoff.parent.mkdir(parents=True)
+            handoff.write_text(json.dumps({
+                'status': 'READY_FOR_MANUAL_RESEARCH', 'actionable_bet': False,
+                'fixture_id': 1583806, 'kickoff_madrid': '2026-11-12T22:00:00+01:00',
+                'bwin_event_id': '7902458', 'minimum_lead_minutes': 45,
+                'review_minimum_lead_minutes': 5,
+                'final_odds_policy': {'capture_within_kickoff_minutes': 60, 'max_age_minutes': 15},
+            }), encoding='utf-8')
+            found = daily.discovery_status(root, '2026-11-12')
+            self.assertEqual(found['status'], 'READY_FOR_MANUAL_RESEARCH')
+            self.assertEqual(found['bwin_event_id'], '7902458')
+            self.assertFalse(found['actionable_bet'])
+            self.assertEqual(multi.main(['--root', str(root), 'status', '--date', '2026-11-12']), 0)
+            self.assertEqual(multi.main(['--root', str(root), 'status', '--date', '2026-11-13']), 2)
+            self.assertEqual(multi.main(['--root', str(root), 'status']), 2)
+            self.assertEqual(daily.main(['--root', str(root), '--date', '2026-11-12', '--status']), 0)
+
     def test_direct_multi_operations_use_pinned_event_kickoff_and_injected_clock(self):
         with tempfile.TemporaryDirectory() as td:
             root = Path(td)

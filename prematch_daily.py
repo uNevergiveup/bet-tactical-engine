@@ -544,6 +544,56 @@ def daily_tactical_research(args):
             'actionable_bet':False}
 
 
+def discovery_status(root, day, window=None):
+    """Read-only state of one daily window. Never calls API, Bwin or multi manifests."""
+    root = Path(root).expanduser().resolve()
+    config, _, _ = trial.load_window_config(root)
+    profile, start, end = trial.resolve_window(config, window, None, None)
+    day = trial.parse_date_relative(day) if not hasattr(day, 'isoformat') or isinstance(day, str) else day
+    folder = trial.window_path(root, day, start, end)
+    phase1 = root / 'outputs' / 'phase1' / folder.name
+    tracked = {
+        'handoff': folder / 'prospective_trial' / 'handoff_prematch.json',
+        'preselection': folder / 'prospective_trial' / 'enriched' / 'preselection.json',
+        'phase1_summary': phase1 / 'phase1_summary.json',
+        'phase1_progress': phase1 / 'phase1_progress.json',
+    }
+    report = {
+        'schema_version': '1.0-prematch-daily-status',
+        'flow': 'prematch_daily',
+        'profile': profile,
+        'date': day.isoformat(),
+        'folder': str(folder),
+        'reads_only': True,
+        'network': False,
+        'actionable_bet': False,
+        'multi_manifest_note': (
+            'outputs/matches/<event_id>/manifest.json pertenece a prematch_multi prepare. '
+            'Este flujo no lo crea.'
+        ),
+        'artifacts': {name: {'path': str(path), 'present': path.is_file()} for name, path in tracked.items()},
+    }
+    handoff = tracked['handoff']
+    if not handoff.is_file():
+        report['status'] = 'NO_DAILY_HANDOFF'
+        return report
+    try:
+        doc = trial.read(handoff)
+    except (OSError, ValueError, trial.TrialError) as exc:
+        report['status'] = 'HANDOFF_UNREADABLE'
+        report['error'] = str(exc)
+        return report
+    report['status'] = doc.get('status') or 'HANDOFF_PRESENT'
+    report['actionable_bet'] = bool(doc.get('actionable_bet'))
+    for key in ('fixture_id', 'kickoff_madrid', 'generated_madrid', 'minimum_lead_minutes',
+                'review_minimum_lead_minutes', 'requires_pre_kickoff_odds_refresh',
+                'final_odds_policy', 'ready_to_bet'):
+        if key in doc:
+            report[key] = doc[key]
+    report['bwin_event_id'] = doc.get('bwin_event_id') or doc.get('event_id')
+    return report
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--start',type=trial.parse_clock)
@@ -551,6 +601,8 @@ def main(argv=None):
     mode.add_argument('--tactical-research',action='store_true');parser.add_argument('--research-context',type=Path,action='append',default=[]);parser.add_argument('--interpretation',type=Path);parser.add_argument('--pattern-library',type=Path)
     mode.add_argument('--rank', action='store_true')
     mode.add_argument('--prepare-fixture', action='store_true')
+    mode.add_argument('--status', action='store_true',
+                      help='Solo lectura del handoff de --date. No usa manifest.json ni red')
     parser.add_argument('--fixture-id', type=int)
     parser.add_argument('--preselection', type=Path)
     parser.add_argument('--fixtures-input', type=Path)
@@ -597,6 +649,14 @@ def main(argv=None):
     parser.add_argument('--min-lead', type=int, default=45)
     parser.add_argument('--max-odds-age', type=int, default=120)
     args = parser.parse_args(argv)
+    if args.status:
+        if not args.date:
+            parser.error('--status requiere --date YYYY-MM-DD')
+        report = discovery_status(args.root, args.date, args.window)
+        print(json.dumps(report, ensure_ascii=False, indent=2))
+        ready = report.get('artifacts', {}).get('handoff', {}).get('present') and report.get('status') not in (
+            'NO_DAILY_HANDOFF', 'HANDOFF_UNREADABLE')
+        return 0 if ready else 2
     if args.tactical_research:
         try:
             print(json.dumps(daily_tactical_research(args),ensure_ascii=False,indent=2));return 0

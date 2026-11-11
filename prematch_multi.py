@@ -760,11 +760,13 @@ def main(argv: list[str] | None = None) -> int:
     f.add_argument('--workers',type=int,default=2)
     f.add_argument('--allow-no-odds',action='store_true')
     f.add_argument('--historical',action='store_true',help='Auditoría retrospectiva de snapshots prepartido; nunca apuestas en vivo')
-    s=sub.add_parser('status',help='Resumen por Event ID')
+    s=sub.add_parser('status',help='Manifiestos multi, o el handoff diario con --date (sin manifest.json)')
     s.add_argument('--event-id',action='append')
+    s.add_argument('--date',help='YYYY-MM-DD, hoy o mañana. Lee outputs/discovery de prematch_daily; no exige manifest')
+    s.add_argument('--window',choices=['normal','ampliada'])
     args=parser.parse_args(argv)
     root=args.root.expanduser().resolve()
-    if not (root/'config'/'constants.py').is_file():
+    if args.action != 'status' and not (root/'config'/'constants.py').is_file():
         parser.error(f'No existe config/constants.py en {root}; ejecuta/copia el lanzador en la raíz scraper')
     python=sys.executable
     if args.action=='prepare':
@@ -845,8 +847,20 @@ def main(argv: list[str] | None = None) -> int:
                     results.append(False)
         return 0 if all(results) else 1
     parent=root/'outputs'/'matches'
+    if getattr(args, 'date', None):
+        import prematch_daily as daily_flow
+        report = daily_flow.discovery_status(root, args.date, getattr(args, 'window', None))
+        print(json.dumps(report, ensure_ascii=False, indent=2))
+        ready = report.get('artifacts', {}).get('handoff', {}).get('present') and report.get('status') not in (
+            'NO_DAILY_HANDOFF', 'HANDOFF_UNREADABLE')
+        if not args.event_id:
+            return 0 if ready else 2
     ids=args.event_id or ([p.name for p in parent.iterdir() if p.is_dir() and p.name.isdigit()]
                           if parent.exists() else [])
+    if not ids and not getattr(args, 'date', None):
+        say('STATUS_MULTI_EMPTY: no hay outputs/matches/<event_id>/manifest.json. '
+            'La jornada diaria se consulta con: python prematch_multi.py status --date YYYY-MM-DD')
+        return 2
     for event in sorted(ids):
         try:
             d=load_manifest(root,event)

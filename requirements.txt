@@ -1,0 +1,10 @@
+# Dependencias de terceros importadas por el código. No incluye secretos ni claves.
+# Instalación del navegador, aparte y solo si se va a capturar Bwin:
+#   python -m playwright install chromium
+
+requests>=2.31,<3
+playwright>=1.40,<2
+
+# Opcionales: el código sigue si no están instalados.
+python-dotenv>=1.0,<2
+deep-translator>=1.11,<2

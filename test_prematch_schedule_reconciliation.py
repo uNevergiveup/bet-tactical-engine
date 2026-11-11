@@ -5,7 +5,7 @@ from prematch_phase1 import reconcile_fixture_schedules,merge_bwin_snapshots
 import bwin_discovery as b
 class ReconciliationTests(unittest.TestCase):
  def setUp(self):
-  self.begin=datetime.fromisoformat('2026-11-11T15:00:00+01:00');self.end=datetime.fromisoformat('2026-11-12T03:00:00+01:00');self.now=datetime.fromisoformat('2026-11-11T16:00:00Z')
+  self.begin=datetime.fromisoformat('2026-11-11T15:00:00+01:00');self.end=datetime.fromisoformat('2026-11-12T03:00:00+01:00');self.now=datetime.fromisoformat('2026-11-11T16:00:00+00:00')
   self.f=dict(fixture_id=1638339,home_id=15495,away_id=17575,home='SL Benfica W',away='Austria Wien W',gender='F',league_id=525,season=2026,kickoff_madrid='2026-11-11T21:00:00+01:00',kickoff_utc='2026-11-11T20:00:00+00:00',status='NS')
   self.r=dict(fixture=dict(id=1638339,date='2026-11-12T20:00:00Z',status={'short':'NS'}),teams=dict(home={'id':15495,'name':'SL Benfica W'},away={'id':17575,'name':'Austria Wien W'}),league=dict(id=525,season=2026))
  def run_case(self,rows):return reconcile_fixture_schedules({'fixtures':[self.f]},rows,self.begin,self.end,self.now)
