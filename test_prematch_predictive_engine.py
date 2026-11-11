@@ -4,7 +4,8 @@ import tempfile
 import unittest
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from unittest.mock import Mock
+from types import SimpleNamespace
+from unittest.mock import Mock, patch
 from urllib.parse import urlencode
 
 import prematch_predictive_engine as engine
@@ -49,6 +50,129 @@ def source(matches=None):
 
 
 class PredictiveEngineTests(unittest.TestCase):
+    def test_partial_ledger_five_of_637_never_redefines_universe(self):
+        matches = [{'fixture_id': i, 'details_checked': True} for i in range(637)]
+        pre = {'counts': {'input_filter': 637}, 'matches': matches,
+               'fixture_evaluation_ledger': [{'fixture_id': i, 'status': 'EVALUATED'} for i in range(5)]}
+        stages = engine.fixture_stages(pre, [])
+        self.assertEqual((stages['source_filtered'], stages['eligible'], stages['basic_evaluated'],
+                          stages['deep_evaluated']), (637, 637, 637, 637))
+        self.assertEqual(stages['ledger_scope'], 'PARTIAL')
+        self.assertEqual((stages['ledger_entries'], stages['ledger_universe']), (5, 637))
+
+    def test_result_ten_minutes_earlier_is_not_available_for_training(self):
+        start = ASOF - timedelta(days=10)
+        old = [(start + timedelta(days=i), float(i % 3), i) for i in range(6)]
+        first = start + timedelta(days=7)
+        result = engine.walk_forward(old + [(first, 4.0, 100), (first + timedelta(minutes=10), 2.0, 101)])
+        by_id = {p['target_fixture_id']: p for p in result['predictions']}
+        self.assertEqual(by_id[101]['training_n'], 6)
+        self.assertNotEqual(by_id[101]['training_last_kickoff'], first.isoformat())
+        self.assertLessEqual(by_id[101]['training_last_result_available_at'], by_id[101]['target_kickoff'])
+
+    def test_post_kickoff_execution_is_explicit_retrospective_replay(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp); pre = root / 'preselection.json'; pre.write_text(json.dumps(source()))
+            executed = datetime.fromisoformat('2026-11-04T21:00:00+01:00')
+            out = engine.run(pre, root / 'out', ASOF, executed_at=executed)[0]
+            manifest = engine.read(out / 'run_manifest.json')
+            self.assertEqual(manifest['execution_mode'], 'RETROSPECTIVE_REPLAY')
+            self.assertFalse(manifest['prospective_claim_allowed'])
+            self.assertEqual(manifest['source_cutoff_utc'], ASOF.astimezone(timezone.utc).isoformat())
+            self.assertEqual(manifest['run_executed_at_utc'], executed.astimezone(timezone.utc).isoformat())
+
+    def test_changed_existing_artifact_blocks_overwrite(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp); pre = root / 'preselection.json'; pre.write_text(json.dumps(source()))
+            out = engine.run(pre, root / 'out', ASOF)[0]
+            target = out / 'predictive_rankings.json'
+            target.write_text(target.read_text() + '\n')
+            with self.assertRaisesRegex(engine.PredictiveError, 'EXISTING_ARTIFACT_SHA_MISMATCH'):
+                engine.run(pre, root / 'out', ASOF)
+
+    def test_intact_existing_run_is_reused_without_writes(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp); pre = root / 'preselection.json'; pre.write_text(json.dumps(source()))
+            out = engine.run(pre, root / 'out', ASOF)[0]
+            before = {p.name: p.stat().st_mtime_ns for p in out.iterdir()}
+            again = engine.run(pre, root / 'out', ASOF)[0]
+            after = {p.name: p.stat().st_mtime_ns for p in out.iterdir()}
+            self.assertEqual(out, again)
+            self.assertEqual(before, after)
+
+    def test_existing_run_from_different_engine_code_is_not_reused(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp); pre = root / 'preselection.json'; pre.write_text(json.dumps(source()))
+            out = engine.run(pre, root / 'out', ASOF)[0]
+            manifest_path = out / 'run_manifest.json'
+            manifest = engine.read(manifest_path)
+            manifest['engine_code_sha256'] = '0' * 64
+            manifest_path.write_text(json.dumps(manifest))
+            with self.assertRaisesRegex(engine.PredictiveError, 'EXISTING_RUN_ENGINE_CODE_MISMATCH'):
+                engine.run(pre, root / 'out', ASOF)
+
+    def test_manifestless_interrupted_run_is_archived_and_rebuilt(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp); pre = root / 'preselection.json'; pre.write_text(json.dumps(source()))
+            pre_sha = engine.sha(pre)
+            run_id = (f"{ASOF.astimezone(engine.MADRID).strftime('%Y%m%dT%H%M%S%z')}_{pre_sha[:12]}"
+                      f"_code-{engine.engine_code_sha()[:12]}")
+            partial = root / 'out' / engine.VERSION / run_id
+            partial.mkdir(parents=True)
+            (partial / 'predictive_coverage.json').write_text('{')
+            out = engine.run(pre, root / 'out', ASOF)[0]
+            manifest = engine.read(out / 'run_manifest.json')
+            archived = Path(manifest['recovered_interrupted_run'])
+            self.assertTrue(archived.is_dir())
+            self.assertEqual((archived / 'predictive_coverage.json').read_text(), '{')
+            self.assertTrue((out / 'predictive_validation.json').is_file())
+
+    def test_compact_fixture_output_is_isolated_and_keeps_global_reference(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp); pre = root / 'preselection.json'
+            pre.write_text(json.dumps(source([fixture(100), fixture(101)])))
+            out = engine.run(pre, root / 'out', ASOF, fixture_id=101)[0]
+            compact = engine.read(out / 'frozen_predictions_101.json')
+            self.assertTrue(compact['records'])
+            self.assertTrue(all(r['fixture_id'] == 101 for r in compact['records']))
+            self.assertTrue(all('league_reference_rate' not in r for r in compact['records']))
+            self.assertEqual({p.name for p in out.iterdir()}, {'frozen_predictions_101.json', 'run_manifest.json'})
+            self.assertTrue(engine.read(out / 'run_manifest.json')['configuration']['global_references_preserved'])
+
+    def test_retrospective_evaluation_is_separate_and_handles_missing(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp); pre = root / 'preselection.json'; pre.write_text(json.dumps(source()))
+            run_dir = engine.run(pre, root / 'runs', ASOF)[0]
+            results = root / 'results.json'
+            results.write_text(json.dumps({'results': [{'fixture_id': 100,
+                'observed': {'home': {'goals': 2}, 'away': {'goals': 0}}}]}))
+            out = engine.evaluate_run(run_dir, results, root / 'evaluation')
+            report = engine.read(out / 'retrospective_evaluation.json')
+            self.assertEqual(report['evaluation_mode'], 'RETROSPECTIVE_OFFLINE_SEPARATE_ARTIFACT')
+            self.assertEqual(report['counts']['evaluable'], 2)
+            self.assertGreater(report['counts']['not_evaluable_missing'], 0)
+            self.assertTrue(report['by_market_family'])
+            self.assertFalse(report['actionable_bet'])
+
+    def test_daily_optional_integration_disabled_is_noop(self):
+        import prematch_daily
+        with tempfile.TemporaryDirectory() as tmp:
+            self.assertIsNone(prematch_daily.run_optional_predictor(
+                Path(tmp), Path(tmp) / 'window', SimpleNamespace(predictive_engine=False)))
+
+    def test_daily_optional_integration_enabled_uses_frozen_preselection_offline(self):
+        import prematch_daily
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp); folder = root / 'window'
+            source_path = folder / 'prospective_trial/enriched/preselection.json'
+            source_path.parent.mkdir(parents=True); source_path.write_text('{}')
+            expected = folder / 'prospective_trial/predictive/run'
+            with patch('prematch_predictive_engine.run', return_value=(expected, {}, {}, {}, {}, {})) as mocked:
+                result = prematch_daily.run_optional_predictor(
+                    root, folder, SimpleNamespace(predictive_engine=True, fixture_id=123))
+            self.assertEqual(result, expected)
+            mocked.assert_called_once_with(source_path, folder / 'prospective_trial/predictive', fixture_id=123)
+
     def test_zero_is_valid_missing_and_post_cutoff_are_not(self):
         clean = engine.discovery.clean_observations(fixture(), 'home', ASOF)
         values = engine.observed_values(clean, 'own', 'goals')
@@ -96,6 +220,14 @@ class PredictiveEngineTests(unittest.TestCase):
         self.assertTrue(all(x['ranking_label'] == 'EXPERIMENTAL_RANKING' and not x['actionable_bet'] for x in ranked))
         self.assertTrue(all('bwin_event_id' not in x and 'odd' not in x for x in ranked))
         self.assertTrue(all('NO_BWIN_INPUT' in x['risks'] for x in ranked))
+
+    def test_offsides_remain_experimental_and_never_actionable(self):
+        pre=source();models,_=engine.fixture_models(pre,ASOF,engine.league_reference(pre,ASOF))
+        offsides=[row for row in models if row['metric']=='offsides']
+        self.assertTrue(offsides)
+        self.assertTrue(all(row['usage_status']=='EXPERIMENTAL_TACTICAL_ONLY' for row in offsides))
+        self.assertTrue(all('OFFSIDES_BWIN_AVAILABILITY_UNVERIFIED_NOT_ACTIONABLE' in row['risks']
+                            and not row['actionable_bet'] for row in offsides))
 
     def test_periods_without_verified_splits_stay_insufficient(self):
         with tempfile.TemporaryDirectory() as tmp:

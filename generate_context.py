@@ -582,7 +582,13 @@ def team_name_similarity(name_a: str, name_b: str,
         return 0
     # Quitar W/F SOLO de la similitud textual, nunca de la validación de género.
     if expected_gender == 'female':
-        a, b = _club_identity_tokens(base_name(name_a)), _club_identity_tokens(base_name(name_b))
+        a, b = (_club_identity_tokens(base_name(n.replace('ø','o').replace('Ø','O')))
+                for n in (name_a, name_b))
+        aliases = {'ol lyonnes':'lyon', 'hb koge':'koge', 'psv eindhoven':'psv eindhoven'}
+        ka = aliases.get(' '.join(a), ' '.join(a))
+        kb = aliases.get(' '.join(b), ' '.join(b))
+        if ka == kb:
+            return 100
     else:
         a, b = _club_identity_tokens(name_a), _club_identity_tokens(name_b)
     if not a or not b:
@@ -617,6 +623,9 @@ def name_variants(normalized: str, use_translation: bool = False) -> list[str]:
     """Variantes de nombre: original, alias manuales, país en inglés, traducción."""
     variants = [normalized]
     variants.extend(normalize_text(a) for a in TEAM_ALIASES.get(normalized, ()))
+    # Search hints only. Gender and the unique ordered fixture remain mandatory.
+    variants.extend({'ol lyonnes':('lyon w',), 'hb koge':('køge w','koge w'),
+                     'psv eindhoven':('psv/eindhoven w',)}.get(normalized, ()))
     # Acrónimo institucional Bwin: sin estas variantes, la búsqueda de PSG
     # no encuentra necesariamente la denominación completa de API-Football.
     # Son candidatos textuales; se sigue exigiendo validación del fixture.
@@ -1113,6 +1122,9 @@ def title_club_from_slug(home_raw: str, away_raw: str, slug: str) -> Optional[tu
     if flat[:len(visitor_slug)] != visitor_slug or len(words) <= len(visitor_slug):
         return None
     split_end = words[len(visitor_slug)-1].end()
+    # Preserve the closing parenthesis of an explicitly matched category (F).
+    if away_raw[:split_end].count('(') > away_raw[:split_end].count(')') and away_raw[split_end:].startswith(')'):
+        split_end += 1
     club, tail = away_raw[:split_end].strip(), away_raw[split_end:].strip()
     if not club or not tail or not re.search(r"\bf[uú]t(?:bol|ebol)\s*$", tail, re.I):
         return None
@@ -1139,7 +1151,7 @@ class BwinParser:
     # Captura el slug y el ID de URLs como: /eventos/valencia-villarreal-2:7893914
     EVENT_REGEX = re.compile(r"/eventos/([^/?#]+)-2:(\d+)", flags=re.IGNORECASE)
 
-    def parse(self, url: str, html: Optional[str] = None) -> BwinMatch:
+    def parse(self, url: str, html: Optional[str] = None, *, browser_catalog=None) -> BwinMatch:
         path = unquote(urlparse(url).path)
         match = self.EVENT_REGEX.search(path)
         if not match:
@@ -1170,6 +1182,13 @@ class BwinParser:
             home_gender = away_gender = 'female'
 
         event_date_utc = bwin_event_datetime_utc(html, event_id)
+        visible = browser_event_datetime_utc(browser_catalog or [], event_id)
+        if visible is not None:
+            if len(_structured_bwin_event_datetimes(html or '', event_id)) > 1:
+                raise ValueError('BWIN_KICKOFF_CONFLICT: ambiguous structured event times')
+            if event_date_utc is not None and event_date_utc != visible:
+                raise ValueError('BWIN_KICKOFF_CONFLICT: structured and visible event times disagree')
+            event_date_utc = visible
         if event_date_utc is not None:
             LOG.info(
                 f"Kickoff Bwin normalizado: local={event_date_utc.astimezone(MADRID_TZ).isoformat()} "
@@ -1200,6 +1219,12 @@ class BwinParser:
             # parse_date() la normaliza a UTC antes de cualquier comparación.
             event_date=(event_date_utc.astimezone(MADRID_TZ).isoformat()
                          if event_date_utc else None),
+            temporal_identity_evidence=({'schema_version':'1.0-browser-event-time',
+                'source':'SINGLE_EVENT_TILE', 'timezone':'Europe/Madrid',
+                'kickoff_utc':visible.isoformat(),
+                'catalog_observations':[r for r in browser_catalog or []
+                                        if str(r.get('bwin_event_id'))==str(event_id)]}
+                if visible is not None else None),
         )
 
     def _extract_teams_from_html(self, html: Optional[str], slug: str) -> tuple[str, str]:
@@ -1248,17 +1273,58 @@ class BwinParser:
         return slug.replace("-", " "), "Rival"
 
 
-def fetch_bwin_html(url: str) -> str:
+def browser_event_datetime_utc(catalog, event_id):
+    """Use only timestamped, single-event tiles from a Madrid browser context."""
+    from bwin_market_preflight import CATALOG_TIME_RE, LIVE_RE, published_event_id
+    found = set()
+    for row in catalog:
+        if (str(row.get('bwin_event_id')) != str(event_id)
+                or published_event_id(row.get('bwin_url')) != str(event_id)
+                or row.get('text_source') != 'SINGLE_EVENT_TILE'
+                or row.get('browser_timezone') != 'Europe/Madrid'):
+            continue
+        text = row.get('text', '')
+        observed = parse_date(row.get('text_observed_at_utc'))
+        times = list(CATALOG_TIME_RE.finditer(text))
+        if LIVE_RE.search(text) or not observed or len(times) != 1:
+            continue
+        # The capture timestamp, never the API kickoff, anchors Hoy/Mañana.
+        local = observed.astimezone(MADRID_TZ)
+        hit = times[0]
+        day = local.date() + timedelta(days=int(hit[1].lower().startswith('ma')))
+        try:
+            value = datetime(day.year, day.month, day.day, int(hit[2]), int(hit[3]), tzinfo=MADRID_TZ)
+        except ValueError:
+            continue
+        found.add(value.astimezone(timezone.utc))
+        LOG.info(f'BWIN_KICKOFF_CANDIDATE source=SINGLE_EVENT_TILE event_id={event_id} raw={text!r} observed={observed.isoformat()} timezone=Europe/Madrid utc={value.astimezone(timezone.utc).isoformat()}')
+    if len(found) != 1:
+        if len(found) > 1:
+            raise ValueError('BWIN_KICKOFF_CONFLICT: multiple visible times for one Event ID')
+        return None
+    return next(iter(found))
+
+
+def fetch_bwin_html(url: str, *, catalog_out=None) -> str:
     LOG.info("Descargando HTML de Bwin con Playwright para extraer nombres reales...")
     try:
         with sync_playwright() as p:
             browser = p.chromium.launch(headless=True)
-            page = browser.new_page()
+            page = browser.new_page(locale='es-ES', timezone_id='Europe/Madrid')
             # Navegamos a la URL y esperamos a que el DOM esté listo
             page.goto(url, wait_until='domcontentloaded', timeout=45000)
             # Pausa de 2.5s para que el JavaScript de Bwin inyecte el <title> completo
             page.wait_for_timeout(2500)
             html = page.content()
+            if catalog_out is not None:
+                from bwin_discovery import browser_collect_anchors
+                catalog_out.extend({**r, 'browser_timezone':'Europe/Madrid'}
+                                   for r in browser_collect_anchors(page, 0))
+                output = context_output_dir()
+                output.mkdir(parents=True, exist_ok=True)
+                stamp = datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%S%fZ')
+                (output / f'bwin_metadata_{stamp}.html').write_text(html, encoding='utf-8')
+                (output / f'bwin_metadata_{stamp}.json').write_text(json.dumps(catalog_out, ensure_ascii=False, indent=2), encoding='utf-8')
             browser.close()
             # No modificar HTML globalmente: las colas de competición se
             # recortan solo del nombre extraído en clean_team_name().
@@ -4287,6 +4353,9 @@ def bwin_league_compatible(label: Optional[str], league: dict[str, Any]) -> bool
         return bool(country == 'brazil' and tier and re.search(r'\bserie\s+'+tier.group(1)+r'\b', name))
     if 'champions league' in query:
         return 'champions league' in name
+    if 'uefa copa europa' in query:
+        return bool(re.fullmatch(r'uefa europa cup(?:\s*-\s*|\s+)women', name)
+                    and re.search(r'\(f\)|\bwomen\b', query))
     return True
 
 
@@ -4318,6 +4387,7 @@ def _fixture_text_name_match(match: BwinMatch, side: str, candidate: str) -> boo
     candidate_norm = normalize_text(candidate)
     return any(
         candidate_norm == normalize_text(variant)
+        or team_name_similarity(variant, candidate, gender) == 100
         or institutional_name_match(variant, candidate, gender)
         or (_fixture_institutional_key(variant) == _fixture_institutional_key(candidate)
             and len(_fixture_institutional_key(candidate)) >= 4)
@@ -4639,14 +4709,15 @@ def main() -> int:
 
     # ---------------------------------------------------------------- Bwin
     html: Optional[str] = None
+    browser_catalog = []
     try:
-        html = fetch_bwin_html(bwin_url)
+        html = fetch_bwin_html(bwin_url, catalog_out=browser_catalog)
     except Exception as exc:
         # Parche: el HTML solo aporta metadatos; los equipos salen de la URL.
         LOG.warn(f"No se pudo descargar el HTML de Bwin ({exc}). Se continúa solo con la URL.")
 
     try:
-        match = parser.parse(bwin_url, html)
+        match = parser.parse(bwin_url, html, browser_catalog=browser_catalog)
     except Exception as exc:
         LOG.error(f"Error parseando Bwin: {exc}")
         return 1

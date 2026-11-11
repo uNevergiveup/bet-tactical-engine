@@ -29,6 +29,8 @@ def stamp():
 def reusable_preparation(root, folder, day, args):
     """Revalidate the source chain; legacy preparations need no invented hashes."""
     base = folder / 'prospective_trial'
+    if not (base / 'prospective_test_summary.json').is_file():
+        raise trial.TrialError('PREPARATION_SCOPE_INCOMPLETE:MISSING_PREPARATION_SUMMARY')
     summary = trial.read(base / 'prospective_test_summary.json')
     methodology = summary.get('preselection', {}).get('methodology', {})
     if not methodology:

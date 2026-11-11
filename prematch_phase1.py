@@ -574,8 +574,8 @@ def merge_bwin_snapshots(paths: list[Path]) -> dict[str, Any]:
             else:
                 current["source_pages"] = list(dict.fromkeys((current.get("source_pages") or []) +
                                                               (event.get("source_pages") or [])))
-                if len(str(event.get("text") or "")) > len(str(current.get("text") or "")):
-                    current.update({k: event.get(k) for k in ("text", "text_observed_at_utc", "bwin_url")})
+                if (str(event.get("text_observed_at_utc") or ""),len(str(event.get("text") or ""))) > (str(current.get("text_observed_at_utc") or ""),len(str(current.get("text") or ""))):
+                    current.update({k: event.get(k) for k in ("text", "text_observed_at_utc", "bwin_url", "text_source")})
         for page in payload.get("pages", []):
             url = str(page.get("catalog_page") or "")
             if not url:
@@ -755,6 +755,35 @@ def identity_map(fixtures_doc: dict[str, Any], bwin_doc: dict[str, Any]) -> dict
                                "page_failures": len(page_failures),
                                "events_observed": len(bwin_doc.get("events", [])),
                                "absence_is_not_proof": True}}
+
+
+def reconcile_fixture_schedules(canonical, responses, begin, end, observed_at):
+    """Derive a current schedule without rewriting sporting histories or source snapshots."""
+    import copy
+    from generate_context import detect_gender
+    from bwin_discovery import NON_ADULT_RE
+    result=copy.deepcopy(canonical);audit=[];byid=defaultdict(list)
+    for raw in responses:
+        byid[(raw.get('fixture') or {}).get('id')].append(raw)
+    for f in result['fixtures']:
+        rows=byid.get(f['fixture_id'],[]);state='SCHEDULE_UNVERIFIED';reason='CURRENT_FIXTURE_RESPONSE_NOT_UNIQUE'
+        original=f.get('kickoff_utc') or f.get('kickoff_madrid');current=None
+        if len(rows)==1:
+            raw=rows[0];pair=raw.get('teams') or {};lg=raw.get('league') or {};fx=raw.get('fixture') or {}
+            identity=(pair.get('home',{}).get('id')==f['home_id'] and pair.get('away',{}).get('id')==f['away_id'] and
+                      lg.get('id')==f['league_id'] and lg.get('season')==f['season'] and
+                      not any(NON_ADULT_RE.search(pair.get(side,{}).get('name','')) for side in ('home','away')) and
+                      (f.get('gender') not in ('F','M') or all(detect_gender(pair.get(side,{}).get('name',''))=={'F':'female','M':'male'}[f['gender']] for side in ('home','away'))))
+            current=parse_dt(fx.get('date'))
+            if not identity:state='IDENTITY_CONFLICT';reason='CURRENT_API_IDENTITY_CONFLICT'
+            elif current is not None:
+                state='SCHEDULE_VERIFIED';reason='UNCHANGED' if parse_dt(original)==current else 'RESCHEDULED'
+                f.update(kickoff_utc=current.astimezone(UTC).isoformat(),kickoff_madrid=current.astimezone(MADRID).isoformat(),status=(fx.get('status') or {}).get('short'))
+                if not begin<=current<end:reason='RESCHEDULED_OUT_OF_WINDOW' if parse_dt(original)!=current else 'OUTSIDE_OPERATIONAL_WINDOW'
+        evidence={'fixture_id':f['fixture_id'],'original_kickoff':original,'current_kickoff':current.isoformat() if current else None,
+                  'observed_at_utc':observed_at.isoformat(),'source':'API_FOOTBALL_FIXTURES_CURRENT_RESPONSE','status':state,'reason':reason}
+        f['schedule_reconciliation']=evidence;audit.append(evidence)
+    return result,audit
 
 
 def endpoint_key(endpoint: str, params: dict[str, Any]) -> str:

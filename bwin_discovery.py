@@ -46,7 +46,7 @@ STOP_TOKENS = {
 
 
 def norm(s: object) -> str:
-    s = unicodedata.normalize("NFKD", str(s or ""))
+    s = unicodedata.normalize("NFKD", str(s or "").replace("ø","o").replace("Ø","O"))
     s = "".join(c for c in s if not unicodedata.combining(c))
     s = s.lower().replace("&", " y ")
     s = re.sub(r"\bd\.\s+(?=la\b|serena\b)", "deportivo ", s)
@@ -59,7 +59,7 @@ def team_tokens(name: str) -> list[str]:
     return result or norm(name).split()
 
 
-def team_similarity(team: str, evidence: str) -> float:
+def _team_similarity_literal(team: str, evidence: str) -> float:
     """Conservative partial-string matching, no automatic acceptance threshold here."""
     words = team_tokens(team)
     hay = norm(evidence)
@@ -83,6 +83,19 @@ def team_similarity(team: str, evidence: str) -> float:
     return round(max(coverage * 0.83, longest * 0.75), 4)
 
 
+def team_similarity(team: str, evidence: str) -> float:
+    # Exact club aliases only generate candidates; temporal/category/ID gates remain.
+    from config.constants import TEAM_ALIASES
+    query=norm(team);queries={str(team)}
+    for canonical,aliases in TEAM_ALIASES.items():
+        variants={norm(x) for x in (canonical,*aliases)}
+        if query in variants:queries.update(variants)
+    # OL Lyonnes is the women's club brand, never a global "Lyon" replacement.
+    if query in {'lyon w','ol lyonnes w','ol lyonnes f'} and re.search(r'\b(?:women|w|f)\b',norm(evidence)):
+        queries.update({'lyon','ol lyonnes'})
+    return max(_team_similarity_literal(q,evidence) for q in queries)
+
+
 def team_order_status(home: str, away: str, evidence: str) -> str:
     """Check home/away order only from observed Bwin text or URL slug."""
     observed = norm(evidence)
@@ -100,7 +113,7 @@ def team_order_status(home: str, away: str, evidence: str) -> str:
 
 
 def category_compatibility(fixture: dict, evidence: str) -> str:
-    observed_female = bool(FEMALE_RE.search(evidence))
+    observed_female = bool(FEMALE_RE.search(evidence) or re.search(r'(?i)(?:\(f\)|\bf\b)',evidence))
     observed_non_adult = bool(NON_ADULT_RE.search(evidence))
     expected = str(fixture.get("gender") or "UNKNOWN").upper()
     if observed_non_adult and fixture.get("category_status") in {"ELIGIBLE", "ADULT", None}:
@@ -119,6 +132,12 @@ def competition_similarity(competition: str, evidence: str) -> float:
     expected, observed = norm(competition), norm(evidence)
     if not expected or not observed:
         return 0.0
+    if expected == 'wsl cup':
+        return 1.0 if re.search(r'\bfa league cup f\b',observed) else 0.0
+    if expected == 'uefa europa cup women':
+        # Observed Spanish Bwin competition label, distinct from Champions
+        # League and the men's Europa League. Team/time checks stay separate.
+        return 1.0 if re.search(r'\buefa (?:copa europa f|europa cup women)\b', observed) else 0.0
     compact_expected = expected.replace(" ", "")
     compact_observed = observed.replace(" ", "")
     compact = (1.0 if compact_expected in compact_observed else
@@ -297,10 +316,14 @@ def browser_collect_anchors(page, max_scrolls: int = 8) -> list[dict]:
     V0.3 compared the cardinality *after* collection against itself; this meant
     the scraper quit after 3 scrolls even when new events were still appearing.
     """
-    snippet = r"""() => Array.from(document.querySelectorAll('a[href*="/eventos/"]')).map(a => ({
-      url: a.href, text: (a.innerText || a.textContent || '').trim().replace(/\s+/g,' ').slice(0,350),
-      title: a.title || '', aria: a.getAttribute('aria-label') || ''
-    }))"""
+    snippet = r"""() => Array.from(document.querySelectorAll('a[href*="/eventos/"]')).map(a => {
+      const tile = a.closest('ms-tree-event, .event-item');
+      const ids = tile ? new Set(Array.from(tile.querySelectorAll('a[href*="/eventos/"]')).map(x => (x.href.match(/:(\d{5,12})(?:[/?#]|$)/)||[])[1]).filter(Boolean)) : new Set();
+      const ownId = (a.href.match(/:(\d{5,12})(?:[/?#]|$)/)||[])[1];
+      const scoped = tile && ids.size === 1 && ids.has(ownId);
+      return {url:a.href, text:((scoped ? tile.innerText : a.innerText) || a.textContent || '').trim().replace(/\s+/g,' ').slice(0,600),
+      title:a.title || '', aria:a.getAttribute('aria-label') || '', text_source:scoped ? 'SINGLE_EVENT_TILE' : 'EVENT_ANCHOR'};
+    })"""
     seen = {}
     stable = 0
     for scroll_number in range(max(0, max_scrolls) + 1):
@@ -313,7 +336,7 @@ def browser_collect_anchors(page, max_scrolls: int = 8) -> list[dict]:
                 text = " ".join(str(a.get(k, "")) for k in ("text", "title", "aria")).strip()
                 if event_id not in seen or len(text) > len(seen[event_id]["text"]):
                     seen[event_id] = {"bwin_event_id": event_id, "bwin_url": a["url"],
-                                      "text": text, "text_observed_at_utc": captured_at_utc}
+                                      "text": text, "text_source": a.get("text_source","EVENT_ANCHOR"), "text_observed_at_utc": captured_at_utc}
         stable = stable + 1 if len(seen) == previous_count else 0
         if stable >= 3 or scroll_number == max_scrolls:
             break
@@ -607,6 +630,7 @@ def inspect_event(browser, result: dict, fixture: dict, navigation_timeout: int)
         observation["event_id_from_url"] = extract_event_id(page.url)
         body = page.locator("body").inner_text(timeout=10000)
         markup = page.content()
+        observation["observed_catalog"] = browser_collect_anchors(page,0)
         observation["market_headings"] = market_indicators(body)
         observation["market_heading_families"] = sum(x["status"].startswith("HEADING_")
                                                      for x in observation["market_headings"].values())
@@ -704,6 +728,27 @@ def summarize(fixture: dict, possible: list[dict], browser, timeout: int, inspec
     return out
 
 
+def reconcile_catalog_clocks(matches,catalog):
+    """Rebuild countdowns from the exact retained observation, not report time."""
+    for row in matches:
+        inspection=row.get('inspection')
+        if not inspection:continue
+        samples=[e for e in catalog if str(e.get('bwin_event_id'))==str(row.get('bwin_event_id'))]
+        if len(samples)!=1:continue
+        sample=samples[0]
+        if LIVE_RE.search(sample.get('text','')):
+            inspection['is_live']=True
+            continue
+        clock=countdown_corrob(sample,local_kickoff(row.get('kickoff_madrid')))
+        if clock.get('countdown_minutes') is not None:
+            inspection.update(clock)
+            inspection['time_evidence_type']='RELATIVE_CATALOG_COUNTDOWN'
+            if inspection.get('title_teams_match') and clock['countdown_difference_minutes']<=4:
+                inspection['identity_status']='NAME_AND_RELATIVE_TIME_CORROBORATED'
+                row['identity_status']=inspection['identity_status'];row['status']='EVENT_FOUND_TIME_CORROBORATED'
+    return matches
+
+
 def write_reports(folder: Path, payload: dict) -> None:
     folder.mkdir(parents=True, exist_ok=True)
     (folder / "bwin_discovery.json").write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
@@ -735,6 +780,7 @@ def write_reports(folder: Path, payload: dict) -> None:
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Descubrimiento verificable de partidos PREMATCH en Bwin.es")
+    parser.add_argument("--catalog-snapshot",type=Path,action="append",default=[],help="Catálogo archivado: pista de identidad, nunca horario vigente sin revalidación")
     parser.add_argument("--input", type=Path, required=True, help="fixtures_discovered/fixtures.json, preselection.json V1.3 o CSV")
     parser.add_argument("--fixture-id", type=int, action="append", default=[], help="Fixture API-Football a buscar (repetible)")
     parser.add_argument("--top", type=int, default=1, help="Sin fixture-id: top N futuros; 0=todos, sin ranking estadístico")
@@ -776,6 +822,11 @@ def main(argv: list[str] | None = None) -> int:
         browser = p.chromium.launch(**kwargs)
         try:
             catalog, pages = fetch_catalog(browser, args.base_url, paths, args.max_scrolls, args.timeout)
+            if args.catalog_snapshot:
+                from prematch_phase1 import merge_bwin_snapshots
+                archived=merge_bwin_snapshots(args.catalog_snapshot)
+                byid={e['bwin_event_id']:e for e in archived['events']}
+                byid.update({e['bwin_event_id']:e for e in catalog});catalog=list(byid.values())
             extension_info = {"requested_countries": [], "country_urls_found": 0}
             if not args.no_country_discovery:
                 catalog, extended_pages, extension_info = extend_catalog_for_missing(
@@ -799,8 +850,11 @@ def main(argv: list[str] | None = None) -> int:
                 print(f"[{fixture['fixture_id']}] {fixture['home']} - {fixture['away']}: {result['status']}" +
                       (f" | bwin={result['bwin_event_id']}" if result['bwin_event_id'] else ""))
                 results.append(result)
+                refreshed=(result.get('inspection') or {}).get('observed_catalog',[])
+                byid={e['bwin_event_id']:e for e in catalog};byid.update({e['bwin_event_id']:e for e in refreshed});catalog=list(byid.values())
         finally:
             browser.close()
+    reconcile_catalog_clocks(results,catalog)
     payload = {"schema_version": "0.4-bwin-discovery", "generated_at_utc": datetime.now(timezone.utc).isoformat(),
                "source_input": str(args.input), "user_time_reference": "Europe/Madrid", "prematch_only": not args.include_past_for_debug,
                "methodology": "Public DOM event links + targeted country pages discovered from DOM or previously verified; time identity checks",

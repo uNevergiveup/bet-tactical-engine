@@ -23,6 +23,90 @@ from prematch_runtime import reusable_preparation, scan, stamp, verified_preflig
 REVIEW_MIN_LEAD_MINUTES = 5
 
 
+def run_optional_predictor(root, folder, args):
+    """Ejecuta el predictor offline solo con opt-in; no toca selección ni finish."""
+    if not getattr(args, 'predictive_engine', False):
+        return None
+    import prematch_predictive_engine as predictor
+    source = folder / 'prospective_trial/enriched/preselection.json'
+    if not source.is_file():
+        raise trial.TrialError(f'PREDICTIVE_PRESELECTION_MISSING:{source}')
+    try:
+        out, *_ = predictor.run(
+            source, folder / 'prospective_trial/predictive',
+            fixture_id=getattr(args, 'fixture_id', None))
+    except predictor.PredictiveError as exc:
+        raise trial.TrialError(
+            f'PREDICTIVE_ENGINE_BLOCKED: {exc}'
+        ) from exc
+    return out
+
+
+def run_optional_market_mapping(root, folder, args, predictive_out=None):
+    """Mapea patrones a mercados sólo con snapshots/preflights locales."""
+    if not getattr(args, 'market_mapping', False):
+        return None
+    import prematch_market_mapping_v1 as mapping
+    patterns = getattr(args, 'market_mapping_patterns', None)
+    if patterns is None and predictive_out:
+        patterns = Path(predictive_out) / 'predictive_patterns.json'
+    if patterns is None:
+        # Reuse only a uniquely identified frozen predictor from this exact
+        # preselection. Never silently fall back to the legacy detector.
+        source = folder / 'prospective_trial/enriched/preselection.json'
+        candidates = []
+        for manifest in (folder / 'prospective_trial/predictive').rglob('run_manifest.json'):
+            doc = trial.read(manifest)
+            target = manifest.parent / 'predictive_patterns.json'
+            expected = (doc.get('artifacts', {}).get('predictive_patterns.json') or {}).get('sha256')
+            if source.is_file() and doc.get('source_preselection_sha256') == trial.sha(source):
+                if not target.is_file() or not expected or trial.sha(target) != expected:
+                    raise trial.TrialError(f'MARKET_MAPPING_PREDICTOR_SHA_MISMATCH:{target}')
+                candidates.append(target)
+        if len(candidates) != 1:
+            raise trial.TrialError('MARKET_MAPPING_REQUIRE_EXPLICIT_FROZEN_PATTERNS')
+        patterns = candidates[0]
+    patterns = Path(patterns)
+    if not patterns.is_file():
+        raise trial.TrialError(f'MARKET_MAPPING_PATTERNS_MISSING:{patterns}')
+    paths = getattr(args, 'market_mapping_preflight', None) or []
+    if not paths:
+        # Audit copies are not additional captures. Keep the latest original
+        # per fixture; conflicting event assignments require explicit review.
+        base = folder / 'prospective_trial'
+        found = sorted(set((base / 'preflight').rglob('market_preflight.json')) |
+                       set((base / 'daily_runs').glob('*/preflight/*/market_preflight.json')))
+        by_fixture = {}
+        for path in found:
+            document = trial.read(path)
+            for match in document.get('matches', []):
+                fid = str(match.get('fixture_id'))
+                eid = str(match.get('bwin_event_id'))
+                previous = by_fixture.get(fid)
+                if previous and previous[1] != eid:
+                    raise trial.TrialError(f'MARKET_MAPPING_CONFLICTING_EVENTS:{fid}')
+                timestamp = document.get('generated_at_utc') or ''
+                if previous is None or timestamp > previous[2]:
+                    by_fixture[fid] = (path, eid, timestamp)
+        paths = sorted({entry[0] for entry in by_fixture.values()})
+    # Content-addressed derived runs leave every earlier mapping untouched.
+    import hashlib
+    inputs = [(str(patterns.resolve()), trial.sha(patterns))]
+    for path in paths:
+        review = path.parent / 'market_selection_review.csv'
+        inputs.append((str(path.resolve()), trial.sha(path), trial.sha(review) if review.is_file() else None))
+    inputs.append(('mapping_code', mapping.code_sha()))
+    ledger = folder / 'prospective_trial/candidate_ledger.json'
+    minimum_odd = getattr(args,'min_market_odd',1.20)
+    inputs.append(('minimum_odd',minimum_odd))
+    if ledger.is_file(): inputs.append(('candidate_ledger',trial.sha(ledger)))
+    run_id = hashlib.sha256(json.dumps(inputs, sort_keys=True).encode()).hexdigest()[:20]
+    output = folder / 'prospective_trial/market_mapping_v1/runs' / run_id
+    result = mapping.map_markets(patterns, paths, output_dir=output,min_odd=minimum_odd,
+                                 candidate_ledger=ledger if ledger.is_file() else None)
+    return output, result['counts']
+
+
 def review_minimum_lead(doc, default=REVIEW_MIN_LEAD_MINUTES):
     """Return the safe T-5 gate for an already prepared handoff.
 
@@ -119,6 +203,7 @@ def bwin_ranking_links(canonical, catalog, when, source, min_lead=45):
         inspection = row.get('inspection') or {}; raw = link.get('identity_status')
         state = 'CANDIDATE_UNVERIFIED'; reason = link.get('reason','FIXTURE_NOT_EVALUATED_IN_CATALOG')
         evidence = None
+        order_ok=category_ok=competition_ok=False
         if len(candidates)>1 or len(event_fixtures.get(str(row.get('bwin_event_id')),set()))>1:
             state='CONFLICT';reason='DUPLICATE_FIXTURE_OR_EVENT_ASSOCIATION'
         elif raw=='AMBIGUOUS': state='AMBIGUOUS'
@@ -140,12 +225,15 @@ def bwin_ranking_links(canonical, catalog, when, source, min_lead=45):
                 state='VERIFIED';reason='API_BWIN_IDENTITY_AND_ORIGINAL_TIME_EVIDENCE_REVALIDATED'
             elif evidence['reasons']:
                 reason=','.join(evidence['reasons'])
-                if 'BWIN_API_KICKOFF_CONFLICT' in evidence['reasons']:state='CONFLICT'
+                if any(r in evidence['reasons'] for r in ('BWIN_API_KICKOFF_CONFLICT','BWIN_EVENT_LIVE')):state='CONFLICT'
             elif not competition_ok: reason='EVENT_PAGE_COMPETITION_NOT_CORROBORATED'
             elif not category_ok: reason='EVENT_CATEGORY_NOT_CORROBORATED'
             elif not order_ok: reason='EVENT_HOME_AWAY_ORDER_NOT_CORROBORATED'
             elif not timezone_ok: reason='BWIN_DISPLAY_TIMEZONE_NOT_VERIFIED'
-        links[fid]={'status':state,'event_id':row.get('bwin_event_id'),'url':row.get('bwin_url'),
+        schedule_state=('SCHEDULE_VERIFIED' if state=='VERIFIED' else 'SCHEDULE_CONFLICT' if evidence and any(r in evidence.get('reasons',[]) for r in ('BWIN_API_KICKOFF_CONFLICT','BWIN_EVENT_LIVE')) else 'TIME_NOT_CONFIRMED')
+        identity_state=('IDENTITY_AMBIGUOUS' if state=='AMBIGUOUS' else 'IDENTITY_VERIFIED' if row and inspection.get('title_teams_match') and order_ok and category_ok and competition_ok else 'IDENTITY_CANDIDATE')
+        reason_code=('VERIFIED' if state=='VERIFIED' else 'NOT_OBSERVED_IN_CATALOG' if state=='NOT_FOUND' else 'IDENTITY_NOT_CONFIRMED' if identity_state!='IDENTITY_VERIFIED' else 'TIME_CONFLICT' if schedule_state=='SCHEDULE_CONFLICT' else 'TIME_NOT_CONFIRMED')
+        links[fid]={'binding_reason_code':reason_code,'identity_state':identity_state,'schedule_state':schedule_state,'market_state':'MARKETS_NOT_CAPTURED','status':state,'event_id':row.get('bwin_event_id'),'url':row.get('bwin_url'),
             'reason':reason,'evidence':evidence,'inspection':inspection,
             'captured_at':catalog.get('generated_at_utc'),'source':str(Path(source).resolve()),
             'source_sha256':trial.sha(source),'commercial_information':'HEADINGS_ONLY_NOT_QUOTES' if row.get('markets') else 'NOT_CAPTURED',
@@ -236,6 +324,29 @@ def operational_research(args, now=None):
     canonical = trial.read(canonical_path)
     if pre.get('source_filter_sha256') and trial.sha(canonical_path) != pre['source_filter_sha256']:
         raise ValueError('CANONICAL_IDENTITY_SHA_MISMATCH')
+    if getattr(args,'reconcile_schedule',False):
+        if args.asof or not args.online or args.max_api_calls<1:
+            raise ValueError('SCHEDULE_RECONCILIATION_REQUIRES_LIVE_ONLINE_AND_BUDGET')
+        from config.constants import API_KEY
+        import copy
+        recdir=((args.output_dir or root/'outputs/phase3')/'schedule_reconciliation'/stamp()).resolve()
+        recdir.mkdir(parents=True,exist_ok=False)
+        client=foundation.Phase1ApiClient(recdir/'api',offline=False,max_new_calls=args.max_api_calls,key=API_KEY)
+        raw=[];errors=[];ids=[f['fixture_id'] for f in canonical['fixtures']]
+        for offset in range(0,len(ids),20):
+            try:raw.extend(client.get('fixtures',ids='-'.join(map(str,ids[offset:offset+20]))).response)
+            except (RuntimeError,ValueError,OSError) as exc:errors.append(str(exc))
+        trial.dump(recdir/'current_fixtures.json',raw)
+        canonical,audit=foundation.reconcile_fixture_schedules(canonical,raw,begin,finish,trial.now_madrid())
+        trial.dump(recdir/'schedule_audit.json',{'rows':audit,'api':client.statistics(),'errors':errors,'original_canonical':str(canonical_path),'original_sha256':trial.sha(canonical_path)})
+        canonical_path=recdir/'fixtures_reconciled.json';trial.dump(canonical_path,canonical)
+        original_prepath=prepath;pre=copy.deepcopy(pre);updated={f['fixture_id']:f for f in canonical['fixtures']}
+        for f in pre['matches']:
+            current=updated.get(f['fixture_id'],{})
+            for key in ('kickoff_utc','kickoff_madrid','status','schedule_reconciliation'):
+                if key in current:f[key]=current[key]
+        pre.update(parent_source=str(original_prepath),parent_sha256=trial.sha(original_prepath),source_filter_sha256=trial.sha(canonical_path))
+        prepath=recdir/'preselection_reconciled.json';trial.dump(prepath,pre)
     byid = {}
     for row in canonical.get('fixtures', []):
         if row['fixture_id'] in byid: raise ValueError('CANONICAL_FIXTURE_DUPLICATED')
@@ -251,6 +362,9 @@ def operational_research(args, now=None):
         ko = patterns._dt(fixture.get('kickoff_madrid'))
         cutoff = patterns._dt(fixture.get('analysis_cutoff_utc'))
         reasons = []
+        reconciliation=identity.get('schedule_reconciliation',{})
+        if reconciliation and reconciliation['status']!='SCHEDULE_VERIFIED':reasons.append(reconciliation['reason'])
+        if reconciliation.get('reason')=='RESCHEDULED_OUT_OF_WINDOW':reasons.append('RESCHEDULED_OUT_OF_WINDOW')
         if status != 'API_FIXTURE_VERIFIED': reasons.append(reason)
         for key in ('home_id', 'away_id', 'league_id', 'season', 'gender'):
             if fixture.get(key) != identity.get(key): reasons.append('IDENTITY_CONFLICT_' + key.upper())
@@ -298,8 +412,10 @@ def operational_research(args, now=None):
     if getattr(args, 'sync_bwin', False):
         import subprocess
         destination = out/'bwin_catalog'
+        archived=sorted((root/'outputs/discovery'/f'{day.isoformat()}_{start:%H%M}_{end:%H%M}'/'prospective_trial/bwin').rglob('bwin_discovery.json'))
+        catalog_args=[part for path in archived for part in ('--catalog-snapshot',str(path.resolve()))]
         result = subprocess.run([sys.executable, str(root/'bwin_discovery.py'), '--input', str(canonical_path),
-            '--top', '0', '--output-dir', str(destination), '--headless', '--max-country-pages', '8'], cwd=root)
+            '--top', '0', '--output-dir', str(destination), '--headless', '--max-country-pages', '8',*catalog_args], cwd=root)
         if result.returncode != 0: raise ValueError('BWIN_DISCOVERY_FAILED: '+str(destination))
         if not args.asof: when = trial.now_madrid()
         bwin_path = destination/'bwin_discovery.json'
@@ -321,6 +437,9 @@ def operational_research(args, now=None):
         for entry in ledger:
             entry['bwin'] = {'status': 'CANDIDATE_UNVERIFIED', 'event_id': None,
                              'reason': 'CATALOG_NOT_PROVIDED_OR_SYNCED'}
+    for entry in ledger:
+        if 'RESCHEDULED_OUT_OF_WINDOW' in entry.get('reasons',[]):
+            entry['bwin']={**entry['bwin'],'status':'RESCHEDULED_OUT_OF_WINDOW','reason':'RESCHEDULED_OUT_OF_WINDOW','binding_reason_code':'RESCHEDULED_OUT_OF_WINDOW','market_state':'NOT_APPLICABLE_OUT_OF_WINDOW','can_continue_deep_analysis':False}
     ranking = {'asof_madrid': when.astimezone(trial.TZ).isoformat(), 'source_preselection_sha256': trial.sha(prepath),
                'source_preselection': str(prepath), 'warnings': warnings,
                'window': {'start': begin.isoformat(), 'end': finish.isoformat()}, 'shortlist': ranked[:5],
@@ -394,10 +513,42 @@ def operational_research(args, now=None):
     return {'status': package['status'], 'fixture_id': fid, 'path': str(event_out), 'bwin_identity': market}
 
 
+def daily_tactical_research(args):
+    """One offline research command for the configured window, independent of Bwin."""
+    from prematch_tactical_signal_engine import research_profiles
+    when=trial.dt(args.asof) if args.asof else trial.now_madrid()
+    if not when:raise ValueError('ASOF_INVALID')
+    if args.online or args.sync_bwin or args.select_verified:raise ValueError('TACTICAL_RESEARCH_OFFLINE_ONLY')
+    root=args.root.resolve();config,_,_=trial.load_window_config(root)
+    _,start,end=trial.resolve_window(config,args.window,args.start,args.end)
+    day=trial.parse_date_relative(args.date,today=when.astimezone(trial.TZ).date()) if args.date else automatic_day(when,start,end)
+    begin,finish=trial.local_window(day,start,end)
+    source=(args.preselection or trial.window_path(root,day,start,end)/'prospective_trial/enriched/preselection.json').resolve()
+    if not source.is_file():
+        from prematch_tactical_history import prepare_research_from_cache
+        prepare_research_from_cache(root,source,when)
+    pre=trial.read(source)
+    selected=[f for f in pre.get('matches',[]) if trial.dt(f.get('kickoff_madrid')) and begin<=trial.dt(f['kickoff_madrid'])<finish and (not args.fixture_id or args.fixture_id==f['fixture_id'])]
+    if not selected:raise ValueError('RESEARCH_NO_FIXTURES_IN_REQUESTED_WINDOW')
+    # Preserve the source: a derived immutable window view is recorded separately.
+    from prematch_predictive_evidence_ranking_v1 import write_once
+    import hashlib
+    base=args.output_dir or root/'outputs/tactical_research'/f'{day.isoformat()}_{start:%H%M}_{end:%H%M}'
+    base.mkdir(parents=True,exist_ok=True)
+    view={**pre,'matches':selected,'parent_source':str(source),'parent_sha256':trial.sha(source)}
+    raw=json.dumps(view,ensure_ascii=False,sort_keys=True,indent=2).encode();viewpath=base/('window_'+hashlib.sha256(raw).hexdigest()[:20]+'.json');write_once(viewpath,raw)
+    out,doc=research_profiles(viewpath,base,when.isoformat(),args.interpretation,args.research_context,bool(args.asof),args.pattern_library or root/'outputs/tactical_pattern_library_v11')
+    return {'status':doc['mode'],'window_start':begin.isoformat(),'window_end':finish.isoformat(),
+            'fixtures_evaluated':len(doc['matches']),'excluded':doc['ledger'],'api_calls':0,'output':str(out),
+            'ranking':doc['ranking'],'next_action':'Revisar perfiles y completar interpretación Codex con referencias, contraescenarios y falsadores; repetir con --interpretation. Bwin no es requisito de investigación.',
+            'actionable_bet':False}
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--start',type=trial.parse_clock)
     mode = parser.add_mutually_exclusive_group()
+    mode.add_argument('--tactical-research',action='store_true');parser.add_argument('--research-context',type=Path,action='append',default=[]);parser.add_argument('--interpretation',type=Path);parser.add_argument('--pattern-library',type=Path)
     mode.add_argument('--rank', action='store_true')
     mode.add_argument('--prepare-fixture', action='store_true')
     parser.add_argument('--fixture-id', type=int)
@@ -408,6 +559,7 @@ def main(argv=None):
     parser.add_argument('--online', action='store_true')
     parser.add_argument('--max-api-calls', type=int, default=0)
     parser.add_argument('--preflight', type=Path)
+    parser.add_argument('--reconcile-schedule',action='store_true',help='Revalida calendario API actual en lotes; requiere --rank --online y presupuesto; no repite históricos')
     parser.add_argument('--sync-bwin', action='store_true', help='Descubrimiento ligero Bwin sin cuotas profundas ni API-Football')
     parser.add_argument('--bwin-catalog', type=Path, help='Catálogo Bwin existente; conserva fecha y SHA')
     parser.add_argument('--select-verified', action='store_true', help='Tras ranking: un evento verificado -> preflight -> selector -> check, sin finish')
@@ -432,11 +584,46 @@ def main(argv=None):
     parser.add_argument('--details', type=int, default=8, help='Detalles por equipo (1..history; default 8)')
     parser.add_argument('--max-scrapes', type=int, default=0, help='Presupuesto de capturas verificadas; 0 = todos los candidatos del horizonte')
     parser.add_argument('--refresh-existing-odds',action='store_true',help='Autoriza recaptura con archivo SHA de snapshots caducados del mismo evento')
+    parser.add_argument('--predictive-engine', action='store_true',
+                        help='Opt-in: predictor offline sobre la preselección congelada; no altera Bwin, selección ni finish')
+    parser.add_argument('--market-mapping', action='store_true',
+                        help='Opt-in: mapea patrones descriptivos a mercados Bwin ya capturados; sin red ni picks')
+    parser.add_argument('--market-mapping-patterns', type=Path)
+    parser.add_argument('--min-market-odd',type=float,default=1.20,help='Filtro comercial configurable; no representa valor esperado')
+    parser.add_argument('--market-mapping-preflight', action='append', type=Path, default=[])
+    parser.add_argument('--market-mapping-only', action='store_true',
+                        help='Reprocesa sólo snapshots locales; nunca llama prepare, scan, API ni Bwin')
     parser.add_argument('--discovery-retries', type=int, default=2)
     parser.add_argument('--min-lead', type=int, default=45)
     parser.add_argument('--max-odds-age', type=int, default=120)
     args = parser.parse_args(argv)
-    if args.rank or args.prepare_fixture:
+    if args.tactical_research:
+        try:
+            print(json.dumps(daily_tactical_research(args),ensure_ascii=False,indent=2));return 0
+        except (ValueError,OSError,KeyError,TypeError) as exc:
+            print('ERROR: '+str(exc),file=sys.stderr);return 2
+    if args.market_mapping_only:
+        if args.rank or args.prepare_fixture or args.predictive_engine or args.sync_bwin or args.online:
+            parser.error('--market-mapping-only no permite etapas de adquisición ni predictor')
+        if not args.date:
+            parser.error('--market-mapping-only requiere --date explícita')
+        args.market_mapping = True
+        root = args.root.expanduser().resolve()
+        try:
+            config, _, _ = trial.load_window_config(root)
+            _, start, end = trial.resolve_window(config, args.window, args.start, args.end)
+            folder = trial.window_path(root, trial.parse_date_relative(args.date), start, end)
+            output, counts = run_optional_market_mapping(root, folder, args)
+            print(json.dumps({'status':'OFFLINE_SNAPSHOT_MAPPING', 'path':str(output), 'counts':counts,
+                              'actionable_bet':False,'next_action':'Revisar market_mapping.md: resolver causas pendientes y comprobar identidad/cuotas antes del uso actual',
+                              'required_inputs':'Cuotas frescas; XI oficial si condiciona la tesis; investigación externa opcional',
+                              'next_command':f'python prematch_daily.py --date {args.date} --market-mapping-only',
+                              'next_command_purpose':'Repetir tras incorporar preflights locales; no realiza adquisición'}, ensure_ascii=False, indent=2))
+            return 0
+        except (RuntimeError, OSError, ValueError, KeyError) as exc:
+            print('ERROR: '+str(exc), file=sys.stderr)
+            return 2
+    if args.rank or args.prepare_fixture or args.sync_bwin or args.reconcile_schedule:
         try:
             if args.min_lead < 45: raise ValueError('PREPARATION_MINIMUM_45_MINUTES')
             print(json.dumps(operational_research(args), ensure_ascii=False, indent=2)); return 0
@@ -505,11 +692,17 @@ def main(argv=None):
                                'discard_reasons':[{'phase':'prepare','reason':str(exc)}]})
                     print(f'{status}: {path}', flush=True)
                     return 0 if status=='NO_VALID_CANDIDATE' else 2
+            predictive_out = run_optional_predictor(root, folder, args)
+            if predictive_out:
+                print(f'Predictor offline congelado: {predictive_out}', flush=True)
             transcript = folder / 'prospective_trial/logs' / f'daily_scan_{stamp()}.log'
             transcript.parent.mkdir(parents=True, exist_ok=True)
             print(f'Verificando capturas y scanner; registro: {transcript}', flush=True)
             with transcript.open('w', encoding='utf-8') as output, contextlib.redirect_stdout(output):
                 doc = scan(root, folder, day, args)
+            mapping_out = run_optional_market_mapping(root, folder, args, predictive_out)
+            if mapping_out:
+                print(f'Market mapping offline: {mapping_out[0]} ({mapping_out[1]})', flush=True)
             from prematch_daily_csv import export_daily
             rows=export_daily(folder/'prospective_trial')
             print(f"{doc['status']}: {folder / 'prospective_trial/handoff_prematch.json'}", flush=True)

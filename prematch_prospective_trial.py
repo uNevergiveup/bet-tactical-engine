@@ -119,6 +119,19 @@ def dump(path:Path, obj):
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(obj, ensure_ascii=False, indent=2)+'\n', encoding='utf-8')
 
+
+def atomic_dump(path: Path, obj):
+    """Publica un JSON completo sin dejar un checkpoint truncado."""
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    raw = (json.dumps(obj, ensure_ascii=False, indent=2) + '\n').encode('utf-8')
+    if path.is_file() and path.read_bytes() == raw:
+        return False
+    tmp = path.with_name(path.name + '.tmp')
+    tmp.write_bytes(raw)
+    tmp.replace(path)
+    return True
+
 def read(path:Path):
     if not path.is_file():
         raise TrialError(f'Falta archivo requerido: {path}')
@@ -134,11 +147,179 @@ def dt(raw):
 def sha(path:Path):
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
-def window_path(root:Path, day:date, start:time=time(16,0), end:time=time(2,0)):
+
+def _batch_configuration(args):
+    return {'max_matches_batch_size': int(args.max_matches),
+            'history_limit': int(args.history), 'detail_limit': int(args.details),
+            'team_filter': sorted(str(x) for x in getattr(args, 'team', [])),
+            'evaluation_budget': int(getattr(args, 'evaluation_budget', 0)),
+            'horizon_hours': float(getattr(args, 'horizon_hours', 0)),
+            'min_lead_minutes': int(args.min_lead)}
+
+
+def _validate_batch_result(path, input_path, fixture_ids, config):
+    try:
+        doc = read(path)
+    except (json.JSONDecodeError, UnicodeDecodeError) as exc:
+        raise TrialError(f'BATCH_RESULT_JSON_INVALID:{path.parent.name}') from exc
+    if doc.get('schema_version') not in ('1.2-preselection', '1.3-preselection'):
+        raise TrialError(f'BATCH_RESULT_SCHEMA_INVALID:{path}')
+    if doc.get('source_filter_sha256') != sha(input_path):
+        raise TrialError(f'BATCH_SOURCE_SHA_MISMATCH:{path.parent.name}')
+    rows = doc.get('matches') or []
+    ids = [str(row.get('fixture_id')) for row in rows]
+    expected = [str(fid) for fid in fixture_ids]
+    if len(ids) != len(set(ids)) or set(ids) != set(expected):
+        raise TrialError(f'BATCH_FIXTURE_IDENTITY_MISMATCH:{path.parent.name}')
+    methodology = doc.get('methodology') or {}
+    if (methodology.get('sample_history_cap') != config['history_limit'] or
+            methodology.get('sample_details_cap') != config['detail_limit'] or
+            (doc.get('counts') or {}).get('input_filter') != len(expected)):
+        raise TrialError(f'BATCH_PARAMETERS_MISMATCH:{path.parent.name}')
+    if dt(doc.get('generated_at_utc')) is None:
+        raise TrialError(f'BATCH_RESULT_UNDATED:{path.parent.name}')
+    return doc
+
+
+def enrichment_resume_plan(base: Path, subset: dict, args):
+    """Crea o revalida el plan inmutable de lotes y devuelve sólo pendientes.
+
+    Permite adoptar ejecuciones antiguas sin checkpoint siempre que cada input
+    y resultado coincidan exactamente con el snapshot congelado y parámetros.
+    """
+    base = Path(base)
+    source = base / 'fixtures_major_test.json'
+    if not source.is_file() or read(source) != subset:
+        raise TrialError('ENRICHMENT_SOURCE_SNAPSHOT_MISMATCH')
+    source_sha = sha(source)
+    fixtures = subset.get('fixtures') or []
+    ids = [str(row.get('fixture_id')) for row in fixtures]
+    if len(ids) != len(set(ids)):
+        raise TrialError('ENRICHMENT_SOURCE_DUPLICATE_FIXTURE')
+    config = _batch_configuration(args)
+    checkpoint_path = base / 'enrichment_resume.json'
+    try:
+        previous = read(checkpoint_path) if checkpoint_path.is_file() else None
+    except (json.JSONDecodeError, UnicodeDecodeError) as exc:
+        raise TrialError('ENRICHMENT_RESUME_CHECKPOINT_INVALID') from exc
+    legacy_material = any((base / 'enrichment_batches').glob('*/fixtures.json'))
+    if not previous and legacy_material and (config['team_filter'] or config['evaluation_budget']):
+        raise TrialError('LEGACY_RESUME_SCOPE_PARAMETERS_UNVERIFIABLE')
+    if previous:
+        if previous.get('source_sha256') != source_sha or previous.get('configuration') != config:
+            raise TrialError('ENRICHMENT_RESUME_SOURCE_OR_PARAMETERS_MISMATCH')
+        if previous.get('planned_fixture_ids') != ids:
+            raise TrialError('ENRICHMENT_RESUME_FIXTURE_ORDER_MISMATCH')
+    entries, completed_docs, completed_sources, pending = [], [], [], []
+    prior_by_index = {int(row['index']): row for row in (previous or {}).get('batches', [])}
+    for offset in range(0, len(fixtures), config['max_matches_batch_size']):
+        index = offset // config['max_matches_batch_size'] + 1
+        batch = fixtures[offset:offset + config['max_matches_batch_size']]
+        batch_ids = [row['fixture_id'] for row in batch]
+        dest = base / 'enrichment_batches' / str(index)
+        input_path = dest / 'fixtures.json'
+        expected_input = dict(subset, fixtures=batch)
+        if input_path.exists():
+            try:
+                actual_input = read(input_path)
+            except (json.JSONDecodeError, UnicodeDecodeError) as exc:
+                raise TrialError(f'BATCH_INPUT_JSON_INVALID:{index}') from exc
+            if actual_input != expected_input:
+                raise TrialError(f'BATCH_INPUT_IDENTITY_OR_PARAMETERS_MISMATCH:{index}')
+        else:
+            atomic_dump(input_path, expected_input)
+        input_sha = sha(input_path)
+        prior = prior_by_index.get(index)
+        if prior and prior.get('input_sha256') != input_sha:
+            raise TrialError(f'BATCH_INPUT_SHA_MISMATCH:{index}')
+        result_path = dest / 'preselection.json'
+        entry = {'index': index, 'fixture_ids': batch_ids, 'input': str(input_path.resolve()),
+                 'input_sha256': input_sha, 'result': str(result_path.resolve())}
+        if prior and prior.get('interrupted_artifacts'):
+            entry['interrupted_artifacts'] = list(prior['interrupted_artifacts'])
+        if result_path.exists():
+            result_sha = sha(result_path)
+            if prior and prior.get('result_sha256') and prior['result_sha256'] != result_sha:
+                raise TrialError(f'BATCH_RESULT_SHA_MISMATCH:{index}')
+            try:
+                doc = _validate_batch_result(result_path, input_path, batch_ids, config)
+            except TrialError as exc:
+                if not str(exc).startswith('BATCH_RESULT_JSON_INVALID:'):
+                    raise
+                # Un JSON truncado de un lote que nunca llegó a completarse se
+                # conserva como evidencia y el lote vuelve a PENDING. Un lote
+                # previamente completado nunca entra aquí: su SHA ya se validó.
+                archive = dest / 'interrupted_artifacts'
+                archive.mkdir(parents=True, exist_ok=True)
+                target = archive / f'preselection.{result_sha[:16]}.invalid.json'
+                suffix = 1
+                while target.exists():
+                    suffix += 1
+                    target = archive / f'preselection.{result_sha[:16]}.{suffix}.invalid.json'
+                result_path.replace(target)
+                interrupted = entry.setdefault('interrupted_artifacts', [])
+                interrupted.append({'path': str(target.resolve()), 'sha256': result_sha,
+                                    'reason': 'INTERRUPTED_OR_TRUNCATED_JSON'})
+                entry.update(status='PENDING', result_sha256=None, api_errors=None)
+                pending.append({'index': index, 'fixtures': batch, 'dest': dest,
+                                'input': input_path, 'fixture_ids': batch_ids})
+            else:
+                status = 'COMPLETED_WITH_API_ERRORS' if doc.get('api_errors') else 'COMPLETED'
+                entry.update(status=status, result_sha256=result_sha,
+                             api_errors=len(doc.get('api_errors') or {}))
+                completed_docs.append(doc)
+                completed_sources.append({'path': str(result_path.resolve()), 'sha256': result_sha,
+                                          'input': str(input_path.resolve()), 'input_sha256': input_sha})
+        else:
+            entry.update(status='PENDING', result_sha256=None, api_errors=None)
+            pending.append({'index': index, 'fixtures': batch, 'dest': dest,
+                            'input': input_path, 'fixture_ids': batch_ids})
+        entries.append(entry)
+    checkpoint = {'schema_version': '1.0-enrichment-resume',
+                  'source': str(source.resolve()), 'source_sha256': source_sha,
+                  'configuration': config, 'planned_fixture_ids': ids,
+                  'counts': {'fixtures': len(fixtures), 'batches': len(entries),
+                             'completed_batches': len(completed_docs),
+                             'completed_fixtures': sum(len(row['fixture_ids']) for row in entries if row['status'].startswith('COMPLETED')),
+                             'pending_batches': len(pending),
+                             'pending_fixtures': sum(len(row['fixture_ids']) for row in entries if row['status'] == 'PENDING')},
+                  'batches': entries}
+    atomic_dump(checkpoint_path, checkpoint)
+    return {'checkpoint': checkpoint, 'checkpoint_path': checkpoint_path,
+            'completed_docs': completed_docs, 'completed_sources': completed_sources,
+            'pending': pending}
+
+
+def merge_enrichment_batches(batch_docs, batch_sources, trial_input: Path):
+    if not batch_docs:
+        raise TrialError('NO_COMPLETED_ENRICHMENT_BATCHES')
+    from preselect_matches import assign_ranks
+    pre = copy.deepcopy(batch_docs[0])
+    pre['matches'] = [fixture for doc in batch_docs for fixture in doc['matches']]
+    ids = [str(fixture['fixture_id']) for fixture in pre['matches']]
+    expected_ids = [str(fixture['fixture_id']) for fixture in read(trial_input)['fixtures']]
+    if len(ids) != len(set(ids)):
+        raise TrialError('DUPLICATE_BATCH_FIXTURE')
+    if set(ids) != set(expected_ids):
+        raise TrialError('INCOMPLETE_ENRICHMENT_BATCHES')
+    pre['generated_at_utc'] = now_madrid().astimezone(timezone.utc).isoformat()
+    pre['source_filter_sha256'] = sha(trial_input)
+    pre['source_batches'] = batch_sources
+    for field in ('counts', 'api_usage'):
+        pre[field] = {key: sum(doc.get(field, {}).get(key, 0) or 0 for doc in batch_docs)
+                      for key in {key for doc in batch_docs for key in doc.get(field, {})}}
+    pre['api_errors'] = {f'batch_{i}_{key}': value for i, doc in enumerate(batch_docs, 1)
+                         for key, value in doc.get('api_errors', {}).items()}
+    pre['history_seasons_used'] = {key: value for doc in batch_docs
+                                   for key, value in doc.get('history_seasons_used', {}).items()}
+    assign_ranks(pre['matches'])
+    return pre
+
+def window_path(root:Path, day:date, start:time=time(15,0), end:time=time(3,0)):
     begin,finish=local_window(day,start,end)
     return root/'outputs'/'discovery'/f'{begin.date():%Y-%m-%d}_{begin:%H%M}_{finish:%H%M}'
 
-def allowed_window(day, current, start:time=time(16,0), end:time=time(2,0)):
+def allowed_window(day, current, start:time=time(15,0), end:time=time(3,0)):
     _begin,finish=local_window(day,start,end)
     if current.timestamp()>=finish.timestamp():
         raise TrialError(f'La ventana {day} {start:%H:%M} → {finish:%Y-%m-%d %H:%M} terminó. No se reabre un PREMATCH pasado.')
@@ -175,13 +356,13 @@ def run(root:Path,script:str,args:list[str],logs:Path):
     print('\n$ '+' '.join(command),flush=True)
     started=performance_clock.perf_counter()
     with logfile.open('w',encoding='utf-8') as f:
-        process=subprocess.Popen(command,cwd=str(root),stdout=subprocess.PIPE,stderr=subprocess.STDOUT,
-                                 text=True,encoding='utf-8',errors='replace',bufsize=1)
-        assert process.stdout is not None
-        for line in process.stdout:
-            print(line,end='',flush=True)
-            f.write(line)
-        code=process.wait()
+        with subprocess.Popen(command,cwd=str(root),stdout=subprocess.PIPE,stderr=subprocess.STDOUT,
+                              text=True,encoding='utf-8',errors='replace',bufsize=1) as process:
+            assert process.stdout is not None
+            for line in process.stdout:
+                print(line,end='',flush=True)
+                f.write(line)
+            code=process.wait()
     with (logs/'pipeline_stage_timings.jsonl').open('a',encoding='utf-8') as timing:
         timing.write(json.dumps({'script':script,'exit_code':code,'elapsed_seconds':round(performance_clock.perf_counter()-started,4),
             'finished_madrid':now_madrid().isoformat(),'log':str(logfile)},ensure_ascii=False)+'\n')
@@ -207,75 +388,110 @@ def check_files(root, scripts):
 
 def prepare(root,folder,day,args):
     from prematch_audit import CandidateLedger
-    from preselect_matches import save_report, assign_ranks
+    from preselect_matches import save_report
     check_files(root,['discover_fixtures.py','filter_major_leagues.py','preselect_matches.py',
                       'prematch_pattern_engine.py','prematch_pattern_discovery.py','bwin_discovery.py'])
-    if (folder/'prospective_trial/enriched/preselection.json').exists():
+    if ((folder/'prospective_trial/enriched/preselection.json').exists() and
+            (folder/'prospective_trial/prospective_test_summary.json').exists()):
         archive=root/'outputs/discovery/archives'/f'{folder.name}_{now_madrid():%Y%m%dT%H%M%S%f}'
         shutil.copytree(folder,archive)
     base=folder/'prospective_trial'; logs=base/'logs'
-    run(root,'discover_fixtures.py',['--date',day.isoformat(),'--start',args.start.strftime('%H:%M'),
-                                   '--end',args.end.strftime('%H:%M'),'--show','12'],logs)
-    discovered=read(folder/'fixtures.json')
-    ledger=CandidateLedger(base/'candidate_ledger.json', {
-        'horizon_hours':getattr(args,'horizon_hours',3),'min_lead_minutes':args.min_lead,
-        'max_matches_batch_size':args.max_matches,'bwin_top_batch_size':args.bwin_top})
-    for f in discovered.get('fixture_audit', []):
-        ledger.record(f,'DESCUBIERTO','discovery','API_RECORD',str(folder/'fixtures.json'))
-        if f.get('discovery_exclusion'):
-            ledger.record(f,'EXCLUIDO_POR_HORARIO','discovery',f['discovery_exclusion'])
-    for f in discovered['fixtures']:
-        if str(f['fixture_id']) not in ledger.rows:
-            ledger.record(f,'DESCUBIERTO','discovery','API_PREMATCH',str(folder/'fixtures.json'))
-    ledger.write()
-    run(root,'filter_major_leagues.py',['--input',str(folder/'fixtures.json')],logs)
-    major=read(folder/'fixtures_major.json')
-    for f in major.get('excluded',[])+major.get('review',[]):
-        ledger.record(f,'FILTRADO_POR_LIGA','league_filter',f.get('filter_reason'))
-    for f in major['fixtures']:
-        reason=scope_reason(f,now_madrid(),args.min_lead,getattr(args,'horizon_hours',3))
-        if reason:
-            ledger.record(f,'EXCLUIDO_POR_HORARIO','scope',reason)
-    # max-matches is a batch size. No candidate in scope is dropped by this limit.
-    selection=select_fixtures(major,args.team,0,now_madrid(),args.min_lead,getattr(args,'horizon_hours',3))
+    trial_input=base/'fixtures_major_test.json'
+    resume_existing = (not (base/'prospective_test_summary.json').exists() and trial_input.is_file()
+                       and (base/'enrichment_batches').is_dir())
     from prematch_tactical_signal_engine import diversified_order,run_engine
-    if getattr(args,'evaluation_budget',0):selection=diversified_order(selection)
-    all_selection=list(selection)
-    budget=getattr(args,'evaluation_budget',0)
-    if budget:
-        selection=selection[:budget]
-        for f in all_selection[budget:]:ledger.record(f,'DIFERIDO_POR_PRESUPUESTO','preselection','EVALUATION_BUDGET_NOT_ANALYZED')
+    if resume_existing:
+        subset=read(trial_input)
+        major_path=folder/'fixtures_major.json'
+        begin,finish=local_window(day,args.start,args.end)
+        if (subset.get('schema_version')!='1.0-major-leagues' or
+                subset.get('trial_subset',{}).get('source_sha256')!=sha(major_path)):
+            raise TrialError('RESUME_FROZEN_SOURCE_IDENTITY_MISMATCH')
+        selection=subset.get('fixtures') or []
+        if any(not (dt(row.get('kickoff_madrid')) and begin <= dt(row['kickoff_madrid']) < finish)
+               for row in selection):
+            raise TrialError('RESUME_FIXTURE_OUTSIDE_FROZEN_WINDOW')
+        all_selection=list(selection);major=read(major_path)
+        ledger=CandidateLedger.load(base/'candidate_ledger.json')
+        print(f'Reanudación detectada: snapshot congelado {sha(trial_input)[:12]}, {len(selection)} fixtures.',flush=True)
+    else:
+        run(root,'discover_fixtures.py',['--date',day.isoformat(),'--start',args.start.strftime('%H:%M'),
+                                       '--end',args.end.strftime('%H:%M'),'--show','12'],logs)
+        discovered=read(folder/'fixtures.json')
+        ledger=CandidateLedger(base/'candidate_ledger.json', {
+            'horizon_hours':getattr(args,'horizon_hours',3),'min_lead_minutes':args.min_lead,
+            'max_matches_batch_size':args.max_matches,'bwin_top_batch_size':args.bwin_top})
+        for f in discovered.get('fixture_audit', []):
+            ledger.record(f,'DESCUBIERTO','discovery','API_RECORD',str(folder/'fixtures.json'))
+            if f.get('discovery_exclusion'):
+                ledger.record(f,'EXCLUIDO_POR_HORARIO','discovery',f['discovery_exclusion'])
+        for f in discovered['fixtures']:
+            if str(f['fixture_id']) not in ledger.rows:
+                ledger.record(f,'DESCUBIERTO','discovery','API_PREMATCH',str(folder/'fixtures.json'))
+        ledger.write()
+        run(root,'filter_major_leagues.py',['--input',str(folder/'fixtures.json')],logs)
+        major=read(folder/'fixtures_major.json')
+        for f in major.get('excluded',[])+major.get('review',[]):
+            ledger.record(f,'FILTRADO_POR_LIGA','league_filter',f.get('filter_reason'))
+        for f in major['fixtures']:
+            reason=scope_reason(f,now_madrid(),args.min_lead,getattr(args,'horizon_hours',3))
+            if reason:ledger.record(f,'EXCLUIDO_POR_HORARIO','scope',reason)
+        selection=select_fixtures(major,args.team,0,now_madrid(),args.min_lead,getattr(args,'horizon_hours',3))
+        if getattr(args,'evaluation_budget',0):selection=diversified_order(selection)
+        all_selection=list(selection);budget=getattr(args,'evaluation_budget',0)
+        if budget:
+            selection=selection[:budget]
+            for f in all_selection[budget:]:ledger.record(f,'DIFERIDO_POR_PRESUPUESTO','preselection','EVALUATION_BUDGET_NOT_ANALYZED')
+        all_ids={str(x['fixture_id']) for x in all_selection}
+        for f in major['fixtures']:
+            if str(f['fixture_id']) not in all_ids and not scope_reason(f,now_madrid(),args.min_lead,getattr(args,'horizon_hours',3)):
+                ledger.record(f,'EXCLUIDO_POR_FILTRO_MANUAL','scope','TEAM_FILTER')
+        ledger.write()
+        if not selection:
+            raise TrialError('No hay partidos futuros y elegibles en el horizonte/ventana solicitado. No se consultó Bwin.')
+        subset=dict(major,fixtures=selection)
+        subset['counts']=dict(major.get('counts',{}),eligible=len(selection))
+        subset['trial_subset']={'source_sha256':sha(folder/'fixtures_major.json'),'count':len(selection),
+                                'purpose':'ALL_ELIGIBLE_IN_SCOPE_NO_CHRONOLOGICAL_TRUNCATION'}
+        if trial_input.exists():
+            if read(trial_input) != subset:
+                raise TrialError('FROZEN_TRIAL_INPUT_WRITE_ONCE_CONFLICT')
+        else:
+            atomic_dump(trial_input,subset)
     selected_ids={str(f['fixture_id']) for f in selection}
-    for f in major['fixtures']:
-        if str(f['fixture_id']) not in {str(x['fixture_id']) for x in all_selection} and not scope_reason(f,now_madrid(),args.min_lead,getattr(args,'horizon_hours',3)):
-            ledger.record(f,'EXCLUIDO_POR_FILTRO_MANUAL','scope','TEAM_FILTER')
-    ledger.write()
-    if not selection:
-        raise TrialError('No hay partidos futuros y elegibles en el horizonte/ventana solicitado. No se consultó Bwin.')
-    subset=dict(major,fixtures=selection)
-    subset['counts']=dict(major.get('counts',{}),eligible=len(selection))
-    subset['trial_subset']={'source_sha256':sha(folder/'fixtures_major.json'),'count':len(selection),
-                            'purpose':'ALL_ELIGIBLE_IN_SCOPE_NO_CHRONOLOGICAL_TRUNCATION'}
-    trial_input=base/'fixtures_major_test.json';dump(trial_input,subset)
-    batch_docs=[]; batch_sources=[]
-    for i in range(0,len(selection),args.max_matches):
-        batch=selection[i:i+args.max_matches]; dest=base/'enrichment_batches'/str(i//args.max_matches+1)
-        inp=dest/'fixtures.json';dump(inp,dict(subset,fixtures=batch))
-        run(root,'preselect_matches.py',['--input',str(inp),'--output-dir',str(dest),
-            '--max-matches',str(len(batch)),'--history-limit',str(args.history),'--detail-limit',str(args.details)],logs)
-        path=dest/'preselection.json';doc=read(path)
-        if doc.get('source_filter_sha256')!=sha(inp):raise TrialError('BATCH_SOURCE_SHA_MISMATCH')
-        batch_docs.append(doc);batch_sources.append({'path':str(path),'sha256':sha(path),'input':str(inp),'input_sha256':sha(inp)})
-    pre=copy.deepcopy(batch_docs[0]);pre['matches']=[f for d in batch_docs for f in d['matches']]
-    if len({str(f['fixture_id']) for f in pre['matches']})!=len(pre['matches']):raise TrialError('DUPLICATE_BATCH_FIXTURE')
+    plan=enrichment_resume_plan(base,subset,args)
+    if plan['checkpoint']['counts']['completed_batches']:
+        print(f"Lotes enriquecidos reutilizados: {plan['checkpoint']['counts']['completed_batches']} "
+              f"({plan['checkpoint']['counts']['completed_fixtures']} fixtures).",flush=True)
+    for pending in plan['pending']:
+        run(root,'preselect_matches.py',['--input',str(pending['input']),'--output-dir',str(pending['dest']),
+            '--max-matches',str(len(pending['fixtures'])),'--history-limit',str(args.history),'--detail-limit',str(args.details)],logs)
+        plan=enrichment_resume_plan(base,subset,args)
+    if plan['checkpoint']['counts']['pending_batches']:
+        raise TrialError('ENRICHMENT_RESUME_INCOMPLETE')
+    pre=merge_enrichment_batches(plan['completed_docs'],plan['completed_sources'],trial_input)
     if {str(f['fixture_id']) for f in pre['matches']}!=selected_ids:raise TrialError('INCOMPLETE_ENRICHMENT_BATCHES')
-    pre['generated_at_utc']=now_madrid().astimezone(timezone.utc).isoformat()
-    pre['source_filter_sha256']=sha(trial_input);pre['source_batches']=batch_sources
-    for field in ('counts','api_usage'):
-        pre[field]={k:sum(d.get(field,{}).get(k,0) or 0 for d in batch_docs) for k in {k for d in batch_docs for k in d.get(field,{})}}
-    pre['api_errors']={f'batch_{i}_{k}':v for i,d in enumerate(batch_docs) for k,v in d.get('api_errors',{}).items()}
-    pre['history_seasons_used']={k:v for d in batch_docs for k,v in d.get('history_seasons_used',{}).items()}
-    assign_ranks(pre['matches']);outpre=base/'enriched';save_report(pre,outpre);prepath=outpre/'preselection.json'
+    outpre=base/'enriched';prepath=outpre/'preselection.json'
+    if prepath.exists():
+        existing=read(prepath)
+        required=[outpre/'preselection.csv',outpre/'preselection.md']
+        if (existing.get('source_filter_sha256')!=sha(trial_input) or
+                {str(row['fixture_id']) for row in existing.get('matches',[])}!=selected_ids or
+                any(not path.is_file() for path in required)):
+            raise TrialError('PUBLISHED_ENRICHMENT_INCOMPLETE_OR_IDENTITY_MISMATCH')
+        for source in existing.get('source_batches',[]):
+            if sha(Path(source['path']))!=source['sha256'] or sha(Path(source['input']))!=source['input_sha256']:
+                raise TrialError('PUBLISHED_ENRICHMENT_BATCH_SHA_MISMATCH')
+        pre=existing
+        print('Enriquecimiento consolidado existente: reutilizado sin sobrescritura.',flush=True)
+    else:
+        staging=base/'enrichment_publications'/now_madrid().strftime('%Y%m%dT%H%M%S%f')
+        save_report(pre,staging)
+        atomic_dump(staging/'MANIFEST.json',{'schema_version':'1.0-enrichment-publication',
+            'source_filter_sha256':sha(trial_input),'fixture_ids':sorted(selected_ids),
+            'artifacts':{path.name:sha(path) for path in staging.iterdir() if path.is_file()}})
+        if outpre.exists():raise TrialError('ENRICHMENT_PUBLICATION_TARGET_ALREADY_EXISTS')
+        staging.replace(outpre)
     # Sidecar deportivo V2: determinista, offline y anterior a cualquier dato Bwin.
     run(root,'prematch_pattern_discovery.py',['--preselection',str(prepath),
         '--output-dir',str(base/'patterns_v2')],logs)
@@ -290,7 +506,7 @@ def prepare(root,folder,day,args):
         profiles=root/'config/tactical_profiles/profiles.json')
     tactical_scores={fid:x['priority_score'] for fid,x in tactical['fixtures'].items()}
     ordered=diversified_order(pre['matches'],tactical_scores)
-    dump(base/'budget_assignment.json',{'strategy':'ROUND_ROBIN_TWO_HOUR_SLOTS_TACTICAL_QUALITY_WITHIN_SLOT',
+    atomic_dump(base/'budget_assignment.json',{'strategy':'ROUND_ROBIN_TWO_HOUR_SLOTS_TACTICAL_QUALITY_WITHIN_SLOT',
         'evaluation_fixture_ids':[f['fixture_id'] for f in selection],
         'bwin_order_fixture_ids':[f['fixture_id'] for f in ordered],
         'tactical_scores':tactical_scores,'warning':'NO_EV_NO_CALIBRATED_PROBABILITY'})
@@ -311,7 +527,7 @@ def prepare(root,folder,day,args):
           'matches':[m for d in docs for m in d['matches']],
           'catalog_observed':[m for d in docs for m in d.get('catalog_observed',[])],
           'source_batches':[str(bwinfolder/'batches'/str(i+1)/'bwin_discovery.json') for i in range(len(docs))]}
-    dump(bwinfolder/'bwin_discovery.json',bwin)
+    atomic_dump(bwinfolder/'bwin_discovery.json',bwin)
     for f in bwin['matches']:
         status=f.get('status','')
         if not f.get('bwin_event_id'):ledger.record(f,'SIN_BWIN','bwin_discovery',status)
@@ -328,7 +544,7 @@ def prepare(root,folder,day,args):
                    'pattern_discovery_v2':str(base/'patterns_v2/pattern_discovery.json'),
                    'research_queue_sport':str(base/'patterns_v2/research_queue_sport.json'),
                    'discovery':str(bwinfolder/'bwin_discovery.json')}}
-    dump(base/'prospective_test_summary.json',summary)
+    atomic_dump(base/'prospective_test_summary.json',summary)
     return summary
 
 def scan(root,folder,day,args):

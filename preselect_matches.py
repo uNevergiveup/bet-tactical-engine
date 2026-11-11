@@ -766,7 +766,10 @@ def merge_preselection_reports(base:dict[str,Any],updated:dict[str,Any]) -> dict
 
 def save_report(report:dict[str,Any],folder:Path):
     folder.mkdir(parents=True,exist_ok=True)
-    (folder/'preselection.json').write_text(json.dumps(report,indent=2,ensure_ascii=False)+'\n',encoding='utf-8')
+    json_target=folder/'preselection.json'
+    json_tmp=json_target.with_name(f'.{json_target.name}.{os.getpid()}.tmp')
+    json_tmp.write_text(json.dumps(report,indent=2,ensure_ascii=False)+'\n',encoding='utf-8')
+    json_tmp.replace(json_target)
     fields=['data_readiness_rank','fixture_id','kickoff_madrid','country','league','home','away',
             'gender','region','initial_data_gate','preliminary_coverage_score','data_readiness_score',
             'stability_score','research_priority_score','data_readiness_status',

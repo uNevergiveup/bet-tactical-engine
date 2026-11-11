@@ -97,6 +97,7 @@ CACHE_TTL_BY_ENDPOINT = {
 
 # Normalización de equipos.
 TEAM_ALIASES: dict[str, tuple[str, ...]] = {
+    "nautico recife": ("clube nautico capibaribe", "clube nautico capibaribe pe"),
     "cusco fc": ("cusco",),
     "red bull bragantino": ("rb bragantino", "bragantino"),
     "vasco da gama": ("vasco da gama",),

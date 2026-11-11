@@ -10,9 +10,10 @@ import argparse
 import hashlib
 import json
 import math
+import os
 import sys
 from collections import Counter, defaultdict
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from statistics import mean, pvariance
 from zoneinfo import ZoneInfo
@@ -21,6 +22,7 @@ import prematch_pattern_discovery as discovery
 
 VERSION = '1.0-mvp'
 MADRID = ZoneInfo('Europe/Madrid')
+CONSERVATIVE_RESULT_AVAILABILITY = timedelta(hours=3)
 FAMILIES = {
     'goals': 'goals', 'corners': 'corners', 'shots': 'shots',
     'on_target': 'shots_on_target', 'fouls': 'fouls',
@@ -45,6 +47,11 @@ def canonical_sha(value) -> str:
     return hashlib.sha256(raw).hexdigest()
 
 
+def engine_code_sha() -> str:
+    """Bind reusable output to the exact predictor implementation."""
+    return sha(Path(__file__).resolve())
+
+
 def read(path: Path) -> dict:
     value = json.loads(Path(path).read_text(encoding='utf-8-sig'))
     if not isinstance(value, dict):
@@ -55,8 +62,10 @@ def read(path: Path) -> dict:
 def dump(path: Path, value) -> None:
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(value, ensure_ascii=False, indent=2,
-                               sort_keys=True) + '\n', encoding='utf-8')
+    target = path.with_name(f'.{path.name}.{os.getpid()}.tmp')
+    target.write_text(json.dumps(value, ensure_ascii=False, indent=2,
+                                 sort_keys=True) + '\n', encoding='utf-8')
+    target.replace(path)
 
 
 def dt(value):
@@ -135,15 +144,31 @@ def probability_over(probs, threshold):
     return sum(p for k, p in enumerate(probs) if k > threshold)
 
 
-def observed_values(rows, block, metric, venue=None):
+def result_available_at(row):
+    """Fecha en que el resultado podía usarse, sin inventar hora oficial.
+
+    Se prioriza evidencia fechada del proveedor. Si el snapshot no la incluye,
+    se aplica kickoff + 3 horas: regla conservadora, explícita y auditable.
+    """
+    for key in ('result_available_at_utc', 'completed_at_utc', 'fixture_completed_at_utc'):
+        value = dt(row.get(key))
+        if value:
+            return value, f'EXPLICIT_{key.upper()}'
+    kickoff = dt(row.get('kickoff_utc'))
+    return ((kickoff + CONSERVATIVE_RESULT_AVAILABILITY), 'CONSERVATIVE_KICKOFF_PLUS_3H') if kickoff else (None, 'UNAVAILABLE')
+
+
+def observed_values(rows, block, metric, venue=None, include_availability=False):
     output = []
     for row in rows:
         if venue and row.get('venue') != venue:
             continue
         value = (row.get(block) or {}).get(metric)
         if finite(value):
-            output.append((dt(row.get('kickoff_utc')), float(value), row.get('fixture_id')))
-    return [(at, value, fid) for at, value, fid in output if at]
+            available_at, basis = result_available_at(row)
+            output.append((dt(row.get('kickoff_utc')), float(value), row.get('fixture_id'), available_at, basis))
+    valid = [(at, value, fid, available, basis) for at, value, fid, available, basis in output if at and available]
+    return valid if include_availability else [(at, value, fid) for at, value, fid, _, _ in valid]
 
 
 def shrink(sample, reference, strength=6.0):
@@ -161,17 +186,28 @@ def logloss(y, p):
 
 
 def walk_forward(points, min_train=6):
-    """Expanding-window validation; every forecast precedes its target row."""
-    points = sorted({(at, fid): value for at, value, fid in points}.items(), key=lambda x: (x[0][0], str(x[0][1])))
-    values = [(key[0], value, key[1]) for key, value in points]
+    """Expanding-window validation using only results available at forecast time."""
+    normalized = {}
+    for point in points:
+        at, value, fid = point[:3]
+        available = point[3] if len(point) > 3 else at + CONSERVATIVE_RESULT_AVAILABILITY
+        basis = point[4] if len(point) > 4 else 'CONSERVATIVE_KICKOFF_PLUS_3H'
+        if at and available:
+            normalized[(at, fid)] = (value, available, basis)
+    values = [(key[0], item[0], key[1], item[1], item[2])
+              for key, item in sorted(normalized.items(), key=lambda x: (x[0][0], str(x[0][1])))]
     predictions = []
     # Los fixtures con el mismo kickoff pertenecen al mismo bloque temporal.
     # Ningun resultado del bloque puede entrar como entrenamiento de otro.
-    for target_at, actual, target_id in values:
-        train = [value for at, value, _ in values if at < target_at]
+    for target_at, actual, target_id, _, _ in values:
+        train_rows = [(at, value, fid, available, basis)
+                      for at, value, fid, available, basis in values
+                      if at < target_at and available <= target_at]
+        train = [value for _, value, _, _, _ in train_rows]
         if len(train) < min_train:
             continue
-        last_training_at = max(at for at, _, _ in values if at < target_at)
+        last_training_at = max(at for at, _, _, _, _ in train_rows)
+        last_available_at = max(available for _, _, _, available, _ in train_rows)
         baseline_rate = mean(train)
         recent = train[-5:]
         model_rate = shrink(recent, baseline_rate, 5.0)
@@ -183,6 +219,8 @@ def walk_forward(points, min_train=6):
         predictions.append({
             'target_fixture_id': target_id, 'target_kickoff': target_at.isoformat(),
             'training_last_kickoff': last_training_at.isoformat(),
+            'training_last_result_available_at': last_available_at.isoformat(),
+            'result_availability_basis': dict(Counter(basis for _, _, _, _, basis in train_rows)),
             'training_n': len(train), 'actual': actual, 'event_threshold': threshold,
             'baseline_rate': round(baseline_rate, 6), 'model_rate': round(model_rate, 6),
             'baseline_probability': round(probability_over(baseline_probs, threshold), 8),
@@ -218,6 +256,7 @@ def walk_forward(points, min_train=6):
         'distribution_log_score_baseline': round(avg('baseline_log_score'), 8),
         'improvement_vs_baseline': improved,
         'validation_scope': 'UNIVARIATE_TEAM_HISTORY_NOT_MATCHUP_MODEL',
+        'result_availability_policy': 'EXPLICIT_COMPLETION_WHEN_PRESENT_ELSE_KICKOFF_PLUS_3H',
         'predictions': predictions,
     }
 
@@ -244,11 +283,31 @@ def validate_source(pre, asof):
             raise PredictiveError(f'DUPLICATE_TEAM_ID:{fid}')
 
 
+
+def available_observations(fixture, side, asof):
+    """Excluir resultados que no estaban disponibles al corte."""
+    deadlines = [
+        asof,
+        dt(fixture.get("analysis_cutoff_utc")),
+        dt(fixture.get("kickoff_madrid")),
+    ]
+    if any(value is None for value in deadlines):
+        return []
+
+    cutoff = min(deadlines)
+    rows = discovery.clean_observations(fixture, side, asof)
+
+    return [
+        row for row in rows
+        if (available := result_available_at(row)[0]) is not None
+        and available <= cutoff
+    ]
+
 def league_reference(pre, asof):
     buckets = defaultdict(dict)
     for fixture in pre.get('matches', []):
         for side in ('home', 'away'):
-            rows = discovery.clean_observations(fixture, side, asof)
+            rows = available_observations(fixture, side, asof)
             for metric in FAMILIES:
                 for at, value, fid in observed_values(rows, 'own', metric):
                     key = (fixture.get('league_id'), fixture.get('season'), metric, 'ALL')
@@ -265,7 +324,7 @@ def coverage_rows(pre, pre_sha, asof):
     rows = []
     for fixture in pre.get('matches', []):
         for side in ('home', 'away'):
-            clean = discovery.clean_observations(fixture, side, asof)
+            clean = available_observations(fixture, side, asof)
             for metric, family in FAMILIES.items():
                 vals = observed_values(clean, 'own', metric)
                 requested = sum(metric == 'goals' or discovery.request_state(r) in ('VALID', 'REQUESTED_MISSING') for r in clean)
@@ -303,14 +362,14 @@ def fixture_models(pre, asof, references):
     models = []
     validations = []
     for fixture in pre.get('matches', []):
-        observations = {side: discovery.clean_observations(fixture, side, asof) for side in ('home', 'away')}
+        observations = {side: available_observations(fixture, side, asof) for side in ('home', 'away')}
         for side in ('home', 'away'):
             opposite = 'away' if side == 'home' else 'home'
             venue = 'HOME' if side == 'home' else 'AWAY'
             opponent_venue = 'AWAY' if side == 'home' else 'HOME'
             for metric, family in FAMILIES.items():
-                own_points = observed_values(observations[side], 'own', metric)
-                opp_points = observed_values(observations[opposite], 'conceded', metric)
+                own_points = observed_values(observations[side], 'own', metric, include_availability=True)
+                opp_points = observed_values(observations[opposite], 'conceded', metric, include_availability=True)
                 own = [x[1] for x in own_points]
                 conceded = [x[1] for x in opp_points]
                 reference = references.get((fixture.get('league_id'), fixture.get('season'), metric, 'ALL'), {})
@@ -355,10 +414,15 @@ def fixture_models(pre, asof, references):
                 model_id = f"{fixture['fixture_id']}:{side}:{family}:FULL_TIME"
                 data_quality = round(100 * min(1, coverage) * min(1, min(len(own), len(conceded)) / 12), 2)
                 evidence = round(100 * min(1, min(len(own), len(conceded)) / 20), 2)
-                validation_component = 12 if wf['valid_predictions'] else 0
+                # El componente conserva su peso, pero solo se concede cuando
+                # existe mejora preliminar; disponer de folds no prueba mejora.
+                validation_component = 12 if wf['status'] == 'PRELIMINARY_WALK_FORWARD_IMPROVEMENT' else 0
                 uncertainty_component = 25 if uncertainty and (uncertainty['historical_stability_cv'] or 99) <= .8 else 10
                 priority = round(.35 * data_quality + .25 * evidence + validation_component + uncertainty_component, 2)
                 risks = ['NO_CALIBRATED_BETTING_VALUE', 'NO_BWIN_INPUT', 'OPPONENT_STRENGTH_PARTIALLY_CONTROLLED']
+                usage_status = 'EXPERIMENTAL_TACTICAL_ONLY' if metric == 'offsides' else 'RESEARCH_ONLY'
+                if metric == 'offsides':
+                    risks.append('OFFSIDES_BWIN_AVAILABILITY_UNVERIFIED_NOT_ACTIONABLE')
                 if fixture.get('coach_change') or fixture.get(side + '_coach_change'):
                     risks.append('KNOWN_COACH_REGIME_CHANGE_REQUIRES_SEGMENTATION')
                 models.append({
@@ -374,6 +438,13 @@ def fixture_models(pre, asof, references):
                     'distribution': {'support': [0, len(probs) - 1], 'probabilities': probs} if probs else None,
                     'uncertainty': uncertainty, 'data_quality_score': data_quality,
                     'statistical_evidence_score': evidence, 'experimental_priority_score': priority,
+                    'evidence_dimensions': {
+                        'data_quality': {'score': data_quality, 'basis': 'COVERAGE_AND_MATCHED_SAMPLE'},
+                        'temporal_depth': {'walk_forward_predictions': wf['valid_predictions'],
+                                           'status': 'AVAILABLE' if wf['valid_predictions'] else 'INSUFFICIENT'},
+                        'predictive_performance': {'status': wf['status'],
+                                                   'improvement_vs_baseline': wf.get('improvement_vs_baseline', False)},
+                    },
                     'ranking_label': 'EXPERIMENTAL_RANKING', 'contradictions': contradictions,
                     'risks': risks,
                     'contrastable_explanation': f'Contrastar producción {metric} de {fixture.get(side)} y concesión rival, sin inferir mecanismo táctico.',
@@ -381,6 +452,8 @@ def fixture_models(pre, asof, references):
                     'source_fixture_ids': {'production': sorted(str(x[2]) for x in own_points),
                                            'opponent_concession': sorted(str(x[2]) for x in opp_points)},
                     'actionable_bet': False,
+                    'calibration_status': 'NOT_CALIBRATED_FOR_BETTING',
+                    'usage_status': usage_status,
                 })
                 validations.append({'model_id': model_id, 'fixture_id': fixture['fixture_id'],
                                     'subject': side, 'family': family, 'metric': metric,
@@ -427,11 +500,214 @@ def request_ledger(pre, pre_path, pre_sha):
             'offline_rehydration': pre.get('offline_rehydration')}
 
 
+def fixture_stages(pre, models):
+    """Cobertura con universos explícitos; un ledger parcial nunca es el total."""
+    matches = pre.get('matches') or []
+    ledger = pre.get('fixture_evaluation_ledger') or []
+    source_filtered = int((pre.get('counts') or {}).get('input_filter', len(matches)))
+    excluded_temporal = sum(x.get('status') == 'EXCLUDED_TEMPORAL' for x in ledger)
+    eligible = max(len(matches), source_filtered - excluded_temporal)
+    modelled_ids = {m['fixture_id'] for m in models if m.get('predictive_rate') is not None}
+    ledger_scope = 'COMPLETE' if len(ledger) >= source_filtered else 'PARTIAL'
+    return {
+        'discovered': source_filtered,
+        'source_filtered': source_filtered,
+        'excluded_temporal': excluded_temporal,
+        'eligible': eligible,
+        'basic_evaluated': len(matches),
+        'statistically_evaluated': len({f['fixture_id'] for f in matches} & modelled_ids),
+        'deep_evaluated': sum(bool(f.get('details_checked')) for f in matches),
+        'pending_or_excluded': max(0, eligible - len(matches)) + excluded_temporal,
+        'ledger_scope': ledger_scope,
+        'ledger_entries': len(ledger),
+        'ledger_universe': source_filtered,
+        'ledger_coverage_pct': round(100 * len(ledger) / source_filtered, 2) if source_filtered else None,
+        'universe_definitions': {
+            'source_filtered': 'counts.input_filter from frozen preselection',
+            'eligible': 'source_filtered minus explicit temporal exclusions; never inferred from a partial ledger',
+            'basic_evaluated': 'rows physically present in matches',
+            'deep_evaluated': 'matches rows with details_checked=true',
+        },
+    }
+
+
+def temporal_metadata(pre, asof, executed_at):
+    kickoffs = [dt(f.get('kickoff_madrid')) for f in pre.get('matches', [])]
+    kickoffs = [x for x in kickoffs if x]
+    retrospective = any(executed_at >= kickoff for kickoff in kickoffs)
+    return {
+        'source_cutoff_utc': asof.astimezone(timezone.utc).isoformat(),
+        'run_executed_at_utc': executed_at.astimezone(timezone.utc).isoformat(),
+        'execution_mode': 'RETROSPECTIVE_REPLAY' if retrospective else 'PROSPECTIVE',
+        'prospective_claim_allowed': not retrospective,
+    }
+
+
+def verify_existing_run(out, source_path, source_sha, *, require_current_code=True):
+    manifest_path = out / 'run_manifest.json'
+    if not manifest_path.is_file():
+        raise PredictiveError(f'EXISTING_RUN_MANIFEST_MISSING:{out}')
+    manifest = read(manifest_path)
+    required_temporal = ('source_cutoff_utc', 'run_executed_at_utc', 'execution_mode', 'prospective_claim_allowed')
+    if manifest.get('integrity_policy') != 'WRITE_ONCE_VERIFY_ALL_ARTIFACT_SHA256' or any(k not in manifest for k in required_temporal):
+        raise PredictiveError(f'EXISTING_RUN_LEGACY_OR_UNHARDENED_USE_NEW_OUTPUT_ROOT:{out}')
+    if manifest.get('source_preselection_sha256') != source_sha or Path(manifest.get('source_preselection', '')).resolve() != source_path:
+        raise PredictiveError(f'EXISTING_RUN_SOURCE_CONFLICT:{out}')
+    recorded_code_sha = manifest.get('engine_code_sha256')
+    if require_current_code and recorded_code_sha != engine_code_sha():
+        raise PredictiveError(f'EXISTING_RUN_ENGINE_CODE_MISMATCH:{out}')
+    if not source_path.is_file() or sha(source_path) != source_sha:
+        raise PredictiveError('SOURCE_PRESELECTION_SHA_MISMATCH')
+    artifacts = manifest.get('artifacts')
+    if not isinstance(artifacts, dict) or not artifacts:
+        raise PredictiveError(f'EXISTING_RUN_ARTIFACT_MANIFEST_INVALID:{out}')
+    for name, expected in artifacts.items():
+        path = out / name
+        if not path.is_file():
+            raise PredictiveError(f'EXISTING_ARTIFACT_MISSING:{name}')
+        if sha(path) != expected.get('sha256') or path.stat().st_size != expected.get('bytes'):
+            raise PredictiveError(f'EXISTING_ARTIFACT_SHA_MISMATCH:{name}')
+    return manifest
+
+
+def archive_interrupted_run(out: Path) -> Path:
+    """Preserve a manifest-less partial run before retrying publication."""
+    archive_root = out.parent / '_interrupted_runs'
+    archive_root.mkdir(parents=True, exist_ok=True)
+    target = archive_root / out.name
+    suffix = 1
+    while target.exists():
+        suffix += 1
+        target = archive_root / f'{out.name}.{suffix}'
+    out.replace(target)
+    return target
+
+
+def compact_fixture_document(fixture_id, preselection, pre_sha, temporal, stages, models, validations):
+    selected = [m for m in models if m['fixture_id'] == fixture_id]
+    if not selected:
+        raise PredictiveError(f'FIXTURE_ID_NOT_IN_FROZEN_PRESELECTION:{fixture_id}')
+    validation_by_id = {v['model_id']: v for v in validations if v['fixture_id'] == fixture_id}
+    records = []
+    for model in selected:
+        validation = validation_by_id.get(model['model_id']) or {}
+        records.append({
+            'model_id': model['model_id'], 'fixture_id': fixture_id,
+            'kickoff_madrid': model['kickoff_madrid'], 'team_side': model['subject'],
+            'team_id': model['subject_team_id'], 'metric': model['metric'], 'family': model['family'],
+            'estimated_value': model['predictive_rate'], 'distribution': model['distribution'],
+            'sample': {
+                'production_n': len(model['source_fixture_ids']['production']),
+                'opponent_concession_n': len(model['source_fixture_ids']['opponent_concession']),
+                'production_fixture_ids': model['source_fixture_ids']['production'],
+                'opponent_concession_fixture_ids': model['source_fixture_ids']['opponent_concession'],
+            },
+            'evidence_state': model['pattern_state'], 'evidence_dimensions': model['evidence_dimensions'],
+            'source_cutoff_utc': temporal['source_cutoff_utc'],
+            'run_executed_at_utc': temporal['run_executed_at_utc'],
+            'emission_mode': ('RETROSPECTIVE' if dt(temporal['run_executed_at_utc']) >= dt(model['kickoff_madrid']) else 'PROSPECTIVE'),
+            'source_preselection': str(preselection), 'source_preselection_sha256': pre_sha,
+            'provenance': 'FROZEN_PRESELECTION_OFFLINE_NO_BWIN',
+            'walk_forward_status': validation.get('status'),
+            'usage_status': model['usage_status'], 'risks': model['risks'],
+            'ranking_label': 'EXPERIMENTAL_RANKING', 'actionable_bet': False,
+            'calibration_status': 'NOT_CALIBRATED_FOR_BETTING',
+        })
+    return {
+        'schema_version': '1.0-frozen-fixture-predictions', 'engine_version': VERSION,
+        'fixture_id': fixture_id, **temporal, 'fixture_stages': stages,
+        'records': records, 'record_count': len(records),
+        'warning': 'RULE_BASED is not a calibrated probability or demonstrated commercial edge.',
+        'actionable_bet': False,
+    }
+
+
+def result_rows(document):
+    """Normaliza resultados offline; nunca consulta red ni altera el run original."""
+    if isinstance(document.get('fixtures'), list):  # retrospective audit output
+        for row in document['fixtures']:
+            yield row.get('fixture', {}).get('fixture_id'), row.get('observed') or {}
+    elif isinstance(document.get('results'), list):
+        for row in document['results']:
+            yield row.get('fixture_id'), row.get('observed') or {'home': row.get('home', {}), 'away': row.get('away', {})}
+    elif isinstance(document.get('response'), list):  # API-Football response; goals only unless embedded stats exist
+        for row in document['response']:
+            fixture_id = (row.get('fixture') or {}).get('id')
+            goals = row.get('goals') or {}
+            yield fixture_id, {'home': {'goals': goals.get('home')}, 'away': {'goals': goals.get('away')}}
+
+
+def evaluate_run(run_dir: Path, results_path: Path, output_root: Path):
+    run_dir, results_path = Path(run_dir).resolve(), Path(results_path).resolve()
+    manifest = read(run_dir / 'run_manifest.json')
+    source = Path(manifest['source_preselection']).resolve()
+    # Retrospective evaluation verifies the frozen historical run and its
+    # artifacts; it must not require the currently installed implementation.
+    verify_existing_run(run_dir, source, manifest['source_preselection_sha256'],
+                        require_current_code=False)
+    patterns_path = run_dir / 'predictive_patterns.json'
+    if not patterns_path.is_file():
+        raise PredictiveError('RETROSPECTIVE_EVALUATION_REQUIRES_FULL_RUN')
+    results_sha = sha(results_path)
+    observed = {int(fid): row for fid, row in result_rows(read(results_path)) if fid is not None}
+    models = read(patterns_path)['models']
+    rows, missing = [], 0
+    for model in models:
+        value = (observed.get(int(model['fixture_id']), {}).get(model['subject']) or {}).get(model['metric'])
+        if not finite(value) or not finite(model.get('predictive_rate')):
+            missing += 1
+            continue
+        estimate, baseline = model['predictive_rate'], model.get('league_reference_rate')
+        rows.append({
+            'model_id': model['model_id'], 'fixture_id': model['fixture_id'], 'family': model['family'],
+            'metric': model['metric'], 'subject': model['subject'], 'observed': float(value),
+            'estimated': estimate, 'error': round(estimate - float(value), 8),
+            'absolute_error': round(abs(estimate - float(value)), 8),
+            'baseline': baseline,
+            'baseline_error': round(baseline - float(value), 8) if finite(baseline) else None,
+            'baseline_absolute_error': round(abs(baseline - float(value)), 8) if finite(baseline) else None,
+        })
+    groups = []
+    for family in sorted({r['family'] for r in rows}):
+        selected = [r for r in rows if r['family'] == family]
+        with_baseline = [r for r in selected if r['baseline_absolute_error'] is not None]
+        groups.append({
+            'family': family, 'n': len(selected),
+            'mae_model': round(mean(r['absolute_error'] for r in selected), 8),
+            'bias_model': round(mean(r['error'] for r in selected), 8),
+            'baseline_n': len(with_baseline),
+            'mae_baseline': round(mean(r['baseline_absolute_error'] for r in with_baseline), 8) if with_baseline else None,
+            'bias_baseline': round(mean(r['baseline_error'] for r in with_baseline), 8) if with_baseline else None,
+        })
+    evaluation = {
+        'schema_version': '1.0-retrospective-predictive-evaluation', 'engine_version': VERSION,
+        'evaluated_run': str(run_dir), 'evaluated_run_manifest_sha256': sha(run_dir / 'run_manifest.json'),
+        'results_source': str(results_path), 'results_source_sha256': results_sha,
+        'evaluation_mode': 'RETROSPECTIVE_OFFLINE_SEPARATE_ARTIFACT',
+        'counts': {'evaluable': len(rows), 'not_evaluable_missing': missing},
+        'by_market_family': groups, 'rows': rows, 'actionable_bet': False,
+        'warning': 'No odds, picks, EV or profitability are inferred.',
+    }
+    out = Path(output_root).resolve() / 'evaluations' / f"{manifest['run_id']}_{results_sha[:12]}"
+    target = out / 'retrospective_evaluation.json'
+    if out.exists():
+        existing = read(target) if target.is_file() else None
+        if existing != evaluation:
+            raise PredictiveError(f'EXISTING_EVALUATION_CONFLICT:{out}')
+        return out
+    out.mkdir(parents=True)
+    dump(target, evaluation)
+    dump(out / 'evaluation_manifest.json', {'artifact': target.name, 'artifact_sha256': sha(target),
+         'source_run_manifest_sha256': sha(run_dir / 'run_manifest.json'), 'results_source_sha256': results_sha})
+    return out
+
+
 def summary_markdown(coverage, patterns, rankings, validation, ledger):
     family_counts = Counter(r['family'] for r in rankings['items'] if r['pattern_state'] != 'INSUFFICIENT_EVIDENCE')
     state_counts = Counter(r['pattern_state'] for r in rankings['items'])
     lines = ['# PREMATCH Predictive Engine V1.0 MVP', '',
-             f"Corte: `{rankings['asof_madrid']}`. Fuente SHA-256: `{rankings['preselection_sha256']}`.", '',
+             f"Corte de fuente: `{rankings['source_cutoff_utc']}`. Ejecución real: `{rankings['run_executed_at_utc']}`. Modo: `{rankings['execution_mode']}`.",
+             f"Fuente SHA-256: `{rankings['preselection_sha256']}`.", '',
              'Motor deportivo independiente de Bwin. No genera picks, stakes, EV ni probabilidades de rentabilidad.', '',
              '## Alcance', '',
              f"- Partidos en el filtro de origen: {rankings['fixture_stages']['source_filtered']}.",
@@ -439,6 +715,7 @@ def summary_markdown(coverage, patterns, rankings, validation, ledger):
              f"- Elegibles al corte y evaluados básicamente: {rankings['fixture_stages']['eligible']} / {rankings['fixture_stages']['basic_evaluated']}.",
              f"- Evaluados estadísticamente: {rankings['fixture_stages']['statistically_evaluated']}.",
              f"- Profundizados: {rankings['fixture_stages']['deep_evaluated']}.",
+             f"- Ledger de evaluación: {rankings['fixture_stages']['ledger_scope']} ({rankings['fixture_stages']['ledger_entries']}/{rankings['fixture_stages']['ledger_universe']}).",
              f"- Estados de modelos: `{json.dumps(dict(sorted(state_counts.items())), ensure_ascii=False)}`.",
              f"- Familias con señal no insuficiente: `{json.dumps(dict(sorted(family_counts.items())), ensure_ascii=False)}`.", '',
              '## Validación', '',
@@ -455,28 +732,58 @@ def summary_markdown(coverage, patterns, rankings, validation, ledger):
               '- Los splits de primera y segunda parte quedan INSUFFICIENT_EVIDENCE cuando el snapshot no contiene datos por periodo.',
               '- Entrenador, árbitro y fuerza de rivales solo afectan el modelo cuando la fuente aporta identidad y evidencia fechada; el MVP no los inventa.',
               '- El ranking es EXPERIMENTAL_RANKING y sus puntuaciones no son porcentajes de predictibilidad.', '']
+    lines += ['- `RULE_BASED` no equivale a probabilidad calibrada ni a ventaja comercial demostrada.', '']
     return '\n'.join(lines)
 
 
-def run(preselection: Path, output_root: Path, asof=None):
+def run(preselection: Path, output_root: Path, asof=None, *, executed_at=None, fixture_id=None):
     preselection = Path(preselection).resolve()
     pre = read(preselection)
     asof = asof or dt(pre.get('generated_at_utc'))
+    executed_at = executed_at or datetime.now(timezone.utc)
+    if executed_at.tzinfo is None:
+        raise PredictiveError('RUN_EXECUTED_AT_REQUIRES_TIMEZONE')
     if not asof:
         raise PredictiveError('ASOF_REQUIRED_WITH_TIMEZONE')
     validate_source(pre, asof)
     pre_sha = sha(preselection)
-    run_id = f"{asof.astimezone(MADRID).strftime('%Y%m%dT%H%M%S%z')}_{pre_sha[:12]}"
+    code_sha = engine_code_sha()
+    run_id = (f"{asof.astimezone(MADRID).strftime('%Y%m%dT%H%M%S%z')}_{pre_sha[:12]}"
+              f"_code-{code_sha[:12]}")
+    if fixture_id is not None:
+        run_id += f'_fixture-{fixture_id}'
     out = Path(output_root).resolve() / VERSION / run_id
+    recovered_interrupted_run = None
+    if out.exists() and not (out / 'run_manifest.json').is_file():
+        recovered_interrupted_run = str(archive_interrupted_run(out).resolve())
     if out.exists():
-        expected = out / 'run_manifest.json'
-        if not expected.is_file() or read(expected).get('source_preselection_sha256') != pre_sha:
-            raise PredictiveError(f'OUTPUT_RUN_COLLISION:{out}')
-    out.mkdir(parents=True, exist_ok=True)
-    coverage = coverage_rows(pre, pre_sha, asof)
-    descriptive = discovery.build_discovery(pre, pre_sha, asof)
-    references = league_reference(pre, asof)
-    models, validations = fixture_models(pre, asof, references)
+        verify_existing_run(out, preselection, pre_sha)
+        if fixture_id is None:
+            return (out, read(out / 'predictive_coverage.json'), read(out / 'predictive_patterns.json'),
+                    read(out / 'predictive_rankings.json'), read(out / 'predictive_validation.json'),
+                    read(out / 'api_request_ledger.json'))
+        compact = read(out / f'frozen_predictions_{fixture_id}.json')
+        return out, {}, {'models': compact['records']}, {'items': compact['records'], 'fixture_stages': compact['fixture_stages']}, {'counts': {}}, {}
+    temporal = temporal_metadata(pre, asof, executed_at)
+
+    # Vista temporal segura; nunca modifica el snapshot original.
+    safe_matches = []
+    for fixture in pre.get('matches', []):
+        safe_fixture = dict(fixture)
+        observations = dict(fixture.get('statistical_observations') or {})
+        for side in ('home', 'away'):
+            observations[side] = available_observations(
+                fixture, side, asof
+            )
+        safe_fixture['statistical_observations'] = observations
+        safe_matches.append(safe_fixture)
+
+    safe_pre = dict(pre, matches=safe_matches)
+
+    coverage = coverage_rows(safe_pre, pre_sha, asof)
+    descriptive = discovery.build_discovery(safe_pre, pre_sha, asof)
+    references = league_reference(safe_pre, asof)
+    models, validations = fixture_models(safe_pre, asof, references)
     patterns = {'schema_version': '1.0-predictive-patterns', 'engine_version': VERSION,
                 'asof_madrid': asof.astimezone(MADRID).isoformat(), 'preselection_sha256': pre_sha,
                 'descriptive_discovery': descriptive, 'models': models,
@@ -485,18 +792,10 @@ def run(preselection: Path, output_root: Path, asof=None):
                                 key=lambda x: (-x['experimental_priority_score'], str(x['fixture_id']), x['subject']))
                  for family in sorted(set(FAMILIES.values()))}
     fixture_ledger=pre.get('fixture_evaluation_ledger',[])
-    filtered_count = len(fixture_ledger) if fixture_ledger else (pre.get('counts') or {}).get('input_filter', len(pre.get('matches', [])))
-    excluded_temporal = sum(x.get('status') == 'EXCLUDED_TEMPORAL' for x in fixture_ledger)
-    eligible_count = filtered_count - excluded_temporal
-    stages = {'discovered': (pre.get('counts') or {}).get('input_filter', len(pre.get('matches', []))),
-              'source_filtered': filtered_count, 'excluded_temporal': excluded_temporal,
-              'eligible': eligible_count, 'basic_evaluated': len(pre.get('matches', [])),
-              'statistically_evaluated': sum(any(m['fixture_id'] == f['fixture_id'] and m['predictive_rate'] is not None for m in models) for f in pre.get('matches', [])),
-              'deep_evaluated': sum(bool(f.get('details_checked')) for f in pre.get('matches', [])),
-              'pending_or_excluded': (sum(x.get('status')!='EVALUATED' for x in fixture_ledger) if fixture_ledger else
-                 max(0, (pre.get('counts') or {}).get('input_filter', len(pre.get('matches', []))) - len(pre.get('matches', []))))}
+    stages = fixture_stages(pre, models)
     rankings = {'schema_version': '1.0-predictive-rankings', 'engine_version': VERSION,
                 'asof_madrid': asof.astimezone(MADRID).isoformat(), 'preselection_sha256': pre_sha,
+                **temporal,
                 'ranking_label': 'EXPERIMENTAL_RANKING', 'fixture_stages': stages,
                 'fixture_evaluation_ledger': fixture_ledger,
                 'items': models, 'by_family': by_family, 'global_diversified': diversified_global(models),
@@ -504,13 +803,37 @@ def run(preselection: Path, output_root: Path, asof=None):
     val_counts = Counter(v['status'] for v in validations)
     validation = {'schema_version': '1.0-predictive-validation', 'engine_version': VERSION,
                   'asof_madrid': asof.astimezone(MADRID).isoformat(), 'preselection_sha256': pre_sha,
-                  'method': 'EXPANDING_WINDOW_WALK_FORWARD_NO_FUTURE_ROWS', 'series': validations,
+                  **temporal,
+                  'method': 'EXPANDING_WINDOW_RESULTS_AVAILABLE_BEFORE_TARGET', 'series': validations,
                   'counts': {'series': len(validations), 'temporally_validated': 0,
                              'preliminary_walk_forward_improvement': val_counts['PRELIMINARY_WALK_FORWARD_IMPROVEMENT'],
                              'not_enough_temporal_evidence': val_counts['NOT_ENOUGH_TEMPORAL_EVIDENCE'],
                              'preliminary_no_improvement': val_counts['PRELIMINARY_NO_IMPROVEMENT']},
                   'actionable_bet': False}
     ledger = request_ledger(pre, preselection, pre_sha)
+    for document in (coverage, patterns, ledger):
+        document.update(temporal)
+    if fixture_id is not None:
+        compact = compact_fixture_document(fixture_id, preselection, pre_sha, temporal, stages, models, validations)
+        compact_name = f'frozen_predictions_{fixture_id}.json'
+        out.mkdir(parents=True, exist_ok=False)
+        dump(out / compact_name, compact)
+        artifacts = {compact_name: {'sha256': sha(out / compact_name), 'bytes': (out / compact_name).stat().st_size}}
+        manifest = {'schema_version': '1.1-predictive-run-manifest-hardening', 'engine_version': VERSION,
+                    'engine_code_sha256': code_sha,
+                    'integrity_policy': 'WRITE_ONCE_VERIFY_ALL_ARTIFACT_SHA256',
+                    'source_preselection': str(preselection), 'source_preselection_sha256': pre_sha,
+                    'asof_madrid': asof.astimezone(MADRID).isoformat(), **temporal, 'run_id': run_id,
+                    'configuration': {'timezone': 'Europe/Madrid', 'window_default': '15:00-03:00',
+                                      'horizon_hours_default': 0, 'bwin_used': False,
+                                      'fixture_id_filter': fixture_id, 'global_references_preserved': True},
+                    'recovered_interrupted_run': recovered_interrupted_run,
+                    'artifacts': artifacts,
+                    'determinism_sha256': canonical_sha({'fixture_id': fixture_id, 'records': compact['records'],
+                                                         'source_cutoff_utc': temporal['source_cutoff_utc']})}
+        dump(out / 'run_manifest.json', manifest)
+        return out, {}, {'models': compact['records']}, {'items': compact['records'], 'fixture_stages': stages}, {'counts': {}}, ledger
+    out.mkdir(parents=True, exist_ok=False)
     for name, value in (('predictive_coverage.json', coverage), ('predictive_patterns.json', patterns),
                         ('predictive_rankings.json', rankings), ('predictive_validation.json', validation),
                         ('api_request_ledger.json', ledger)):
@@ -518,11 +841,14 @@ def run(preselection: Path, output_root: Path, asof=None):
     (out / 'predictive_summary.md').write_text(summary_markdown(coverage, patterns, rankings, validation, ledger), encoding='utf-8')
     artifacts = {p.name: {'sha256': sha(p), 'bytes': p.stat().st_size} for p in sorted(out.iterdir())
                  if p.is_file() and p.name != 'run_manifest.json'}
-    manifest = {'schema_version': '1.0-predictive-run-manifest', 'engine_version': VERSION,
+    manifest = {'schema_version': '1.1-predictive-run-manifest-hardening', 'engine_version': VERSION,
+                'engine_code_sha256': code_sha,
+                'integrity_policy': 'WRITE_ONCE_VERIFY_ALL_ARTIFACT_SHA256',
                 'source_preselection': str(preselection), 'source_preselection_sha256': pre_sha,
-                'asof_madrid': asof.astimezone(MADRID).isoformat(), 'run_id': run_id,
+                'asof_madrid': asof.astimezone(MADRID).isoformat(), **temporal, 'run_id': run_id,
                 'configuration': {'timezone': 'Europe/Madrid', 'window_default': '15:00-03:00',
                                   'horizon_hours_default': 0, 'bwin_used': False},
+                'recovered_interrupted_run': recovered_interrupted_run,
                 'artifacts': artifacts, 'determinism_sha256': canonical_sha({'coverage': coverage, 'patterns': patterns, 'rankings': rankings, 'validation': validation, 'ledger': ledger})}
     dump(out / 'run_manifest.json', manifest)
     return out, coverage, patterns, rankings, validation, ledger
@@ -530,16 +856,32 @@ def run(preselection: Path, output_root: Path, asof=None):
 
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('--preselection', type=Path, required=True)
+    parser.add_argument('--preselection', type=Path)
     parser.add_argument('--output-root', type=Path, default=Path('outputs/predictive'))
     parser.add_argument('--asof', help='ISO8601 con offset; por defecto generated_at_utc del snapshot')
-    parser.add_argument('--fixture-id', type=int, help='Mostrar la posición de un fixture sin alterar el ranking')
+    parser.add_argument('--fixture-id', type=int, help='Generar artefacto congelado compacto para un fixture, conservando referencias globales')
+    parser.add_argument('--evaluate-run-dir', type=Path, help='Run completo ya congelado para evaluación retrospectiva offline')
+    parser.add_argument('--evaluate-results', type=Path, help='Resultados finales JSON; se escriben en un directorio separado')
     args = parser.parse_args(argv)
     try:
+        if args.evaluate_results or args.evaluate_run_dir:
+            if not args.evaluate_results or not args.evaluate_run_dir:
+                raise PredictiveError('EVALUATION_REQUIRES_RUN_DIR_AND_RESULTS')
+            out = evaluate_run(args.evaluate_run_dir, args.evaluate_results, args.output_root)
+            print('Evaluación retrospectiva separada:', out)
+            return 0
+        if not args.preselection:
+            raise PredictiveError('PRESELECTION_REQUIRED')
         when = dt(args.asof) if args.asof else None
         if args.asof and not when:
             raise PredictiveError('ASOF_INVALID_OR_MISSING_OFFSET')
-        out, coverage, patterns, rankings, validation, ledger = run(args.preselection, args.output_root, when)
+        out, coverage, patterns, rankings, validation, ledger = run(
+            args.preselection, args.output_root, when, fixture_id=args.fixture_id)
+        if args.fixture_id is not None:
+            compact = read(out / f'frozen_predictions_{args.fixture_id}.json')
+            print(f"Fixture {args.fixture_id}: {compact['record_count']} filas congeladas; modo={compact['execution_mode']}; sin Bwin ni apuesta.")
+            print('Salida para compartir:', out / f'frozen_predictions_{args.fixture_id}.json')
+            return 0
         print(f"Fixtures: descubiertos={rankings['fixture_stages']['discovered']} elegibles={rankings['fixture_stages']['eligible']} evaluados={rankings['fixture_stages']['statistically_evaluated']}")
         states = Counter(m['pattern_state'] for m in rankings['items'])
         print('Patrones/modelos:', json.dumps(dict(sorted(states.items())), ensure_ascii=False))
@@ -551,9 +893,6 @@ def main(argv=None):
         print(f"API (snapshot de preselección): nuevas={ledger['counts']['network_requests']} "
               f"caché={ledger['counts']['cache_hits']} errores={ledger['counts']['errors']} "
               f"| motor predictivo nuevas={ledger['predictive_engine_network_requests']}")
-        if args.fixture_id is not None:
-            selected = [x for x in rankings['items'] if x['fixture_id'] == args.fixture_id]
-            print(f'Selección manual fixture {args.fixture_id}: {len(selected)} filas deportivas; sin Bwin ni apuesta.')
         print('Salida:', out)
         return 0
     except (PredictiveError, OSError, ValueError, KeyError, TypeError, json.JSONDecodeError) as exc:
@@ -563,3 +902,72 @@ def main(argv=None):
 
 if __name__ == '__main__':
     raise SystemExit(main())
+
+
+def joint_ft_goal_baseline(fixture, observations, cutoff, *, min_train=6, bootstrap_samples=200):
+    """Opt-in joint baseline; existing V1 models and rankings are unchanged.
+
+    Four separately identified production/concession series. Venue estimates
+    shrink to their own global series with the existing strength=6 rule.
+    Independence, stationarity and Poisson variance are diagnostics, not facts.
+    """
+    import random
+    from statistics import pvariance
+    if min_train<6:raise ValueError('JOINT_DIAGNOSTIC_MINIMUM_6')
+    clean={}
+    for side in ('home','away'):
+        unique={}
+        for row in observations.get(side,[]):
+            available,_=result_available_at(row)
+            if (row.get('team_id')!=fixture[side+'_id'] or row.get('fixture_id')==fixture['fixture_id']
+                or row.get('league_id')!=fixture['league_id'] or row.get('season')!=fixture['season']
+                or row.get('status')!='FT' or not available or available>cutoff):continue
+            if row['fixture_id'] in unique and unique[row['fixture_id']]!=row:raise ValueError('JOINT_DUPLICATE_IDENTITY_CONFLICT')
+            unique[row['fixture_id']]=row
+        clean[side]=list(unique.values())
+    series={}
+    for side in ('home','away'):
+        for kind in ('own','conceded'):
+            rows=[r for r in clean[side] if finite(r.get(kind,{}).get('goals')) and float(r[kind]['goals']).is_integer()]
+            values=[r[kind]['goals'] for r in rows];venue='HOME' if side=='home' else 'AWAY'
+            local=[r[kind]['goals'] for r in rows if r['venue']==venue]
+            avg=safe_mean(values);var=pvariance(values) if len(values)>1 else None
+            series[side+'_'+kind]={'n':len(values),'venue_n':len(local),'fixture_ids':[r['fixture_id'] for r in rows],
+                'mean':avg,'variance':var,'variance_to_mean':var/avg if avg and var is not None else None,
+                'venue_shrunk_rate':shrink(local,avg,6.0),'alternative_count_model':choose_count_model(values),
+                '_values':values,'_local':local}
+    result={'status':'DATA_INSUFFICIENT','series':{k:{x:y for x,y in v.items() if not x.startswith('_')} for k,v in series.items()},
+            'min_train_required':min_train,'validated':False,'predictive_use_authorized':False,
+            'assumptions':['INDEPENDENCE_NOT_VERIFIED','STATIONARITY_NOT_VERIFIED','VENUE_SHRINK_STRENGTH_6_EXISTING_RULE'],
+            'probabilities_calibrated':False,'statistical_reliability':'NO_PROSPECTIVE_OR_APPROVED_OUT_OF_SAMPLE_VALIDATION'}
+    if min(v['n'] for v in series.values())<min_train:return result
+    rates={k:v['venue_shrunk_rate'] for k,v in series.items()}
+    lh=(rates['home_own']+rates['away_conceded'])/2;la=(rates['away_own']+rates['home_conceded'])/2
+    total=lh+la;probs=distribution(total,'POISSON')
+    # Empirical mixture per scoring side, then independent convolution. Never
+    # pool heterogeneous means to manufacture negative-binomial dispersion.
+    empirical={}
+    for key,v in series.items():
+        vals=v['_values'];local=v['_local'];w=len(local)/(len(local)+6)
+        empirical[key]={i:(1-w)*vals.count(i)/len(vals)+(w*local.count(i)/len(local) if local else 0) for i in set(vals+local)}
+    def mixture(a,b):return {i:(a.get(i,0)+b.get(i,0))/2 for i in set(a)|set(b)}
+    hp=mixture(empirical['home_own'],empirical['away_conceded']);ap=mixture(empirical['away_own'],empirical['home_conceded']);ep={}
+    for h,ph in hp.items():
+        for a,pa in ap.items():ep[h+a]=ep.get(h+a,0)+ph*pa
+    rng=random.Random(str(fixture['fixture_id']));draws=[]
+    for _ in range(bootstrap_samples):
+        rr={}
+        for key,v in series.items():
+            # Resample complete rows: venue/global overlap is preserved.
+            side=key.split('_')[0];kind=key.split('_')[1];rows=[r for r in clean[side] if finite(r.get(kind,{}).get('goals')) and float(r[kind]['goals']).is_integer()]
+            sampled=[rng.choice(rows) for _ in rows];allv=[r[kind]['goals'] for r in sampled];lv=[r[kind]['goals'] for r in sampled if r['venue']==('HOME' if side=='home' else 'AWAY')]
+            rr[key]=shrink(lv,safe_mean(allv),6)
+        draws.append(sum(rr.values())/2)
+    draws.sort();bounds=[draws[int((len(draws)-1)*q)] for q in (.05,.95)] if draws else None
+    result.update(status='MODEL_EVALUABLE',model='INDEPENDENT_POISSON_JOINT_BASELINE',lambda_home=lh,lambda_away=la,lambda_total=total,
+                  poisson_total_distribution=probs,empirical_total_distribution={str(k):v for k,v in ep.items()},
+                  predictive_interval_90=[quantile(probs,.05),quantile(probs,.95)],
+                  parameter_uncertainty={'lambda_total_interval_90':bounds,'method':'DETERMINISTIC_ROW_BOOTSTRAP_IID_WITHIN_SERIES','draws':bootstrap_samples,'calibrated_interval':False},
+                  poisson_assumption_diagnostics={k:v['alternative_count_model'] for k,v in series.items()},
+                  alternatives={'empirical':'VENUE_SHRUNK_SERIES_MIXTURE_INDEPENDENT_CONVOLUTION','negative_binomial':'Existing choose_count_model diagnostics per homogeneous series; no pooled heterogeneity fit'})
+    return result

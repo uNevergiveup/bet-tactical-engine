@@ -594,16 +594,213 @@ def run_engine(preselection,pattern,out,root=None,preflights=(),scanner=None,pro
     write_report(doc,out);return doc
 
 
+def research_profiles(preselection, output, asof, interpretation=None, contexts=(), retrospective=True, library=None):
+    """Offline research using verified histories; immutable, resumable artifacts."""
+    from datetime import timedelta
+    from prematch_tactical_history import longitudinal_profile,contextual_segments,evolve_tactical_library
+    from prematch_predictive_evidence_ranking_v1 import write_once
+    def persist(path,value):
+        path.parent.mkdir(parents=True,exist_ok=True)
+        raw=value if isinstance(value,bytes) else (json.dumps(value,ensure_ascii=False,sort_keys=True,indent=2)+'\n').encode()
+        if path.exists():
+            if path.read_bytes()!=raw:raise ValueError('RESEARCH_IMMUTABLE_ARTIFACT_CONFLICT: '+str(path))
+            return
+        import os,tempfile
+        fd,tmp=tempfile.mkstemp(dir=path.parent,prefix='.research-')
+        try:
+            with os.fdopen(fd,'wb') as fh:fh.write(raw);fh.flush();os.fsync(fh.fileno())
+            try:os.link(tmp,path)
+            except FileExistsError:
+                if path.read_bytes()!=raw:raise ValueError('RESEARCH_CONCURRENT_CONFLICT')
+        finally:Path(tmp).unlink(missing_ok=True)
+    when=t.dt(asof)
+    if not when:raise ValueError('ASOF_REQUIRES_EXPLICIT_OFFSET')
+    started=time.perf_counter()
+    library=Path(library) if library else Path(output)/'pattern_library'
+    source=Path(preselection);pre=t.read(source);source_hash=t.sha(source);teams={};matches=[];ledger=[];sources=[];context_map={}
+    if t.dt(pre.get('generated_at_utc')) and t.dt(pre['generated_at_utc'])>when:raise ValueError('RESEARCH_SOURCE_AFTER_ASOF')
+    for path in contexts:
+        path=Path(path);d=t.read(path);stamp=t.dt(d.get('generated_at'))
+        if not stamp or stamp>when:raise ValueError('RESEARCH_CONTEXT_AFTER_ASOF')
+        f=d['fixture'];fid=f['fixture_id']
+        if fid in context_map:raise ValueError('RESEARCH_DUPLICATE_CONTEXT')
+        if str(d.get('match',{}).get('verified_fixture_id'))!=str(fid):raise ValueError('RESEARCH_CONTEXT_IDENTITY')
+        context_map[fid]=d;sources.append({'path':str(path.resolve()),'sha256':t.sha(path),'acquired_at':stamp.isoformat()})
+    seen_fixtures=set()
+    for original in pre['matches']:
+        if original.get('fixture_id') in seen_fixtures:raise ValueError('RESEARCH_DUPLICATE_FIXTURE')
+        seen_fixtures.add(original.get('fixture_id'))
+        if any(not isinstance(original.get(k),int) or isinstance(original.get(k),bool) or original[k]<=0 for k in ('fixture_id','home_id','away_id','league_id','season')) or original['home_id']==original['away_id']:raise ValueError('RESEARCH_INVALID_IDENTITY')
+        f=dict(original);kickoff=t.dt(f.get('kickoff_madrid'));cut=t.dt(f.get('analysis_cutoff_utc'))
+        if not kickoff or not cut or cut>when or cut>=kickoff:raise ValueError('INVALID_RESEARCH_CUTOFF')
+        if when>=kickoff:
+            ledger.append({'fixture_id':f['fixture_id'],'status':'EXCLUDED','reason':'INVALID_CUTOFF_OR_STARTED'});continue
+        observations={side:list((f.get('statistical_observations') or {}).get(side,[])) for side in ('home','away')};raw_by_team={};context=context_map.get(f['fixture_id'])
+        if context:
+            cf=context['fixture']
+            if any(cf.get(k)!=f.get(k) for k in ('home_id','away_id','league_id','season')) or t.dt(cf.get('date'))!=kickoff:raise ValueError('RESEARCH_CONTEXT_IDENTITY')
+            expected={'F':'female','M':'male'}.get(f.get('gender'))
+            if expected and any(context['match'].get(k)!=expected for k in ('home_gender','away_gender')):raise ValueError('RESEARCH_CONTEXT_CATEGORY')
+            for side in ('home','away'):
+                rows=context['context'].get(side+'_history_deep',{}).get('detailed_fixtures',[]);valid={}
+                for r in rows:
+                    rf=r.get('fixture',{});at=t.dt(rf.get('date'));fid=rf.get('id');ids=[r.get('teams',{}).get(x,{}).get('id') for x in ('home','away')]
+                    if f[side+'_id'] not in ids or ids[0]==ids[1]:raise ValueError('RESEARCH_HISTORY_IDENTITY')
+                    if fid==f['fixture_id'] or not at or at+timedelta(hours=3)>=when or rf.get('status',{}).get('short')!='FT':continue
+                    if fid in valid and valid[fid]!=r:raise ValueError('RESEARCH_CONFLICTING_HISTORY')
+                    valid[fid]=r
+                raw_by_team[side]=list(valid.values())
+                for r in valid.values():
+                    home=r['teams']['home']['id']==f[side+'_id'];owner='home' if home else 'away';opp='away' if home else 'home'
+                    def block(tid):
+                        mapping={'Total Shots':'shots','Shots on Goal':'on_target','Corner Kicks':'corners','Fouls':'fouls','Yellow Cards':'yellow','Offsides':'offsides','expected_goals':'xg','Ball Possession':'possession_pct'}
+                        return {mapping[x['type']]:float(str(x['value']).rstrip('%')) for group in r.get('statistics',[]) if group.get('team',{}).get('id')==tid for x in group.get('statistics',[]) if x.get('type') in mapping and x.get('value') is not None and str(x['value']).rstrip('%').replace('.','',1).isdigit()}
+                    own=block(f[side+'_id']);con=block(r['teams'][opp]['id']);own['goals']=r['goals'].get(owner);con['goals']=r['goals'].get(opp)
+                    new={'fixture_id':r['fixture']['id'],'team_id':f[side+'_id'],'opponent_id':r['teams'][opp]['id'],'kickoff_utc':r['fixture']['date'],'league_id':r['league']['id'],'season':r['league']['season'],'venue':'HOME' if home else 'AWAY','status':'FT','statistics_requested':True,'own':own,'conceded':con}
+                    lineups=[l for l in r.get('lineups',[]) if l.get('team',{}).get('id')==f[side+'_id']]
+                    if len(lineups)==1:new.update(formation=lineups[0].get('formation'),coach_id=(lineups[0].get('coach') or {}).get('id') or None)
+                    observations[side]=[x for x in observations[side] if x['fixture_id']!=new['fixture_id']]+[new]
+        f['analysis_cutoff_utc']=when.isoformat();f['statistical_observations']=observations;profiles=[]
+        for side in ('home','away'):
+            rows=sorted(observations[side],key=lambda r:str(r.get('kickoff_utc','')),reverse=True)
+            rows=[r for r in rows if t.dt(r.get('kickoff_utc')) and t.dt(r['kickoff_utc'])<when and r.get('team_id')==f[side+'_id'] and r.get('status')=='FT' and r['fixture_id']!=f['fixture_id']]
+            unique={}
+            for r in rows:
+                if r['fixture_id'] in unique and r!=unique[r['fixture_id']]:raise ValueError('RESEARCH_DUPLICATE_CONFLICT')
+                unique[r['fixture_id']]=r
+            old_datasets=[]
+            for path in (library/'team_history'/str(f[side+'_id'])).glob('*.json'):
+                cached=t.read(path)
+                if t.dt(cached['observed_at'])<=when and cached['season']==f['season']:
+                    if hashlib.sha256(json.dumps(cached,sort_keys=True).encode()).hexdigest()!=path.stem:raise ValueError('TEAM_LIBRARY_CORRUPT')
+                    old_datasets.append(cached)
+            older={}
+            for cached in sorted(old_datasets,key=lambda x:x['observed_at']):
+                for r in cached['observations']:
+                    if t.dt(r['kickoff_utc'])<when and r['fixture_id']!=f['fixture_id']:older[r['fixture_id']]=r
+            older.update(unique);rows=sorted(older.values(),key=lambda r:r['kickoff_utc'],reverse=True)
+            raw_history={}
+            for cached in sorted(old_datasets,key=lambda x:x['observed_at']):
+                for raw in cached.get('raw_rows',[]):
+                    if raw['fixture']['id']!=f['fixture_id'] and t.dt(raw['fixture']['date'])<when:raw_history[raw['fixture']['id']]=raw
+            for raw in raw_by_team.get(side,[]):raw_history[raw['fixture']['id']]=raw
+            raw_by_team[side]=list(raw_history.values())
+            dataset={'team_id':f[side+'_id'],'season':f['season'],'observed_at':when.isoformat(),'observations':rows,'raw_rows':raw_by_team[side]}
+
+            dataset_key=hashlib.sha256(json.dumps(dataset,sort_keys=True).encode()).hexdigest()
+            persist(library/'team_history'/str(f[side+'_id'])/(dataset_key+'.json'),dataset)
+            same,rejected=filtered_observations(rows,f,side,when)
+            profile={'team_id':f[side+'_id'],'season':f['season'],'league_id':f['league_id'],
+                'fixture_ids':[r['fixture_id'] for r in rows],'observations':rows,'rejections':rejected,
+                'source_refs':[{'path':str(source.resolve()),'sha256':source_hash}]+sources,
+                'metrics':{m:{k:summarize_series(same,m,k,'HOME' if side=='home' else 'AWAY') for k in ('own','conceded')} for m in METRICS},
+                'windows':{},'longitudinal':longitudinal_profile(f[side+'_id'],rows,raw_by_team.get(side,[])),
+                'validation':'DESCRIPTIVE_ONLY','actionable_bet':False}
+            for label,sample in [('GLOBAL',rows),('HOME',[r for r in rows if r['venue']=='HOME']),('AWAY',[r for r in rows if r['venue']=='AWAY'])]+[(k,[r for r in rows if str(r['league_id'])+':'+str(r['season'])==k]) for k in profile['longitudinal']['competition_season_samples']]:
+                profile['windows'][label]={str(n):{'fixture_ids':[r['fixture_id'] for r in sample[:n]],'metrics':{m:stats([r.get('own',{}).get(m) for r in sample[:n] if finite(r.get('own',{}).get(m))]) for m in METRICS}} for n in (5,10,20)}
+                profile['windows'][label]['PREVIOUS_L5']={'fixture_ids':[r['fixture_id'] for r in sample[5:10]],'metrics':{m:stats([r.get('own',{}).get(m) for r in sample[5:10] if finite(r.get('own',{}).get(m))]) for m in METRICS}}
+            profile['contextual']=contextual_segments(profile)
+            key=hashlib.sha256(json.dumps(profile,sort_keys=True).encode()).hexdigest();teams[key]=profile;profiles.append(key)
+            persist(Path(output)/'team_store'/str(profile['team_id'])/(key+'.json'),profile)
+        x=analyze_fixture(f,when,observations)
+        matches.append({'fixture_id':f['fixture_id'],'teams':[f['home_id'],f['away_id']],'kickoff':kickoff.isoformat(),'profile_ids':profiles,'data_quality':x['data_coverage'],'pattern_strength':x['tactical_research_score'],'tactical_compatibility':None,'risk':'UNASSESSED','target_lineups':context['context'].get('lineups') if context else None,'lineup_status':'API_STRUCTURED_NOT_OFFICIAL_CERTIFICATION' if context else 'UNAVAILABLE','signals':x['signals'],'potential_market_families':x['signal_families'],'actionable_bet':False})
+    if set(context_map)-{m['fixture_id'] for m in matches}:raise ValueError('UNUSED_OR_WRONG_CONTEXT')
+    doc={'schema_version':'1.1-research-exchange','mode':'RETROSPECTIVE_RECONSTRUCTED' if retrospective else 'PREMATCH_RESEARCH',
+         'asof':when.isoformat(),'source':str(source.resolve()),'source_sha256':source_hash,'code_sha256':t.sha(Path(__file__)),
+         'history_code_sha256':t.sha(Path(__file__).with_name('prematch_tactical_history.py')),'context_sources':sources,'teams':teams,'matches':matches,'ledger':ledger,'api_calls':0}
+    if interpretation:
+        llm=t.read(Path(interpretation));seen=set()
+        if llm.get('source_sha256')!=doc['source_sha256'] or llm.get('context_sources')!=sources:raise ValueError('LLM_SOURCE_SHA_MISMATCH')
+        for claim in llm.get('claims',[]):
+            match=next((m for m in matches if m['fixture_id']==claim.get('fixture_id')),None)
+            if not match or claim.get('status') not in ('CONFIRMADO','INFERIDO','HIPÓTESIS','INSUFFICIENT_DATA'):raise ValueError('INVALID_LLM_CLAIM')
+            allowed={i for k in match['profile_ids'] for i in teams[k]['fixture_ids']}
+            if not claim.get('fixture_ids') or not set(claim['fixture_ids'])<=allowed:raise ValueError('LLM_EVIDENCE_UNBOUND')
+            if not claim.get('counter_scenario') or not claim.get('falsifier') or not claim.get('mechanism'):raise ValueError('LLM_COUNTEREVIDENCE_REQUIRED')
+            if not retrospective and t.dt(llm.get('generated_at')) is None:raise ValueError('LLM_GENERATION_TIME_REQUIRED')
+            if t.dt(llm.get('generated_at')) and t.dt(llm['generated_at'])>when:raise ValueError('LLM_GENERATED_AFTER_ASOF')
+            if claim['status']=='CONFIRMADO':
+                ref=claim.get('verified_observation_source') or {}
+                if not isinstance(ref,dict):raise ValueError('LLM_OBSERVATION_REQUIRED')
+                path=Path(ref.get('path',''));at=t.dt(ref.get('acquired_at'))
+                if not path.is_file() or t.sha(path)!=ref.get('sha256') or not at or at>when or not ref.get('excerpt') or ref['excerpt'] not in path.read_text(errors='replace'):raise ValueError('LLM_OBSERVATION_REQUIRED')
+            if any(k in claim for k in ('EV','stake','p_model','odds')):raise ValueError('COMMERCIAL_OUTPUT_FORBIDDEN')
+            for check in claim.get('quantitative_checks',[]):
+                profiles=[teams[k] for k in match['profile_ids'] if teams[k]['team_id']==check.get('team_id')]
+                if len(profiles)!=1:raise ValueError('LLM_QUANTITATIVE_IDENTITY')
+                rows=[r for r in profiles[0]['observations'] if r['fixture_id'] in claim['fixture_ids']]
+                vals=[r.get(check.get('kind','own'),{}).get(check['metric']) for r in rows]
+                actual=stats([v for v in vals if finite(v)])
+                if any(actual.get(k)!=check.get(k) for k in ('n','mean')):raise ValueError('LLM_QUANTITATIVE_MISMATCH')
+            token=hashlib.sha256(json.dumps(claim,sort_keys=True).encode()).hexdigest()
+            if token in seen:raise ValueError('LLM_DUPLICATE_CLAIM')
+            seen.add(token)
+        doc['interpretation']=llm
+    library=Path(library) if library else Path(output)/'pattern_library'
+    proposals=doc.get('interpretation',{}).get('team_patterns',[])
+    if proposals and not retrospective and (not t.dt(doc['interpretation'].get('generated_at')) or t.dt(doc['interpretation']['generated_at'])>when):raise ValueError('PATTERN_IMPORT_TIME_UNVERIFIED')
+    doc['pattern_library']=evolve_tactical_library(list(teams.values()),proposals,library,when,persist,retrospective)
+    for match in matches:
+        byside={side:[e for e in doc['pattern_library']['evaluations'] if e['team_id']==tid] for side,tid in zip(('home','away'),match['teams'])}
+        match['pattern_matchup']={'home':byside['home'],'away':byside['away'],
+            'contrasts':[{'home_pattern_id':h['pattern_id'],'away_pattern_id':a['pattern_id'],
+                'status':'COEXISTENCE_REQUIRES_TACTICAL_REVIEW','home_mechanism':h['mechanism'],'away_mechanism':a['mechanism']} for h in byside['home'] for a in byside['away']],
+            'missing':'No automatic claim of superiority; verify roles, lineups, coach and activation conditions',
+            'actionable_bet':False}
+    for review in doc.get('interpretation',{}).get('matchup_reviews',[]):
+        match=next((m for m in matches if m['fixture_id']==review.get('fixture_id')),None)
+        if not match:raise ValueError('MATCHUP_FIXTURE_UNBOUND')
+        required={e['pattern_id'] for side in ('home','away') for e in match['pattern_matchup'][side]}
+        references=set(review.get('pattern_ids',[]))
+        if not references or not references<=required:raise ValueError('MATCHUP_PATTERN_UNBOUND')
+        for side in ('home','away'):
+            available={e['pattern_id'] for e in match['pattern_matchup'][side]}
+            if available and not references&available:raise ValueError('MATCHUP_SIDE_NOT_ANALYZED')
+        if not review.get('scenarios') or not review.get('counter_scenario') or not review.get('falsifier'):raise ValueError('MATCHUP_REASONING_REQUIRED')
+        match['pattern_matchup']['codex_review']=review
+        match['pattern_matchup']['status']='CONDITIONAL_SCOUT_REVIEW_NOT_VALIDATED'
+    packets=[]
+    for profile in teams.values():
+        payload={'team_id':profile['team_id'],'season':profile['season'],'observations':profile['observations'],
+                 'longitudinal':profile['longitudinal'],'contextual':profile['contextual']}
+        digest=hashlib.sha256(json.dumps(payload,sort_keys=True).encode()).hexdigest();path=library/'interpretation_packets'/str(profile['team_id'])/(digest+'.json')
+        fresh=not path.exists();persist(path,payload)
+        packets.append({'team_id':profile['team_id'],'data_hash':digest,'path':str(path.resolve()),'new_relevant_data':fresh})
+    # Packet readiness is operational telemetry, not part of immutable result identity.
+    doc['interpretation_packets']=[{k:v for k,v in packet.items() if k!='new_relevant_data'} for packet in packets]
+    doc['ranking']=sorted([{'fixture_id':m['fixture_id'],'pattern_strength':m['pattern_strength'],'data_quality':m['data_quality'],'tactical_compatibility':None,'risk':m['risk']} for m in matches],key=lambda m:(-m['pattern_strength'],-m['data_quality'],m['fixture_id']))
+    token=hashlib.sha256(json.dumps(doc,sort_keys=True).encode()).hexdigest()[:20];out=Path(output)/token
+    persist(out/'research_profiles.json',doc)
+    body='# Investigación táctica: '+doc['mode']+'\n\nSin cuotas, EV ni autorización comercial. Fuerza y cobertura son indicadores descriptivos, no probabilidades.\n\n'
+    for m in doc['ranking']:body+=f"- Fixture {m['fixture_id']}: fuerza {m['pattern_strength']}; cobertura {m['data_quality']}; compatibilidad y riesgo pendientes.\n"
+    for c in doc.get('interpretation',{}).get('claims',[]):body+='\n## '+str(c['fixture_id'])+' — '+c.get('title',c['status'])+'\n\n'+c['status']+' | Fixtures: '+str(c['fixture_ids'])+'\n\n'+c['mechanism']+'\n\nContrario: '+c['counter_scenario']+'\n\nComprobación: '+c['falsifier']+'\n'
+    persist(out/'research_profiles.md',body.encode())
+    for match in matches:
+        review=match['pattern_matchup'].get('codex_review')
+        if review:body+='\n## Cruce '+str(match['fixture_id'])+'\n\n'+str(review['scenarios'])+'\n\nContrario: '+review['counter_scenario']+'\n\nFalsador: '+review['falsifier']+'\n'
+    for e in doc['pattern_library']['evaluations']:body+='\n- Patrón '+str(e['team_id'])+': '+str(e['title'])+' | '+e['state']+' | n='+str(e['n'])+' | contraejemplos='+str(e['counterexamples'])+'\n'
+    persist(out/'pattern_library_summary.md',body.encode())
+    for ref in sources:
+        if t.sha(Path(ref['path']))!=ref['sha256']:raise ValueError('SOURCE_CHANGED_DURING_RESEARCH')
+    if t.sha(source)!=source_hash:raise ValueError('SOURCE_CHANGED_DURING_RESEARCH')
+    from datetime import datetime,timezone
+    persist(out/('execution_'+datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%S%f')+'.json'),{'api_calls':0,'new_interpretation_packets':sum(p['new_relevant_data'] for p in packets),'runtime_seconds':time.perf_counter()-started,'result_sha256':t.sha(out/'research_profiles.json')})
+    return out,doc
+
+
 def main(argv=None):
     p=argparse.ArgumentParser(description=__doc__)
     p.add_argument('--preselection',type=Path,required=True);p.add_argument('--pattern',type=Path)
     p.add_argument('--output-dir',type=Path,required=True);p.add_argument('--root',type=Path,default=Path(__file__).resolve().parent)
     p.add_argument('--preflight',type=Path,action='append',default=[]);p.add_argument('--scanner',type=Path)
-    p.add_argument('--profiles',type=Path);p.add_argument('--asof',help='Auditoría retrospectiva explícita; nunca genera selección accionable')
+    p.add_argument('--pattern-library',type=Path);p.add_argument('--research-context',type=Path,action='append',default=[]);p.add_argument('--research-profiles',action='store_true');p.add_argument('--interpretation',type=Path);p.add_argument('--profiles',type=Path);p.add_argument('--asof',help='Auditoría retrospectiva explícita; nunca genera selección accionable')
     a=p.parse_args(argv)
     try:
         when=t.dt(a.asof) if a.asof else None
         if a.asof and not when:raise ValueError('ASOF_REQUIRES_EXPLICIT_OFFSET')
+        if a.research_profiles:
+            out,doc=research_profiles(a.preselection,a.output_dir,a.asof or t.now_madrid().isoformat(),a.interpretation,a.research_context,bool(a.asof),a.pattern_library)
+            print(f'RESEARCH_PROFILES: {out}; fixtures={len(doc["matches"])}; API=0');return 0
         d=run_engine(a.preselection,a.pattern,a.output_dir,a.root,a.preflight,a.scanner,a.profiles,when,bool(a.asof))
         print(f"{d['mode']}: {len(d['fixtures'])} fixtures; API=0; selección={d['selected_fixture_id']}; {a.output_dir}")
         return 0
