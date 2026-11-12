@@ -48,5 +48,15 @@ class BridgeTests(unittest.TestCase):
         self.assertFalse(d['matches'][0]['statistical_observations']['home'])
         self.assertTrue(any(r['reason']=='HISTORICAL_IDENTITY_CONFLICT' for r in d['audit']['rejected']))
 
+    def test_embedded_detail_before_cutoff_beats_direct_response_after_cutoff(self):
+        from prematch_phase2 import PlayerCache
+        raw=copy.deepcopy(self.raw);raw['players']=[{'team':{'id':1},'players':[]}]
+        write_cache(self.cache,'fixtures','ids=10',[raw],fetched='2026-11-12T02:35:00Z')
+        write_cache(self.cache,'fixtures/players','fixture=10',[{'team':{'id':999}}],fetched='2026-11-12T04:00:00Z')
+        rows,ref=PlayerCache(self.cache).get('fixtures/players',10,CUT)
+        self.assertEqual(rows[0]['team']['id'],1)
+        self.assertEqual(ref['embedded_field'],'players')
+        self.assertEqual(ref['endpoint'],'fixtures')
+
 
 if __name__=='__main__':unittest.main()

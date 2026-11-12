@@ -68,15 +68,7 @@ def allowed_ref(ref,cutoff,retrospective):
     return bool(ref and acquired and (acquired<=cutoff or retrospective))
 
 class EnrichedCache(players.PlayerCache):
-    """Also reuse API /fixtures?ids=... embedded detail, retaining its SHA."""
-    def get(self,endpoint,fid,cutoff):
-        response,ref=super().get(endpoint,fid,cutoff)
-        if response is not None or not endpoint.startswith('fixtures/'):return response,ref
-        fixture,fixture_ref=super().get('fixtures',fid,cutoff)
-        field=endpoint.split('/',1)[1]
-        embedded=(fixture or {}).get(field)
-        if isinstance(embedded,list):return embedded,{**fixture_ref,'embedded_field':field}
-        return None,None
+    """Compatibility name; the shared reader now retains embedded-detail SHA."""
 
 def cache_identity(cache,row,cutoff,retrospective):
     doc,ref=cache.get('fixtures',row['fixture_id'],cutoff)

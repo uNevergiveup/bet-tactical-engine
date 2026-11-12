@@ -127,7 +127,12 @@ class PlayerCache:
         return self.index[endpoint].get(str(fid), [])
 
     def get(self, endpoint, fid, cutoff):
-        candidates = self.candidates(endpoint, fid)
+        candidates = list(self.candidates(endpoint, fid))
+        if endpoint in ('fixtures/statistics','fixtures/players','fixtures/lineups','fixtures/events'):
+            field=endpoint.split('/')[-1]
+            for fixture,ref in self.candidates('fixtures',fid):
+                if isinstance(fixture.get(field),list):
+                    candidates.append((fixture[field],{**ref,'embedded_field':field}))
         if not candidates:
             return None, None
         # Prefer a version acquired by cutoff; otherwise the first reconstructible

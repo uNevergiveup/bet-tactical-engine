@@ -943,6 +943,29 @@ class DeepCollector:
                                  "consumers": [dict(scope)], **scope}
         return None
 
+    def adopt_embedded(self, endpoint, historical_id, batch, row, scope):
+        """Reuse an actual /fixtures?ids response; never create a fake endpoint cache."""
+        field = endpoint.split('/')[-1]
+        response = row.get(field)
+        if not isinstance(response,list):return None
+        key = endpoint_key(endpoint, {'fixture':historical_id})
+        if key in self.results:
+            return self.request(endpoint, {'fixture':historical_id}, scope=scope)
+        self._active_keys.append(key)
+        params = {'fixture':str(historical_id)}
+        result = ApiResult(endpoint, params, response, 'EMBEDDED_FIXTURES_BATCH', batch.cache_path,
+                           batch.fetched_at_utc, response_completeness(endpoint,response), batch.raw_payload)
+        acquired = parse_dt(batch.fetched_at_utc); kickoff = parse_dt(scope.get('target_kickoff_utc'))
+        self.records[key] = {'endpoint':endpoint,'parameters':params,
+            'status':'AVAILABLE' if response else 'EMPTY','count':len(response),
+            'source':result.source,'cache_path':str(batch.cache_path) if batch.cache_path else None,
+            'fetched_at_utc':batch.fetched_at_utc,'completeness':result.completeness,
+            'temporal_eligibility':'AVAILABLE_BEFORE_TARGET_KICKOFF' if acquired and kickoff and acquired<kickoff else 'UNKNOWN',
+            'embedded_field':field,'actual_source_endpoint':'fixtures','actual_source_parameters':batch.params,
+            'consumers':[dict(scope)],'reuse_count':0,**scope}
+        self.results[key] = result
+        return result
+
     def request_pages(self, endpoint: str, params: dict[str, Any], *,
                       scope: dict[str, Any]) -> list[ApiResult]:
         """Acquire every advertised page while retaining per-page cache provenance."""
@@ -988,16 +1011,23 @@ class DeepCollector:
                 for row in final_historical_rows(history_result.response, target_kickoff, fid, team_id, self.history):
                     historical_ids.add(int(row["fixture"]["id"]))
         ordered_historical_ids = sorted(historical_ids)
+        embedded = {}
         for start in range(0, len(ordered_historical_ids), 20):
             batch = ordered_historical_ids[start:start + 20]
-            self.request("fixtures", {"ids": "-".join(map(str, batch))},
+            result = self.request("fixtures", {"ids": "-".join(map(str, batch))},
                          scope={**scope, "role": "historical_fixtures_batch",
                                 "historical_fixture_ids": batch})
+            if result:
+                for row in result.response:
+                    historical_id = (row.get('fixture') or {}).get('id')
+                    if historical_id in batch and sum((r.get('fixture') or {}).get('id')==historical_id for r in result.response)==1:
+                        embedded[historical_id] = (result,row)
         for historical_id in ordered_historical_ids:
             hist_scope = {**scope, "historical_fixture_id": historical_id, "role": "historical_detail"}
             for endpoint in ("fixtures/statistics", "fixtures/events", "fixtures/lineups", "fixtures/players"):
                 params = {"fixture": historical_id}
-                result = self.request(endpoint, params, scope=hist_scope)
+                result = self.adopt_embedded(endpoint,historical_id,*embedded[historical_id],hist_scope) if historical_id in embedded else None
+                if result is None:result = self.request(endpoint, params, scope=hist_scope)
                 if result:
                     self.fixture_payloads[historical_id][endpoint] = result
 

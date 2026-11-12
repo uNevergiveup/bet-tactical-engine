@@ -10,6 +10,27 @@ import prematch_phase1 as phase
 
 
 class AcquisitionTests(unittest.TestCase):
+    def test_batch_embedded_detail_avoids_four_repeated_http_requests(self):
+        from datetime import datetime,timezone
+        raw={'fixture':{'id':10,'date':'2026-11-01T12:00:00Z','status':{'short':'FT'}},
+             'teams':{'home':{'id':1},'away':{'id':2}},'league':{'id':3,'season':2026},
+             'statistics':[],'events':[],'lineups':[],'players':[]}
+        calls=[]
+        def get(endpoint,**params):
+            calls.append((endpoint,params));self.assertEqual(endpoint,'fixtures')
+            rows=[raw] if 'team' in params or 'ids' in params else []
+            return phase.ApiResult(endpoint,{k:str(v) for k,v in params.items()},rows,'API',None,
+                '2026-11-12T02:00:00Z','COMPLETE_RESPONSE',{'response':rows})
+        from types import SimpleNamespace
+        collector=phase.DeepCollector(SimpleNamespace(get=get),history=20,cutoff=datetime(2026,11,12,3,tzinfo=timezone.utc),core_only=True)
+        identity={'api_fixture_id':99,'kickoff_utc':'2026-11-12T18:00:00Z','home_team_id':1,'away_team_id':2,'league_id':3,'season':2026}
+        result=collector.collect_fixture(identity)
+        self.assertEqual(len(calls),4)
+        self.assertEqual(result['historical_detail_status']['10']['fixtures/players']['status'],'EMPTY')
+        record=collector.records[phase.endpoint_key('fixtures/players',{'fixture':10})]
+        self.assertEqual(record['actual_source_endpoint'],'fixtures')
+        self.assertEqual(record['source'],'EMBEDDED_FIXTURES_BATCH')
+
     def test_preflight_rebuilds_header_clock_instead_of_trusting_status(self):
         from bwin_market_preflight import validate_match
         from datetime import datetime,timezone
