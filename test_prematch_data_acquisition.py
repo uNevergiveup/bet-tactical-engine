@@ -9,6 +9,17 @@ import prematch_phase1 as phase
 
 
 class AcquisitionTests(unittest.TestCase):
+    def test_provider_rate_limit_body_and_retry_after_are_respected(self):
+        for status,headers,payload,expected_pause in [(200,{}, {'errors':{'rateLimit':'Too many requests'}},60),
+                                                      (429,{'Retry-After':'120'},{},120)]:
+            with self.subTest(status=status),tempfile.TemporaryDirectory() as td:
+                pauses=[];responses=iter([(status,headers,payload),(200,{}, {'response':[{}],'errors':[]})])
+                client=phase.Phase1ApiClient(Path(td),offline=False,max_new_calls=2,key='test',
+                    transport=lambda *args:next(responses),sleeper=pauses.append)
+                result=client.get('teams',id=1)
+                self.assertEqual(result.response,[{}]);self.assertIn(expected_pause,pauses)
+                self.assertEqual(client.new_calls,2);self.assertEqual(client.retries,1)
+
     def test_core_pass_defers_optional_context_explicitly(self):
         from datetime import datetime,timezone
         collector=phase.DeepCollector(None,history=5,cutoff=datetime(2026,11,12,tzinfo=timezone.utc),core_only=True)

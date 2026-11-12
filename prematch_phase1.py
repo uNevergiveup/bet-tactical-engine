@@ -177,7 +177,12 @@ class Phase1ApiClient:
                  key: str | None = None, base_url: str = "https://v3.football.api-sports.io",
                  timeout: int = 20, transport: Transport | None = None,
                  clock: Callable[[], datetime] = now_utc,
-                 sleeper: Callable[[float], None] = time.sleep):
+                 sleeper: Callable[[float], None] = time.sleep,
+                 min_interval_seconds: float = 1.0):
+        if min_interval_seconds < 0:
+            raise ValueError('API_MIN_INTERVAL_INVALID')
+        self.min_interval_seconds = min_interval_seconds
+        self.next_request_at = 0.0
         if max_new_calls < 0:
             raise ValueError("max_new_calls debe ser >=0")
         if not offline and max_new_calls < 1:
@@ -347,18 +352,23 @@ class Phase1ApiClient:
                 self.ledger.append({"endpoint": endpoint, "parameters": ordered,
                                     "status": "BUDGET_EXHAUSTED", "attempt": attempt})
                 raise BudgetExhausted(f"BUDGET_MAX_CALLS_{self.max_new_calls}")
+            pause = self.next_request_at - time.monotonic()
+            if pause > 0:
+                self.sleeper(pause)
+            self.next_request_at = time.monotonic() + self.min_interval_seconds
             self.new_calls += 1
             self.http_calls_by_endpoint[endpoint] += 1
             try:
                 status, response_headers, payload = self.transport(endpoint, ordered, headers, self.timeout)
-                if status == 429 or status >= 500:
+                body_rate_limit = isinstance(payload, dict) and isinstance(payload.get('errors'), dict) and bool(payload['errors'].get('rateLimit'))
+                if status == 429 or status >= 500 or body_rate_limit:
                     last_error = f"HTTP_{status}"
                     if attempt == 3:
                         break
                     self.retries += 1
-                    retry = response_headers.get("Retry-After") or response_headers.get("retry-after") or attempt
+                    retry = response_headers.get("Retry-After") or response_headers.get("retry-after") or (60 if status == 429 or body_rate_limit else attempt)
                     try:
-                        pause = min(30.0, max(0.0, float(retry)))
+                        pause = max(0.0, float(retry))
                     except (TypeError, ValueError):
                         pause = float(attempt)
                     self.sleeper(pause)
