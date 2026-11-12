@@ -82,6 +82,85 @@ class LocalHistoryCache:
         return observations
 
 
+def phase1_preselection(fixtures_path, cache_root, cutoff, history=20):
+    """Bridge shared Phase 1 cache to existing engines; no requests or new model."""
+    import copy
+    from preselect_matches import prepare_history
+    from prematch_advanced_discovery_v2 import EnrichedCache, allowed_ref
+    fixtures_path = Path(fixtures_path)
+    doc = t.read(fixtures_path)
+    generated = t.dt(doc.get('generated_at_utc'))
+    if cutoff.tzinfo is None or not generated or generated > cutoff:
+        raise ValueError('PHASE1_SOURCE_AFTER_CUTOFF_OR_UNDATED')
+    if not 1 <= history <= 20:
+        raise ValueError('PHASE1_HISTORY_LIMIT_INVALID')
+    cache = EnrichedCache(cache_root)
+    cache.candidates('fixtures', 0)  # Build the existing reader's index once.
+    available = {}; audit = []; refs = {}
+    for fid in cache.index.get('fixtures', {}):
+        raw, ref = cache.get('fixtures', fid, cutoff)
+        if not raw or not allowed_ref(ref, cutoff, False):
+            audit.append({'fixture_id': fid, 'reason': 'ACQUISITION_NOT_AVAILABLE_BY_CUTOFF'})
+            continue
+        identities = {(r.get('fixture', {}).get('date'), r.get('league', {}).get('id'),
+                       r.get('league', {}).get('season'), r.get('teams', {}).get('home', {}).get('id'),
+                       r.get('teams', {}).get('away', {}).get('id'))
+                      for r, source in cache.candidates('fixtures', fid) if allowed_ref(source, cutoff, False)}
+        if len(identities) != 1:
+            audit.append({'fixture_id': fid, 'reason': 'HISTORICAL_IDENTITY_CONFLICT'})
+            continue
+        available[int(fid)] = (raw, ref)
+    matches = []
+    for target in doc['fixtures']:
+        row = {**target, 'analysis_cutoff_utc': cutoff.isoformat(), 'statistical_observations': {}}
+        kickoff = t.dt(target.get('kickoff_utc') or target.get('kickoff_madrid'))
+        row['data_state'] = 'PENDING_OR_INSUFFICIENT'
+        row['target_api_verification'] = 'PENDING_NO_DIRECT_TARGET_CACHE'
+        direct = available.get(target['fixture_id'])
+        if direct:
+            raw = direct[0]; fx = raw.get('fixture', {}); teams = raw.get('teams', {}); league = raw.get('league', {})
+            valid = (fx.get('status', {}).get('short') == 'NS' and t.dt(fx.get('date')) == kickoff
+                     and all(teams.get(s, {}).get('id') == target[s+'_id'] for s in ('home', 'away'))
+                     and league.get('id') == target['league_id'] and league.get('season') == target['season'])
+            row['target_api_verification'] = 'VERIFIED' if valid else 'CONFLICT'
+            if not valid:
+                row['data_state'] = 'BLOCKED_TARGET_SCHEDULE_OR_IDENTITY'
+                row['statistical_observations'] = {'home': [], 'away': []}
+                matches.append(row); continue
+        if not kickoff or kickoff <= cutoff:
+            row['data_state'] = 'BLOCKED_TARGET_NOT_FUTURE'
+            row['statistical_observations'] = {'home': [], 'away': []}
+            matches.append(row); continue
+        for side in ('home', 'away'):
+            tid = target[side + '_id']
+            candidates = [r for r, ref in available.values()
+                          if tid in [r.get('teams', {}).get(s, {}).get('id') for s in ('home', 'away')]
+                          and r.get('fixture', {}).get('id') != target['fixture_id']]
+            games = prepare_history(candidates, tid, cutoff, history)
+            details = {}; provenance = {}; requested = set()
+            for game in games:
+                fid = game['id']; raw, ref = available[fid]
+                details[fid] = copy.deepcopy(raw); provenance[fid] = [ref]
+                if isinstance(raw.get('statistics'), list): requested.add(fid)
+                stats, stat_ref = cache.get('fixtures/statistics', fid, cutoff)
+                if stats is not None and allowed_ref(stat_ref, cutoff, False):
+                    details[fid]['statistics'] = stats
+                    provenance[fid].append(stat_ref); requested.add(fid)
+            observations = observations_from_games(games, tid, details, requested)
+            for obs in observations:
+                obs['provenance'] = provenance[obs['fixture_id']]
+                for ref in obs['provenance']: refs[ref['path']] = ref
+            row['statistical_observations'][side] = observations
+        if any(row['statistical_observations'].values()): row['data_state'] = 'HISTORY_OBSERVED_COVERAGE_PARTIAL'
+        matches.append(row)
+    return {'schema_version': '1.1-tactical-cache-preselection', 'generated_at_utc': cutoff.isoformat(),
+            'source_filter_sha256': t.sha(fixtures_path), 'source': str(fixtures_path.resolve()),
+            'matches': matches, 'cache_sources': list(refs.values()), 'api_calls': 0,
+            'audit': {'rejected': audit, 'cache_rejections': cache.rejected},
+            'history_policy': 'FT_ONLY; original competition/season retained; maximum 600 days; no category reclassification',
+            'ranking_state': 'PENDING_PYTHON_AND_LLM_RESEARCH', 'actionable_bet': False}
+
+
 def longitudinal_profile(team_id, observations, raw_rows):
     """Verified nominal roles and metric-specific exposure, never inferred tactics."""
     from collections import Counter
