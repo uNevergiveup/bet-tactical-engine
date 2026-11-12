@@ -47,6 +47,17 @@ NATIONAL_TEAM_TRANSLATIONS = {
     "finland": ("finlandia",),
     "turkiye": ("turquia", "turkey"),
     "turkey": ("turquia", "turkiye"),
+    "belgium": ("belgica",),
+    "italy": ("italia",),
+    "france": ("francia",),
+    "czechia": ("chequia", "republica checa"),
+    "spain": ("espana",),
+    "england": ("inglaterra",),
+    "croatia": ("croacia",),
+}
+INSTITUTIONAL_CANDIDATE_ALIASES = {
+    "sl benfica w": ("benfica f",),
+    "austria wien w": ("fk austria viena f",),
 }
 
 
@@ -88,11 +99,12 @@ def _team_similarity_literal(team: str, evidence: str) -> float:
     return round(max(coverage * 0.83, longest * 0.75), 4)
 
 
-def team_similarity(team: str, evidence: str) -> float:
+def team_similarity(team: str, evidence: str, *, national_context: bool = False) -> float:
     # Exact club aliases only generate candidates; temporal/category/ID gates remain.
     from config.constants import TEAM_ALIASES
     query=norm(team);queries={str(team)}
-    queries.update(NATIONAL_TEAM_TRANSLATIONS.get(query, ()))
+    if national_context:queries.update(NATIONAL_TEAM_TRANSLATIONS.get(query, ()))
+    queries.update(INSTITUTIONAL_CANDIDATE_ALIASES.get(query, ()))
     for canonical,aliases in TEAM_ALIASES.items():
         variants={norm(x) for x in (canonical,*aliases)}
         if query in variants:queries.update(variants)
@@ -603,14 +615,16 @@ def extend_catalog_for_missing(browser, base_url: str, catalog: list[dict],
 
 def match_catalog(fixture: dict, catalog: list[dict]) -> list[dict]:
     candidates = []
+    national_context = (norm(fixture.get('country')) in {'world','mundo','international'}
+                        and not NON_ADULT_RE.search(str(fixture.get('home',''))+' '+str(fixture.get('away',''))))
     for e in catalog:
         if LIVE_RE.search(e.get("text", "")):
             continue
         parsed = unquote(urlparse(e["bwin_url"]).path)
         slug = parsed.split("/eventos/")[-1].rsplit(":", 1)[0]
         evidence = f'{e["text"]} {slug}'
-        home = team_similarity(fixture["home"], evidence)
-        away = team_similarity(fixture["away"], evidence)
+        home = team_similarity(fixture["home"], evidence,national_context=national_context)
+        away = team_similarity(fixture["away"], evidence,national_context=national_context)
         if min(home, away) < 0.82:
             continue
         order_status = team_order_status(fixture["home"], fixture["away"], evidence)

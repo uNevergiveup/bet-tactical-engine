@@ -74,4 +74,25 @@ class OfflineReconcileTests(unittest.TestCase):
             1649147:('7910426','CANDIDATE_TIME_CONFLICT')}
         for fid,(eid,status) in expected.items():self.assertEqual((rows[fid]['event_id'],rows[fid]['post_status']),(eid,status))
 
+    def test_multilingual_national_team_candidates_remain_unverified(self):
+        cases=[('Türkiye','Belgium','Turquía Bélgica','7905470'),('Italy','France','Italia Francia','7905471'),
+            ('Czechia','Spain','Chequia España','7905479'),('England','Croatia','Inglaterra Croacia','7905480')]
+        for home,away,text,eid in cases:
+            f=self.fixture(home=home,away=away)
+            e=self.event(text=text+' Hoy / 20:45',bwin_event_id=eid,bwin_url=f'https://www.bwin.es/es/sports/eventos/{eid}-2:{eid}')
+            found=b.match_catalog(f,[e]);self.assertEqual(found[0]['bwin_event_id'],eid)
+            result=r.reconcile_fixture(f,[e],{},[]);self.assertEqual(result['post_status'],'CANDIDATE_CATEGORY_UNKNOWN')
+            self.assertFalse(result['identity_verified'])
+        self.assertEqual(b.team_similarity('Belgium','Turquía Bélgica'),0)
+        self.assertEqual(b.match_catalog(self.fixture(home='Italy U20',away='France U20',category_status='EXCLUDED'),
+            [self.event(text='Italia Francia Hoy / 20:45')]),[])
+
+    def test_benfica_austria_female_institutional_candidate_is_not_male_alias(self):
+        event=self.event(text='Benfica F FK Austria Viena F Hoy / 21:00',bwin_event_id='7910156',
+            bwin_url='https://www.bwin.es/es/sports/eventos/benfica-f-fk-austria-viena-f-2:7910156')
+        female=self.fixture(home='SL Benfica W',away='Austria Wien W',gender='F')
+        self.assertEqual(b.match_catalog(female,[event])[0]['category_compatibility'],'FEMALE_CORROBORATED')
+        self.assertEqual(b.match_catalog({**female,'home':'SL Benfica','away':'Austria Wien','gender':'M'},[event]),[])
+        self.assertEqual(b.match_catalog({**female,'home':'SL Benfica W U19'},[event]),[])
+
 if __name__=='__main__':unittest.main()
