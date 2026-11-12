@@ -49,6 +49,28 @@ def observed_match(row, *, status="IDENTITY_VERIFIED_AUTOMATICALLY",
 
 
 class BwinInputTests(unittest.TestCase):
+    def test_progressive_collector_accumulates_beyond_initial_fifty(self):
+        class Page:
+            def __init__(self):self.batch=0
+            def evaluate(self,code):
+                if 'querySelectorAll(\'a[href*="/eventos/"]\')' in code:
+                    return [{'url':f'https://www.bwin.es/es/sports/eventos/a-b-2:{7000000+i}','text':f'A{i} B{i}','title':'','aria':'','text_source':'EVENT_ANCHOR'} for i in range(self.batch*50,(self.batch+1)*50)]
+                if 'labels=' in code:return False
+                if 'full:Math.max' in code:return {'y':900 if self.batch>=2 else self.batch*400,'h':100,'full':1000}
+                if 'document.body.scrollHeight' in code:self.batch=min(2,self.batch+1)
+                return None
+            def wait_for_timeout(self,_):pass
+        trace={};rows=bwin.browser_collect_anchors(Page(),max_scrolls=8,trace=trace)
+        self.assertEqual(len(rows),150);self.assertTrue(trace['scroll_samples'][-1]['at_bottom'])
+
+    def test_bwin_first_uses_only_observed_navigation_urls_and_deduplicates(self):
+        from unittest import mock
+        existing=[event('7000001')];new=event('7000002')
+        with mock.patch.object(bwin,'read_country_navigation',side_effect=[({'liga x':'https://www.bwin.es/es/sports/fútbol-4/apuestas/liga-x-1'},{'status':'OK'}),({}, {'status':'EMPTY'})]),mock.patch.object(bwin,'fetch_catalog',return_value=([existing[0],new],[{'status':'OK'}])):
+            catalog,_,info=bwin.extend_catalog_bwin_first(object(),bwin.BASE,existing,2,3,1000)
+        self.assertEqual({x['bwin_event_id'] for x in catalog},{'7000001','7000002'})
+        self.assertEqual(info['pages_selected'][0]['label'],'liga x')
+
     def test_lightweight_fixtures_input_and_top_zero(self):
         with tempfile.TemporaryDirectory() as td:
             path = Path(td) / "fixtures.json"
@@ -103,9 +125,9 @@ class BwinInputTests(unittest.TestCase):
         self.assertEqual(result["inspection"]["identity_status"],
                          "COMPETITION_UNVERIFIED")
 
-    def test_unknown_category_is_distinct_from_contradiction(self):
+    def test_unknown_category_stays_pending_without_strong_competition_evidence(self):
         row=fixture(gender='UNKNOWN');possible=bwin.match_catalog(row,[event(text='La Liga Sevilla Alaves')])
-        observed={'identity_status':'NAME_AND_ABSOLUTE_TIME_MATCH','competition_match_score':1.0,'market_headings':{}}
+        observed={'identity_status':'NAME_AND_ABSOLUTE_TIME_MATCH','competition_match_score':.9,'market_headings':{}}
         with mock.patch.object(bwin,'inspect_event',return_value=observed):result=bwin.summarize(row,possible,None,1,True)
         self.assertEqual(result['inspection']['identity_status'],'CATEGORY_UNKNOWN_PENDING')
 

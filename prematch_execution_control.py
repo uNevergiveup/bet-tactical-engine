@@ -65,7 +65,10 @@ def prepare(args):
         if any(not (ko:=parse_dt(row.get('kickoff_utc') or row.get('kickoff_madrid'))) or not begin<=ko<=end
                for row in fixtures.get('fixtures',[])):
             raise ValueError('FIXTURE_INPUT_OUTSIDE_PLANNED_WINDOW')
-    if not 0<=args.api_budget<=7500 or not 0<=args.bwin_events<=100 or not 1<=args.llm_max_iterations<=10 or not 1<=args.history<=20:
+    if (not 0<=args.api_budget<=7500 or not 0<=args.bwin_events<=100 or
+        not 0<=args.bwin_first_pages<=10 or not 0<=args.bwin_context_pages<=10 or
+        args.bwin_first_pages+args.bwin_context_pages>10 or not 1<=args.bwin_max_scrolls<=50 or
+        not 1<=args.llm_max_iterations<=10 or not 1<=args.history<=20):
         raise ValueError('INVALID_EXPLICIT_BUDGET')
     runtime=json.loads(args.llm_runtime_command_json) if args.llm_runtime_command_json else None
     if args.browser_executable and not Path(args.browser_executable).is_file():raise ValueError('BROWSER_EXECUTABLE_NOT_FOUND')
@@ -75,7 +78,10 @@ def prepare(args):
           'date':args.date,'start':args.start,'end':args.end,'window':{'start':begin.isoformat(),'end':end.isoformat()},
           'root':str(args.root.resolve()),'output_dir':str(args.output_dir.resolve()),'history':args.history,
           'cache_root':str((args.cache_root or args.root/'outputs/.api_football_history_cache').resolve()),
-          'api_budget':args.api_budget,'bwin_events':args.bwin_events,'llm_max_iterations':args.llm_max_iterations,
+          'api_budget':args.api_budget,'bwin_events':args.bwin_events,
+          'bwin_discovery':{'bwin_first_pages':args.bwin_first_pages,'context_pages':args.bwin_context_pages,
+                            'max_scrolls':args.bwin_max_scrolls},
+          'llm_max_iterations':args.llm_max_iterations,
           'runtime_command':runtime,'browser_executable':args.browser_executable,
           'inputs':{'fixtures':reference(args.fixtures_input) if args.fixtures_input else None,
                     'bwin':reference(args.bwin_input) if args.bwin_input else None},
@@ -97,7 +103,8 @@ def describe(plan):
     import shutil
     return {'status':'DRY_RUN_NO_EXTERNAL_EXECUTION','date':plan['date'],'window':plan['window'],
             'approval_sha256':plan['approval_sha256'],'api_hard_cap':plan['api_budget'],
-            'bwin_fixture_inspection_cap':plan['bwin_events'],'llm_request_cap':plan['llm_max_iterations'],
+            'bwin_fixture_inspection_cap':plan['bwin_events'],'bwin_page_budget':plan.get('bwin_discovery',{}),
+            'llm_request_cap':plan['llm_max_iterations'],
             'cache_root':plan['cache_root'],
             'runtime_status':'NOT_CONFIGURED' if not plan['runtime_command'] else
                 'EXECUTABLE_AVAILABLE_NOT_EXECUTED' if shutil.which(plan['runtime_command'][0]) else 'EXECUTABLE_UNAVAILABLE',
@@ -184,7 +191,11 @@ def execute(plan, *, external=False, confirmation=None, resume=False):
                 if state['bwin_reserved']:raise ValueError('BWIN_INSPECTION_BUDGET_ALREADY_RESERVED')
                 state['bwin_reserved']=plan['bwin_events'];save('RESERVE_BWIN_BEFORE_START')
                 command=[root/'bwin_discovery.py','--input',canonical,'--top',str(plan['bwin_events']),
-                         '--output-dir',bwin.parent,'--headless']
+                         '--output-dir',bwin.parent,'--headless','--bwin-first-max-pages',
+                         str(plan.get('bwin_discovery',{}).get('bwin_first_pages',0)),
+                         '--max-country-pages',str(plan.get('bwin_discovery',{}).get('context_pages',0)),
+                         '--max-scrolls',str(plan.get('bwin_discovery',{}).get('max_scrolls',12))]
+                if plan['inputs']['bwin']:command.extend(['--catalog-snapshot',plan['inputs']['bwin']['path']])
                 if plan['browser_executable']:command.extend(['--browser-executable',plan['browser_executable']])
                 child(command,'bwin.log')
             stage('bwin',discover_bwin,bwin)
@@ -290,6 +301,8 @@ def main(argv=None):
     prep.add_argument('--plan',type=Path,required=True);prep.add_argument('--output-dir',type=Path,required=True)
     prep.add_argument('--root',type=Path,default=Path(__file__).resolve().parent);prep.add_argument('--history',type=int,default=20)
     prep.add_argument('--api-budget',type=int,default=0);prep.add_argument('--bwin-events',type=int,default=0)
+    prep.add_argument('--bwin-first-pages',type=int,default=0);prep.add_argument('--bwin-context-pages',type=int,default=0)
+    prep.add_argument('--bwin-max-scrolls',type=int,default=12)
     prep.add_argument('--llm-max-iterations',type=int,default=3);prep.add_argument('--llm-runtime-command-json')
     prep.add_argument('--fixtures-input',type=Path);prep.add_argument('--bwin-input',type=Path);prep.add_argument('--browser-executable')
     prep.add_argument('--preflight',type=Path,action='append',default=[])

@@ -152,16 +152,20 @@ def category_compatibility(fixture: dict, evidence: str) -> str:
 
 
 def senior_category_corroborated(fixture: dict, candidate_category: str,
-                                 competition_score: object) -> bool:
+                                 competition_score: object,
+                                 page_category: str | None = None) -> bool:
     """Close UNKNOWN only from a known senior competition corroborated by Bwin."""
     try:league_id=int(fixture.get('league_id'))
     except (TypeError,ValueError):return False
     expected=SENIOR_COMPETITION_IDENTITIES.get(league_id)
+    league=norm(fixture.get('league'))
+    generic_senior=bool(league and not FEMALE_RE.search(str(fixture.get('league'))) and not NON_ADULT_RE.search(str(fixture.get('league'))))
     return bool(candidate_category=='CATEGORY_UNCONFIRMED'
+        and page_category in (None,'CATEGORY_UNCONFIRMED','COMPATIBLE_OR_UNKNOWN')
         and str(fixture.get('category_status') or '').upper() in {'ELIGIBLE','ADULT'}
-        and expected and norm(fixture.get('league'))==expected
+        and ((expected and league==expected) or generic_senior)
         and isinstance(competition_score,(int,float)) and not isinstance(competition_score,bool)
-        and competition_score>=.82)
+        and competition_score>=.95)
 
 
 def competition_similarity(competition: str, evidence: str) -> float:
@@ -393,7 +397,7 @@ def read_candidates(path: Path, fixture_ids: list[int], top: int, include_past: 
     return ready, skipped
 
 
-def browser_collect_anchors(page, max_scrolls: int = 8) -> list[dict]:
+def browser_collect_anchors(page, max_scrolls: int = 8, trace: dict | None = None) -> list[dict]:
     """Read public event links while scrolling; stop after 3 *truly* stable samples.
 
     V0.3 compared the cardinality *after* collection against itself; this meant
@@ -407,8 +411,10 @@ def browser_collect_anchors(page, max_scrolls: int = 8) -> list[dict]:
       return {url:a.href, text:((scoped ? tile.innerText : a.innerText) || a.textContent || '').trim().replace(/\s+/g,' ').slice(0,600),
       title:a.title || '', aria:a.getAttribute('aria-label') || '', text_source:scoped ? 'SINGLE_EVENT_TILE' : 'EVENT_ANCHOR'};
     })"""
-    seen = {}
+    seen = {}; samples=[];load_more_clicks=0
     stable = 0
+    try:page.evaluate("window.scrollTo(0,0)")
+    except Exception:pass
     for scroll_number in range(max(0, max_scrolls) + 1):
         previous_count = len(seen)
         anchors = page.evaluate(snippet)
@@ -420,11 +426,40 @@ def browser_collect_anchors(page, max_scrolls: int = 8) -> list[dict]:
                 if event_id not in seen or len(text) > len(seen[event_id]["text"]):
                     seen[event_id] = {"bwin_event_id": event_id, "bwin_url": a["url"],
                                       "text": text, "text_source": a.get("text_source","EVENT_ANCHOR"), "text_observed_at_utc": captured_at_utc}
+        try:
+            geometry=page.evaluate(r"""() => {
+              const boxes=Array.from(document.querySelectorAll('body *')).filter(e=>{
+                const s=getComputedStyle(e);return e.scrollHeight>e.clientHeight+8 && /(auto|scroll)/.test(s.overflowY)
+              });
+              return {y:window.scrollY,h:window.innerHeight,full:Math.max(document.body.scrollHeight,document.documentElement.scrollHeight),
+                scrollable_containers:boxes.length,container_positions:boxes.slice(0,8).map(e=>({top:e.scrollTop,h:e.clientHeight,full:e.scrollHeight}))};
+            }""")
+        except Exception:geometry={}
+        at_bottom=bool(geometry and geometry.get('y',0)+geometry.get('h',0)>=geometry.get('full',1)-4)
+        samples.append({'iteration':scroll_number,'dom_anchors':len(anchors),'unique_events':len(seen),'at_bottom':at_bottom,**geometry})
         stable = stable + 1 if len(seen) == previous_count else 0
-        if stable >= 3 or scroll_number == max_scrolls:
+        no_scroll_surface=bool(geometry and geometry.get('full',0)<=geometry.get('h',0)+4 and not geometry.get('scrollable_containers',0))
+        if stable >= 5 and (at_bottom or no_scroll_surface) or scroll_number == max_scrolls:
             break
-        page.evaluate("window.scrollBy(0, Math.max(window.innerHeight * 1.6, 800))")
+        clicked=False
+        try:
+            clicked=bool(page.evaluate(r"""() => {
+              const labels=/^(mostrar|ver|cargar)\s+m[aá]s$/i;
+              const x=Array.from(document.querySelectorAll('button,a')).find(e=>labels.test((e.innerText||e.textContent||'').trim()) && e.offsetParent!==null);
+              if(x){x.click();return true} return false;
+            }"""))
+        except Exception:pass
+        if clicked:load_more_clicks+=1
+        try:
+            page.evaluate("""() => {window.scrollTo(0,Math.max(document.body.scrollHeight,document.documentElement.scrollHeight));
+              for(const e of document.querySelectorAll('body *')) {const s=getComputedStyle(e);
+                if(e.scrollHeight>e.clientHeight+8 && /(auto|scroll)/.test(s.overflowY)) e.scrollTop=e.scrollHeight;}}""")
+        except Exception:
+            page.evaluate("window.scrollBy(0, Math.max(window.innerHeight * 1.6, 800))")
         page.wait_for_timeout(550)
+    if trace is not None:trace.update({'scroll_samples':samples,'load_more_clicks':load_more_clicks,
+        'max_scrolls':max_scrolls,'termination':'MAX_SCROLLS' if samples and samples[-1]['iteration']==max_scrolls else
+        'STABLE_NO_SCROLL_SURFACE' if samples and samples[-1].get('full',0)<=samples[-1].get('h',0)+4 and not samples[-1].get('scrollable_containers',0) else 'STABLE_AT_BOTTOM'})
     return list(seen.values())
 
 
@@ -432,19 +467,28 @@ def fetch_catalog(browser, base_url: str, page_paths: list[str], max_scrolls: in
                   navigation_timeout: int) -> tuple[list[dict], list[dict]]:
     catalog, diagnostics = {}, []
     page = browser.new_page(locale="es-ES", timezone_id="Europe/Madrid", viewport={"width": 1440, "height": 900})
+    request_count=0;failed_requests=[]
+    if hasattr(page,'on'):
+        def requested(_request):
+            nonlocal request_count;request_count+=1
+        page.on('request',requested)
+        page.on('requestfailed',lambda request:failed_requests.append(str(request.url)[:300]))
     # One public page per discovery cycle.  Repeated paths from CLI, fallback
     # routing or country resolution must not trigger repeated navigation.
     for path in dict.fromkeys(page_paths):
         url = urljoin(base_url, path)
-        d = {"catalog_page": url, "status": "NOT_ATTEMPTED", "events_found": 0, "error": None}
+        d = {"catalog_page": url, "status": "NOT_ATTEMPTED", "events_found": 0, "error": None,
+             'started_at_utc':datetime.now(timezone.utc).isoformat()}
+        before_requests=request_count
         try:
             response = page.goto(url, wait_until="domcontentloaded", timeout=navigation_timeout)
             page.wait_for_timeout(1300)
             if response and response.status >= 400:
                 raise RuntimeError(f"HTTP {response.status}")
             # Do not click sportsbook controls: this stage is read-only.
-            found = browser_collect_anchors(page, max_scrolls=max_scrolls)
+            trace={};found = browser_collect_anchors(page, max_scrolls=max_scrolls,trace=trace)
             d["events_found"] = len(found)
+            d['collection_trace']=trace
             d["status"] = "OK" if found else "EMPTY_OR_BLOCKED"
             if not found:
                 d["error"] = f"Sin enlaces de eventos en DOM; título={page.title()[:120]!r}"
@@ -464,6 +508,8 @@ def fetch_catalog(browser, base_url: str, page_paths: list[str], max_scrolls: in
         except Exception as exc:
             d["status"] = "ERROR"
             d["error"] = f"{type(exc).__name__}: {exc}"[:500]
+        d['completed_at_utc']=datetime.now(timezone.utc).isoformat();d['requests_observed']=request_count-before_requests
+        d['failed_requests_observed']=failed_requests[-20:]
         diagnostics.append(d)
     page.close()
     return list(catalog.values()), diagnostics
@@ -574,6 +620,36 @@ def read_country_navigation(browser, base_url: str, nav_page_url: str, timeout: 
         page.close()
 
 
+def merge_catalog_events(catalog: list[dict], additions: list[dict]) -> list[dict]:
+    by_id={event['bwin_event_id']:event for event in catalog}
+    for event in additions:
+        key=event['bwin_event_id']
+        if key not in by_id:by_id[key]=event;continue
+        current=by_id[key]
+        current['source_pages']=list(dict.fromkeys(current.get('source_pages',[])+event.get('source_pages',[])))
+        if len(event.get('text',''))>len(current.get('text','')):
+            for field in ('text','text_source','text_observed_at_utc'):current[field]=event.get(field)
+    return list(by_id.values())
+
+
+def extend_catalog_bwin_first(browser,base_url,catalog,max_pages,scrolls,timeout):
+    """Visit actual navigation links without using API fixtures to choose them."""
+    if max_pages<=0:return catalog,[],{'navigation_links':0,'pages_selected':[]}
+    nav={};diagnostics=[]
+    for path in ('/es/sports/f%C3%BAtbol-4/apuestas/competiciones','/es/sports/f%C3%BAtbol-4/apuestas'):
+        links,diag=read_country_navigation(browser,base_url,urljoin(base_url,path),timeout);diagnostics.append(diag)
+        for label,url in links.items():nav.setdefault(label,url)
+    selected=[]
+    for label,url in sorted(nav.items()):
+        if url not in {x['url'] for x in selected}:selected.append({'label':label,'url':url})
+        if len(selected)>=max_pages:break
+    if selected:
+        additions,page_diags=fetch_catalog(browser,base_url,[x['url'] for x in selected],scrolls,timeout)
+        for d in page_diags:d['kind']='BWIN_FIRST_NAVIGATION_CATALOG'
+        diagnostics.extend(page_diags);catalog=merge_catalog_events(catalog,additions)
+    return catalog,diagnostics,{'navigation_links':len(nav),'pages_selected':selected}
+
+
 def extend_catalog_for_missing(browser, base_url: str, catalog: list[dict],
                                selected: list[dict], max_countries: int,
                                scrolls: int, timeout: int) -> tuple[list[dict], list[dict], dict]:
@@ -586,8 +662,11 @@ def extend_catalog_for_missing(browser, base_url: str, catalog: list[dict],
     if not missing or max_countries <= 0:
         return catalog, [], {"requested_countries": [], "country_urls_found": 0,
                              "country_url_sources": {}, "country_pages": {}}
-    wanted = list(dict.fromkeys(country_label(f.get("country", "")) for f in missing))
-    wanted = [x for x in wanted if x][:max_countries]
+    wanted=[]
+    for fixture in missing:
+        for label in (country_label(fixture.get('country','')),norm(fixture.get('league',''))):
+            if label and label not in {'world','mundo','international'} and label not in wanted:wanted.append(label)
+    wanted=wanted[:max_countries]
     nav = {}
     diagnostics = []
     for path in ('/es/sports/f%C3%BAtbol-4/apuestas/competiciones',
@@ -600,8 +679,12 @@ def extend_catalog_for_missing(browser, base_url: str, catalog: list[dict],
             nav.setdefault(k, url)
     resolved, sources = {}, {}
     for k in wanted:
-        if k in nav:
-            resolved[k], sources[k] = nav[k], 'BWIN_DOM_COUNTRY_LINK'
+        exact=nav.get(k)
+        if not exact:
+            scored=sorted(((competition_similarity(k,label),url,label) for label,url in nav.items()),reverse=True)
+            if scored and scored[0][0]>=.92 and (len(scored)==1 or scored[0][0]-scored[1][0]>=.05):exact=scored[0][1]
+        if exact:
+            resolved[k], sources[k] = exact, 'BWIN_DOM_CONTEXT_LINK'
         else:
             fallback = VERIFIED_PUBLIC_COUNTRY_PAGES.get(k)
             if fallback and is_country_page_url(fallback, base_url):
@@ -614,20 +697,10 @@ def extend_catalog_for_missing(browser, base_url: str, catalog: list[dict],
         for d in extra_diagnostics:
             d["kind"] = "TARGETED_COUNTRY_CATALOG"
         diagnostics.extend(extra_diagnostics)
-        by_id = {v["bwin_event_id"]: v for v in catalog}
-        for event in extra_catalog:
-            key = event["bwin_event_id"]
-            if key in by_id:
-                existing = by_id[key]
-                existing["source_pages"] = list(dict.fromkeys(existing.get("source_pages", []) + event.get("source_pages", [])))
-                if len(event.get("text", "")) > len(existing.get("text", "")):
-                    for field in ("text", "text_observed_at_utc"):
-                        existing[field] = event.get(field)
-            else:
-                by_id[key] = event
-        catalog = list(by_id.values())
+        catalog=merge_catalog_events(catalog,extra_catalog)
     return catalog, diagnostics, {
-        "requested_countries": wanted, "country_urls_found": len(urls),
+        "requested_countries": [country_label(f.get('country','')) for f in missing],
+        "requested_contexts": wanted, "country_urls_found": len(urls),
         "country_pages": resolved, "country_url_sources": sources,
     }
 
@@ -752,9 +825,13 @@ def inspect_event(browser, result: dict, fixture: dict, navigation_timeout: int)
         elif observation["countdown_minutes"] is not None:
             observation["time_evidence_type"] = "RELATIVE_CATALOG_COUNTDOWN"
         title = norm(observation["page_title"])
+        national_context=(norm(fixture.get('country')) in {'world','mundo','international'}
+                          and not NON_ADULT_RE.search(str(fixture.get('home',''))+' '+str(fixture.get('away',''))))
         # Title is a supporting check, not an absolute identity test.
-        title_ok = team_similarity(fixture["home"], title) >= 0.82 and team_similarity(fixture["away"], title) >= 0.82
+        title_ok = (team_similarity(fixture["home"], title,national_context=national_context) >= 0.82
+                    and team_similarity(fixture["away"], title,national_context=national_context) >= 0.82)
         observation["title_teams_match"] = title_ok
+        observation['page_category_compatibility']=category_compatibility(fixture,observation['page_title'])
         if clock_conflict:
             observation['identity_status'] = 'CONFLICTING_TIME_SOURCES_REVIEW'
         elif observation["event_id_from_url"] != result["bwin_event_id"]:
@@ -815,7 +892,8 @@ def summarize(fixture: dict, possible: list[dict], browser, timeout: int, inspec
         competition_score = observed.get("competition_match_score")
         competition_ok = (isinstance(competition_score, (int, float)) and
                           not isinstance(competition_score, bool) and competition_score >= 0.82)
-        senior_inferred=senior_category_corroborated(fixture,winner.get('category_compatibility'),competition_score)
+        senior_inferred=senior_category_corroborated(fixture,winner.get('category_compatibility'),competition_score,
+            observed.get('page_category_compatibility'))
         category_ok = ((expected_gender == "M" and winner.get("category_compatibility") == "COMPATIBLE_OR_UNKNOWN") or
                        (expected_gender == "F" and winner.get("category_compatibility") == "FEMALE_CORROBORATED") or senior_inferred)
         if senior_inferred:observed['category_evidence']='SENIOR_COMPETITION_CORROBORATED'
@@ -910,6 +988,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--max-scrolls", type=int, default=12)
     parser.add_argument("--no-country-discovery", action="store_true", help="Desactivar el segundo barrido por país")
     parser.add_argument("--max-country-pages", type=int, default=8, help="Máximo de páginas nacionales adicionales (default: 8)")
+    parser.add_argument('--bwin-first-max-pages',type=int,default=0,help='Máximo de páginas reales de navegación para catálogo Bwin-first')
     parser.add_argument("--timeout", type=int, default=25000, help="Timeout navegación en milisegundos")
     parser.add_argument("--no-inspect", action="store_true", help="Solo identificar links, sin abrir eventos")
     parser.add_argument("--directed-pilot", action="store_true", help="Piloto dirigido: exige 1-10 --fixture-id y limita páginas nacionales")
@@ -926,6 +1005,10 @@ def main(argv: list[str] | None = None) -> int:
         parser.error('--directed-pilot exige entre 1 y 10 --fixture-id distintos')
     if args.directed_pilot and args.max_country_pages>10:
         parser.error('--directed-pilot limita --max-country-pages a 10')
+    if args.bwin_first_max_pages<0 or (args.directed_pilot and args.bwin_first_max_pages>10):
+        parser.error('--bwin-first-max-pages inválido; en piloto se permiten 0-10')
+    if args.directed_pilot and args.bwin_first_max_pages+args.max_country_pages>10:
+        parser.error('el presupuesto combinado de páginas Bwin-first y dirigidas no puede superar 10')
     if args.inspection_retries<0 or (args.directed_pilot and args.inspection_retries>2):
         parser.error('--inspection-retries inválido; en piloto se permiten 0-2')
     now = datetime.now(timezone.utc).astimezone(TZ)
@@ -957,12 +1040,17 @@ def main(argv: list[str] | None = None) -> int:
                 archived=merge_bwin_snapshots(args.catalog_snapshot)
                 byid={e['bwin_event_id']:e for e in archived['events']}
                 byid.update({e['bwin_event_id']:e for e in catalog});catalog=list(byid.values())
-            extension_info = {"requested_countries": [], "country_urls_found": 0}
+            catalog,bwin_first_pages,bwin_first_info=extend_catalog_bwin_first(browser,args.base_url,catalog,
+                args.bwin_first_max_pages,args.max_scrolls,args.timeout)
+            pages.extend(bwin_first_pages)
+            extension_info = {"requested_countries": [], "country_urls_found": 0,
+                              'bwin_first':bwin_first_info}
             if not args.no_country_discovery:
                 catalog, extended_pages, extension_info = extend_catalog_for_missing(
                     browser, args.base_url, catalog, chosen, args.max_country_pages,
                     args.max_scrolls, args.timeout)
                 pages.extend(extended_pages)
+                extension_info['bwin_first']=bwin_first_info
             print(f"Eventos observados en el catálogo: {len(catalog)}")
             if not args.no_country_discovery:
                 print(f"Búsqueda por países: {extension_info.get('requested_countries', [])} | enlaces nacionales: {extension_info.get('country_urls_found', 0)}")
