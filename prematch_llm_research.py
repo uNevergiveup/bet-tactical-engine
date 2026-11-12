@@ -71,13 +71,14 @@ def research_packet(observations, targets, cutoff, max_iterations=3):
               'holdout_policy':'SEALED_GLOBAL_CHRONOLOGICAL_30_PERCENT_UNIQUE_FIXTURES',
               'holdout_boundary_utc':boundary.isoformat(),
               'instructions':'Propose falsifiable associations; cite training fixture IDs; never claim validation or betting value.'}
-    sealed = {'training_sha256':digest(public),'holdout':holdout,'all_observations_sha256':digest(observations)}
+    sealed = {'training_sha256':digest(public),'holdout':holdout,'holdout_sha256':digest(holdout),
+              'all_observations_sha256':digest(observations)}
     return public,sealed
 
 
 def validate_hypotheses(packet, sealed, proposals, min_group=3):
     """Preserve rejected proposals; training and holdout adjusted across all tests."""
-    if digest(packet) != sealed['training_sha256']:
+    if digest(packet) != sealed['training_sha256'] or digest(sealed['holdout']) != sealed['holdout_sha256']:
         raise ValueError('LLM_PACKET_BINDING_MISMATCH')
     if min_group < 3:
         raise ValueError('LLM_MINIMUM_GROUP_CANNOT_BE_RELAXED')
@@ -134,6 +135,7 @@ def validate_hypotheses(packet, sealed, proposals, min_group=3):
 
 def write_pending_runtime(output, packet, base_ranking):
     """Required artifacts are explicit pending records, never invented research."""
+    require_all_targets(packet,base_ranking)
     out=Path(output);out.mkdir(parents=True,exist_ok=True)
     files={'llm_pattern_hypotheses.json':{'status':'RLM_PENDING','hypotheses':[], 'training_packet_sha256':digest(packet)},
            'pattern_validation.json':{'status':'PENDING_LLM_RUNTIME','results':[]},
@@ -151,6 +153,13 @@ def hypothesis_signature(proposal):
     return digest(values)
 
 
+def require_all_targets(packet, base_ranking):
+    target_ids = [t['fixture_id'] for t in packet['targets']]
+    ranking_ids = [r['fixture_id'] for r in base_ranking]
+    if len(set(ranking_ids)) != len(ranking_ids) or set(ranking_ids) != set(target_ids):
+        raise ValueError('LLM_RANKING_MUST_RETAIN_ALL_TARGETS')
+
+
 def run_iterative_research(packet, sealed, base_ranking, researcher, runtime_identity):
     """Run a real caller-supplied LLM adapter; never expose holdout feedback.
 
@@ -161,12 +170,9 @@ def run_iterative_research(packet, sealed, base_ranking, researcher, runtime_ide
     """
     if not callable(researcher) or not runtime_identity:
         raise ValueError('REAL_LLM_ADAPTER_AND_IDENTITY_REQUIRED')
-    if digest(packet) != sealed['training_sha256']:
+    if digest(packet) != sealed['training_sha256'] or digest(sealed['holdout']) != sealed['holdout_sha256']:
         raise ValueError('LLM_PACKET_BINDING_MISMATCH')
-    target_ids = [t['fixture_id'] for t in packet['targets']]
-    ranking_ids = [r['fixture_id'] for r in base_ranking]
-    if len(set(ranking_ids)) != len(ranking_ids) or set(ranking_ids) != set(target_ids):
-        raise ValueError('LLM_RANKING_MUST_RETAIN_ALL_TARGETS')
+    require_all_targets(packet,base_ranking)
     proposals=[]; iterations=[]; seen=set(); stop='ITERATION_LIMIT'
     for number in range(1, packet['max_iterations']+1):
         request={'packet':copy.deepcopy(packet),'iteration':number,
@@ -186,7 +192,7 @@ def run_iterative_research(packet, sealed, base_ranking, researcher, runtime_ide
             if not proposal['novel_variables']:continue
             fresh+=1
             segment=proposal.get('segment',{})
-            if set(segment)!=set(SEGMENT):continue
+            if not isinstance(segment,dict) or set(segment)!=set(SEGMENT):continue
             train=[r for r in packet['training_observations'] if all(r.get(k)==v for k,v in segment.items())]
             if (not finite(proposal.get('threshold')) or not proposal.get('evidence_fixture_ids')
                 or not set(proposal['evidence_fixture_ids']) <= {r['fixture_id'] for r in train}):continue
@@ -276,10 +282,19 @@ def main(argv=None):
                     'max_iterations':args.max_iterations,'holdout_not_sent':True}
         with (args.output_dir/'runtime_dependency.json').open('x') as handle:json.dump(dependency,handle,indent=2)
         print(json.dumps(dependency));return 2
+    receipts=args.output_dir.with_name(args.output_dir.name+'_runtime_receipts')
+    receipts.mkdir(parents=True,exist_ok=False)
     def adapter(request):
+        prefix=receipts/('iteration_'+str(request['iteration']))
+        with prefix.with_suffix('.request.json').open('x') as handle:
+            json.dump(request,handle,ensure_ascii=False,indent=2)
         result=subprocess.run(command,input=json.dumps(request,ensure_ascii=False),text=True,
                               stdout=subprocess.PIPE,stderr=subprocess.PIPE,
                               timeout=args.runtime_timeout,check=False)
+        with prefix.with_suffix('.response.txt').open('x') as handle:handle.write(result.stdout)
+        with prefix.with_suffix('.execution.json').open('x') as handle:
+            json.dump({'exit_code':result.returncode,'request_sha256':digest(request),
+                       'command_sha256':digest(command)},handle,indent=2)
         if result.returncode:raise RuntimeError('LLM_RUNTIME_FAILED_EXIT_'+str(result.returncode))
         response=json.loads(result.stdout)
         response['runtime_receipt']={'executable':shutil.which(command[0]),

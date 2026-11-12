@@ -43,6 +43,10 @@ class LLMResearchTests(unittest.TestCase):
         self.packet['training_observations'][0]['metrics']['own.corners']=999
         with self.assertRaises(ValueError):validate_hypotheses(self.packet,self.sealed,[self.h])
 
+    def test_holdout_tampering_blocks_validation(self):
+        self.sealed['holdout'][0]['metrics']['own.corners']=999
+        with self.assertRaises(ValueError):validate_hypotheses(self.packet,self.sealed,[self.h])
+
     def test_unavailable_runtime_never_fabricates_hypotheses_or_final_ranking(self):
         with tempfile.TemporaryDirectory() as td:
             write_pending_runtime(td,self.packet,[{'fixture_id':99}])
