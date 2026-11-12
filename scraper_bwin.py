@@ -563,9 +563,13 @@ def main(argv=None):
     parser.add_argument('--intentos', type=int, default=MAX_INTENTOS_SCRAPER)
     parser.add_argument('--pausar', action='store_true')
     parser.add_argument('--sin-pestanas', action='store_true')
+    parser.add_argument('--browser-executable', default=os.getenv('BWIN_BROWSER_EXECUTABLE'),
+                        help='Chrome/Chromium instalado; también BWIN_BROWSER_EXECUTABLE')
     args = parser.parse_args(argv)
     if args.intentos < 1:
         parser.error('--intentos debe ser positivo')
+    if args.browser_executable and not Path(args.browser_executable).is_file():
+        parser.error('--browser-executable no existe')
     info = obtener_info_url(args.url)
     inputs, diagnostics, failures = rutas_salida_evento(info)
     nombre = f"cuotas_bwin_{info['event_id']}"
@@ -581,7 +585,9 @@ def main(argv=None):
                            "destino_cuotas": str(txt), "intento": intento}
             try:
                 print(f"\nINTENTO {intento}/{args.intentos}", flush=True)
-                browser = p.chromium.launch(headless=HEADLESS, slow_mo=SLOW_MO)
+                launch_options = dict(headless=HEADLESS, slow_mo=SLOW_MO)
+                if args.browser_executable:launch_options['executable_path'] = args.browser_executable
+                browser = p.chromium.launch(**launch_options)
                 context = browser.new_context(locale='es-ES', timezone_id='Europe/Madrid',
                                               viewport={"width": 1440, "height": 2400})
                 context.route(
