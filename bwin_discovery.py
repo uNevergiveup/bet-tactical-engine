@@ -198,6 +198,32 @@ def countdown_corrob(result: dict, fixture_kickoff: datetime | None) -> dict:
     })
     return out
 
+def displayed_header_kickoff(evidence: dict) -> datetime | None:
+    """Resolve only an event-scoped PREMATCH clock with an observed date anchor."""
+    if evidence.get('browser_timezone') != 'Europe/Madrid' or evidence.get('prematch_header') is not True:
+        return None
+    try:
+        start = datetime.fromisoformat(evidence['capture_started_at_utc'].replace('Z','+00:00'))
+        end = datetime.fromisoformat(evidence['captured_at_utc'].replace('Z','+00:00'))
+        if not start.tzinfo or not end.tzinfo or not 0 <= (end-start).total_seconds() <= 120:
+            return None
+        start = start.astimezone(TZ); end = end.astimezone(TZ)
+        if start.date() != end.date():return None
+        label = norm(evidence.get('date_label',''))
+        if label not in ('hoy','manana'):return None
+        clock = evidence.get('time_label','').strip()
+        if not re.fullmatch(r'\d{2}:\d{2}',clock):return None
+        hour,minute = map(int,clock.split(':'))
+        date = end.date() + timedelta(days=int(label=='manana'))
+        kickoff = datetime(date.year,date.month,date.day,hour,minute,tzinfo=TZ)
+        # A displayed clock without an offset cannot disambiguate a DST fold.
+        if kickoff.replace(fold=0).utcoffset() != kickoff.replace(fold=1).utcoffset():return None
+        if kickoff <= end:return None
+        return kickoff
+    except (KeyError,ValueError,TypeError,AttributeError):
+        return None
+
+
 def event_absolute_kickoff(raw_html: str) -> datetime | None:
     """Parse a single SportsEvent JSON-LD startDate, never unrelated sidebar dates."""
     event_starts = set()
@@ -613,6 +639,7 @@ def inspect_event(browser, result: dict, fixture: dict, navigation_timeout: int)
                    "is_live": None, "identity_status": "NOT_VERIFIED", "time_evidence_type": "NONE",
                    "competition_match_score": None}
     try:
+        capture_started = datetime.now(timezone.utc).isoformat()
         response = page.goto(result["bwin_url"], wait_until="domcontentloaded", timeout=navigation_timeout)
         page.wait_for_timeout(1700)
         if response and response.status >= 400:
@@ -630,6 +657,17 @@ def inspect_event(browser, result: dict, fixture: dict, navigation_timeout: int)
         observation["event_id_from_url"] = extract_event_id(page.url)
         body = page.locator("body").inner_text(timeout=10000)
         markup = page.content()
+        header = page.locator('ms-event-details-main ms-prematch-scoreboard .event-time')
+        header_evidence = None
+        if header.count() == 1 and header.locator('.date').count() == 1 and header.locator('.time').count() == 1:
+            header_evidence = {'prematch_header': True,
+                'browser_timezone':page.evaluate('Intl.DateTimeFormat().resolvedOptions().timeZone'),
+                'date_label':header.locator('.date').inner_text(),
+                'time_label':header.locator('.time').inner_text(),
+                'capture_started_at_utc':capture_started,
+                'captured_at_utc':datetime.now(timezone.utc).isoformat(),
+                'selector':'ms-event-details-main ms-prematch-scoreboard .event-time'}
+        observation['displayed_time_evidence'] = header_evidence
         observation["observed_catalog"] = browser_collect_anchors(page,0)
         observation["market_headings"] = market_indicators(body)
         observation["market_heading_families"] = sum(x["status"].startswith("HEADING_")
@@ -641,20 +679,26 @@ def inspect_event(browser, result: dict, fixture: dict, navigation_timeout: int)
         # Never infer the current event is live from global body text.
         observation["is_live"] = None
         observed_start = event_absolute_kickoff(markup)
+        displayed_start = displayed_header_kickoff(header_evidence or {})
+        clock_conflict = bool(observed_start and displayed_start and observed_start != displayed_start)
+        time_source = 'ABSOLUTE_JSON_LD' if observed_start else 'SCOPED_PREMATCH_HEADER'
+        if not observed_start:observed_start = displayed_start
         if observed_start:
             observation["event_start_machine_readable"] = observed_start.isoformat()
         candidate_start = local_kickoff(fixture["kickoff_madrid"])
         observation.update(countdown_corrob(result, candidate_start))
         if observed_start and candidate_start:
             observation["kickoff_difference_minutes"] = round(abs((candidate_start - observed_start).total_seconds()) / 60, 1)
-            observation["time_evidence_type"] = "ABSOLUTE_JSON_LD"
+            observation["time_evidence_type"] = time_source
         elif observation["countdown_minutes"] is not None:
             observation["time_evidence_type"] = "RELATIVE_CATALOG_COUNTDOWN"
         title = norm(observation["page_title"])
         # Title is a supporting check, not an absolute identity test.
         title_ok = team_similarity(fixture["home"], title) >= 0.82 and team_similarity(fixture["away"], title) >= 0.82
         observation["title_teams_match"] = title_ok
-        if observation["event_id_from_url"] != result["bwin_event_id"]:
+        if clock_conflict:
+            observation['identity_status'] = 'CONFLICTING_TIME_SOURCES_REVIEW'
+        elif observation["event_id_from_url"] != result["bwin_event_id"]:
             observation["identity_status"] = "EVENT_ID_CHANGED_REVIEW"
         elif not title_ok:
             observation["identity_status"] = "TITLE_MISMATCH_REVIEW"
@@ -739,6 +783,8 @@ def reconcile_catalog_clocks(matches,catalog):
         if LIVE_RE.search(sample.get('text','')):
             inspection['is_live']=True
             continue
+        if inspection.get('time_evidence_type') in ('ABSOLUTE_JSON_LD','SCOPED_PREMATCH_HEADER'):
+            continue  # A weaker catalog countdown cannot replace the event clock.
         clock=countdown_corrob(sample,local_kickoff(row.get('kickoff_madrid')))
         if clock.get('countdown_minutes') is not None:
             inspection.update(clock)

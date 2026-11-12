@@ -3,12 +3,34 @@ import argparse
 import json
 import tempfile
 import unittest
+import copy
 from pathlib import Path
 from unittest.mock import patch
 import prematch_phase1 as phase
 
 
 class AcquisitionTests(unittest.TestCase):
+    def test_scoped_prematch_clock_resolves_today_and_tomorrow(self):
+        from bwin_discovery import displayed_header_kickoff
+        evidence={'prematch_header':True,'browser_timezone':'Europe/Madrid','date_label':'Hoy','time_label':'18:45',
+                  'capture_started_at_utc':'2026-11-12T02:00:00Z','captured_at_utc':'2026-11-12T02:00:10Z'}
+        self.assertEqual(displayed_header_kickoff(evidence).isoformat(),'2026-11-12T18:45:00+01:00')
+        evidence.update(date_label='Mañana',time_label='01:00')
+        self.assertEqual(displayed_header_kickoff(evidence).isoformat(),'2026-11-13T01:00:00+01:00')
+
+    def test_scoped_clock_rejects_ambiguous_or_unanchored_evidence(self):
+        from bwin_discovery import displayed_header_kickoff
+        good={'prematch_header':True,'browser_timezone':'Europe/Madrid','date_label':'Hoy','time_label':'18:45',
+              'capture_started_at_utc':'2026-11-12T02:00:00Z','captured_at_utc':'2026-11-12T02:00:10Z'}
+        bad=[{'browser_timezone':'UTC'},{'prematch_header':False},{'date_label':'12/11'},
+             {'time_label':'25:45'},{'time_label':'02:00'},
+             {'capture_started_at_utc':'2026-11-11T22:59:59Z','captured_at_utc':'2026-11-11T23:00:01Z'},
+             {'capture_started_at_utc':'2026-10-25T00:00:00Z','captured_at_utc':'2026-10-25T00:00:10Z','time_label':'02:30'}]
+        for change in bad:
+            with self.subTest(change=change):
+                evidence=copy.deepcopy(good);evidence.update(change)
+                self.assertIsNone(displayed_header_kickoff(evidence))
+
     def test_provider_rate_limit_body_and_retry_after_are_respected(self):
         for status,headers,payload,expected_pause in [(200,{}, {'errors':{'rateLimit':'Too many requests'}},60),
                                                       (429,{'Retry-After':'120'},{},120)]:

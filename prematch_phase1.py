@@ -719,6 +719,11 @@ def identity_map(fixtures_doc: dict[str, Any], bwin_doc: dict[str, Any]) -> dict
         if status == "IDENTITY_VERIFIED_AUTOMATICALLY" and identity == "NAME_AND_ABSOLUTE_TIME_MATCH":
             inspection = observed.get("inspection") or {}
             bwin_start = parse_dt(inspection.get("event_start_machine_readable"))
+            if inspection.get('time_evidence_type') == 'SCOPED_PREMATCH_HEADER':
+                from bwin_discovery import displayed_header_kickoff
+                rebuilt = displayed_header_kickoff(inspection.get('displayed_time_evidence') or {})
+                if rebuilt is None or rebuilt != bwin_start:
+                    bwin_start = None
             api_start = parse_dt(fixture.get("kickoff_utc") or fixture.get("kickoff_madrid"))
             event_same = str(inspection.get("event_id_from_url") or "") == event
             time_diff = (abs((bwin_start - api_start).total_seconds()) / 60
