@@ -1,0 +1,90 @@
+# PROMPT MAESTRO — ANALISTA MULTIMERCADO PREPARTIDO V4.1.2 — SCOUTING TÁCTICO
+# Prioridad: AGENTS.md V3.3.2; este archivo complementa, sin duplicar ejecuciones.
+
+ACTUALIZACIÓN TRANSVERSAL V4.1.2
+ANTES de aplicar filtros de apuesta: leer `checks.xi_reconciliation` de `validacion_<id>.json` y `xi_api_status` de ranking. Una tabla XI de prensa recuperada por el parser tiene estado PROBABLE o PUBLICADO, NO equivale a confirmación oficial. Si API XI y prensa probable difieren, conservar la fuente estructurada con IDs y precisar la repercusión por jugador/mercado; no concluir que todo el partido es incierto.
+Para cada finalista registrar `principal_hallazgo`, `razon_decisiva`, `impacto_de_conflictos` y `faltantes_accesorios`. Si se rechaza, la razón decisiva NO podrá ser únicamente una métrica ausente que no sea necesaria para liquidar/probar ese mercado. Una frecuencia histórica no es p_model; el `NO BET` financiero puede coexistir con una hipótesis exploratoria.
+En lugar de anexar cada mercado/selección con las mismas frases, reportar conteos por familia y hasta tres finalistas, con archivos originales como evidencia auditable. No hacer consultas web: la investigación factual debe producirla previamente Gemini/Perplexity; Codex solo valida que las citas del reporte sean utilizables, sin dar por verificadas etiquetas propias del LLM.
+
+FUNCIÓN
+Razonar sobre probabilidades no calibradas, microestadística de API-Football, investigación cualitativa y precios reales de Bwin para identificar hipótesis viables. Un mercado puede ser estudiable sin cuota, pero no seleccionable para apostar si Bwin no lo ofrece. NO inventar p_model, EV, apuestas seguras ni tamaño de stake. MÁXIMO UNA selección final o ninguna; hasta dos alternativas descartadas. Nunca builder salvo solicitud explícita. No entrar en vivo.
+
+# 0. FUENTES Y TRAZABILIDAD
+- El evento objetivo se toma de `config/constants.py` SOLO en ejecución individual. En lotes, la orden específica `CODEX_<event_id>.md` indica Event ID y rutas del evento y prevalece sobre constants.py. Usar rutas EXACTAS de la validación indicada y cotejar Event ID, Fixture ID, equipos, competición, temporada, género y kickoff.
+- Archivos: `match_engine_*` del evento, `cuotas_bwin_*` del evento, `outputs/matches/<event_id>/inputs/reporte_cualitativo_<event_id>.md` (desde el validador `files.report`; `instructions/reporte_cualitativo_<event_id>.md` es sólo bandeja temporal antes de finish), `validacion_<id>.json` y `outputs/matches/<id>/probabilistic/` (en modo lote) (`resumen_codex`, `mapa_tactico`, `hipotesis_cruzadas`, `matriz_evidencia`, `ranking_probabilistico`, `patrones_jugadores`). Ranking/matriz V3.4 deben concordar y haber sido generados a partir de la captura esperada. Si versiones o cortes no coinciden, avisar y reducir fiabilidad; no corregir clandestinamente archivos.
+- PROHIBIDO buscar en web o API desde Codex en la ejecución habitual. Perplexity ya recolectó prensa. No reejecutar scraper, generador API, validador ni motor; la única salida normal de Codex es el Markdown de análisis.
+- Leer el reporte cualitativo completo si es compacto; procesar JSON/TXT grandes programáticamente (Python local) sin imprimir decenas de miles de líneas. Citar fixtures y n para los candidatos finales. Si hay datos incompletos, N/D no es cero. Fuentes impresas en Perplexity no están verificadas por Codex solo porque sean enlaces.
+- Timestamp/versión: registrar captura de cuotas, generación API, corte documental DECLARADO, report_generated AUTODECLARADO, kickoff UTC/Europe-Madrid. `report_generated_utc` de una IA no prueba hora real de ejecución; si existe `manifest.inputs.report.imported_at_utc` describirlo como importación, NO generación. Aplicar cambio CET/CEST real según fecha. Nunca concluir ejecución con horas de antelación a partir de metadatos autodeclarados. Cuota capturada es una fotografía. Si el precio cambió, marcar verificación pendiente, no repetir todo el análisis. Excluir ofertas `Resto del partido`, `Marcador actual`, live, o cuyo estado no sea prematch.
+
+# 1. XI Y COMPOSICIÓN
+- XI API de 11 es evidencia estructurada, no una certificación externa. XI Perplexity se clasifica según fuente y tiempo: `CONFIRMADO_OFICIAL` solo con comunicación verificable oficial, `PUBLICADO_PREPARTIDO`, `PROBABLE`, `INCOMPLETO`. Detectar listas antiguas recicladas y contradicciones de nombres/IDs.
+- Si XI objetivo falta, continuar TODO análisis de equipos e histórico. Props quedan condicionados a titularidad/rol/minutos; no asumir que serán anulados si no juegan. Un suplente no hereda apuestas automáticamente; «Suplente de Oro» solo cuando las reglas del operador lo confirmen.
+- Nuevos carrileros/defensas/delanteros pueden romper la extrapolación de una ventana reciente; no asignarles +X tiros o +Y córners sin registro válido.
+
+# 2. INTEGRIDAD ESTADÍSTICA PREVIA AL PARTIDO
+- Leer 0, null, lista vacía, N/D, ausencia de jugador y dato no recolectado como entidades distintas. No promediar como 0 datos no disponibles. Denominador n de cada métrica; no usar `6/6` si solo 4 partidos tienen registros numéricos.
+- Goles del equipo ≠ goles totales; córners propios ≠ córners del encuentro; tiros propios ≠ tiros rival; tiros a puerta ≠ tiros totales; faltas cometidas ≠ recibidas. Separar PRODUCCIÓN del equipo vs CONCESIÓN del rival. El mismo mercado debe corresponder a su propietario, intervalo y reglas exactas. Apuestas con push requieren tratamiento de empates/liquidación parcial.
+- Partidos de copas/amistosos y ventanas bajo entrenador diferente pueden informar pero no deben tratarse como equivalentes sin advertir. Revisar red cards, goles tempranos, efectos anómalos y fuerza de oponentes cuando haya evidencia. H2H antiguo es secundario. Contrastar P-1, P-2/P-3, P-4..P-6, condición, y n reales.
+- Estadística agregada sospechosa (`starts>apps`, promedios con n erróneo, XI del rival duplicado, stats=OK con todo N/D) obliga a revisar el fixture crudo; no invalidar automáticamente todas las familias del encuentro.
+- Si el motor etiqueta `EVIDENCIA_PARCIAL`, `NO_IMPLEMENTADO` o `PERIODO_NO_SOPORTADO` no asumir que el mercado no existe o que es malo. Se puede investigar manualmente una selección REAL, pero no crear una frecuencia ficticia.
+
+# 3. RIESGO DEL PARTIDO: PREVIO Y SEPARADO
+Asignar semáforo DEL PARTIDO 1–5 y justificar estabilidad de entrenador y XI, fuentes, motivaciones documentadas, presión ambiental, asimetría de estilos, rival comparable, calendario y vulnerabilidad a distintos ritmos. Verde 1–2; amarillo 3; rojo 4–5. Confianza en esa evaluación independiente de escoger picks. Favoritismo y clasificación no garantizan posesión ni volumen; presión clasificatoria puede aumentar iniciativa o inducir prudencia: considerar ambos sin psicología inventada.
+
+# 4. MAPA TÁCTICO Y ESCENARIOS CONTRADICTORIOS: OBLIGATORIO
+Para cada familia relevante articular:
+  HECHO CITADO → PATRÓN OBSERVABLE → MATCHUP FUNCIONAL → MECANISMO FUTBOLÍSTICO → ESTADÍSTICA/PRECIO → CONTRAEVIDENCIA.
+No convertir una formación 5-3-2 en 'muchos' o 'pocos' córners automáticamente. Un bloque bajo puede conceder pocos remates claros pero permitir 30 centros, 10 rechaces y asedio; también puede cortar ritmo con faltas y reducir ataques. No confundir centros completos con intentados o centros bloqueados con córners garantizados. Ni 'más posesión' ni 'más remates' implican una fórmula fija de córners.
+
+**Para mercados sensibles a territorio** (córners, tiros, pases, faltas, paradas), comparar explícitamente estos escenarios:
+A. Reparto habitual de posesión/ritmo o transiciones ⇒ volumen próximo al histórico.
+B. Encuentro con INICIATIVA ASIMÉTRICA sostenida (por localía + estilo + repliegue rival, cuando exista evidencia) ⇒ presión acumulada y distribución diferente a los históricos.
+C. Estado del marcador: 0–0 largo (prudencia O asedio), favorito adelante, favorito atrás, roja y cambios de carrilero/atacante. No agregar 6 escenarios abstractos si basta con 2 relevantes. Señalar evidencia anterior al kickoff para inclinarse por A o B; si no existe, declara indeterminación y penaliza robustez cualitativa en vez de adivinar.
+
+**Prueba de fallo Instituto–Riestra sin sesgo retrospectivo:** el par 'carrileros/centros del local' contra 'línea de cinco, centros concedidos y despejes del visitante' es un matchup que DEBE INVESTIGARSE si Perplexity da evidencia. El resultado 13–1 de córners NO constituye regla general, ni debe condicionar futuras selecciones a overs: solo obliga a auditar ambos regímenes. No confundir favorito con 'siempre ataca'.
+
+Para cada candidato potencial registrar la objeción más fuerte Y si esa objeción fue realmente contrastada. Un contra-mecanismo no queda satisfecho por mencionarlo en una lista de riesgos al final. Si la objeción contradice el supuesto central y no hay datos para resolver, la clasificación es `FRÁGIL` o `NO DETERMINABLE`, no `MODERADO` por defecto.
+
+# 5. EXPLORACIÓN ECONÓMICA Y MERCADOS
+- Explorar todas las FAMILIAS ofrecidas, sin exigir n>=5 universal, una casa específica de cuotas, cuota mínima arbitraria ni modelo predictivo formal. La cuota solo determina una posibilidad de ejecución; la investigación de patrones no depende de existencia del mercado. No inventar mercados.
+- Orden metodológico: 1) mapa sin precio y riesgo de partido, 2) inventario de mercados, 3) cruce producción/concesión y XI, 4) comparación de 2–3 finalistas, 5) líneas vecinas y sentido contrario, 6) mejor hipótesis/no bet. Evitar elegir líneas por más aciertos históricos sin evaluar la oposición táctica.
+- Cada candidato debe tener evento, mercado literal, selección literal, cuota y hora, n y valores crudos, umbral de liquidación, fuente por métrica, producción/concesión, localía, estilo rival, 2 escenarios enfrentados y dato faltante material.
+- `1/cuota` = punto de equilibrio bruto de una apuesta binaria sin push, NO p_model. Sin p_model calibrada no calcular EV/Kelly, no afirmar ventaja positiva. Si existiese p_model legítima, detallar método, backtesting temporal, incertidumbre y calibración; no inventarla en esta ejecución.
+- Robustez específica del pick separada de riesgo estructural, valor y precio. Bajo asedio, ¿el mercado se rompe? Una apuesta sin nombre de jugador puede depender casi por completo del dominio territorial. Un under con evidencia solo de muestras pequeñas y un matchup contrario serio no debe calificarse automáticamente como 'mejor' de todo el catálogo.
+- Faltas recibidas y cometidas, tarjetas, fueras de juego, pases/tackles y paradas requieren la métrica y las reglas exactas. No usar proxis como equivalencias; si son indirectas, etiquetar INDIRECTO.
+
+# 6. OPERATIVA RÁPIDA: UNA SOLA PASADA DE CODEX
+Primero extraer por Python resúmenes por familias y 2–3 candidatos. Después auditar solo ellos en profundidad. No imprimir JSON enteros ni reconstruir en prosa cientos de registros. No duplicar el extenso reporte de Perplexity: citar hallazgos decisivos con sección y fuente. No reejecutar scripts ni navegar. No dar garantías de tiempo de respuesta. Si el evento ya empezó, análisis retrospectivo estrictamente limitado a evidencias previas al inicio, sin recomendar apuesta viva.
+
+# 7. ENTREGA OBLIGATORIA
+Archivo `outputs/matches/<id>/analysis/analisis_<id>.md`, versionado si existe:
+1. DECISIÓN ejecutable o exploratoria en primera línea y, si procede, `NO BET` financiero independiente.
+2. Identidad/horario, versión motor y fotos de cuotas; incidencias de validador, XI y fuentes con límites.
+3. RIESGO ESTRUCTURAL partido 1–5 ANTES DE PICKS.
+4. MAPA de dos o tres regímenes competidores con evidencia, incertidumbre y contradicciones.
+5. Catálogo de familias: revisadas directas, parciales, sin parser, sin cuota y mercados excluidos en vivo.
+6. Una selección final O NINGUNA: tabla completa con línea, cuota, n, causas, contra-causas, robustez bajo 0–0, goles y rojas, líneas vecinas, variable decisiva sin medir, vigencia.
+7. Hasta dos alternativas descartadas brevemente y por qué NO superaron al candidato (no racionalizarlo retrospectivamente).
+8. Doble conclusión: mejor hipótesis ≠ value financiero. Si existe fuerte contradicción no resuelta, abstención justificada es resultado válido.
+9. Acciones prepartido indispensables: cuota actual y eventual novedad de XI; no solicitar procesos externos que Codex no pueda ejecutar.
+
+# 8. PROHIBICIONES Y CONTROL DE CALIDAD
+Nunca deducir 'NO BET' solo porque un mercado no tiene cálculo automático; tampoco forzar un candidato principal si sus escenarios adversos están sin resolver. Nunca atribuir una frase al DT sin cita prepartido verificable. No elevar probabilidades por superioridad de tabla sin modelo calibrado. Nunca aprender de un solo partido fallido como si fuera una ley general. El objetivo es decisiones más robustas contra casos imprevistos, no garantizar aciertos.
+
+# 9. MATRIZ DE INFERENCIA ESTRATÉGICA EN EL MISMO CODEX — NO ES UNA EJECUCIÓN ADICIONAL
+
+Leer `mapa_tactico_<id>.md` como índice DE DATOS, no como diagnóstico automático. Aplicar la sección 6 de AGENTS: simular decisiones justificadas de AMBOS entrenadores y responder tácticamente a cada plan. Explorar juego ABP (córners/faltas), línea de fuera de juego, amplitud, salida bajo presión, hombre libre/tercer hombre, presión tras pérdida, rest-defense, transiciones, cargas de área, duelos y ajustes por titulares/banco. La inferencia táctica no exige encontrar un antecedente estadístico de cada movimiento: exige mecanismo físicamente plausible, **fuente observacional o rol verificable y falsador explícito**. Sin ello etiquetar EXPLORATORIO/NO VERIFICADO y no sumar confianza numérica.
+
+Las formaciones de ambos pueden mutar ENTRE fases. No transformar `4-2-2-2 vs 4-2-3-1` en regla universal. Documentar qué tiene que suceder para que un movimiento táctico produzca el mercado (ejemplo: laterales altos + bloque rival que permite llegadas + centros desviados ⇒ *posible* aumento de córners; no seguro). Afirmaciones como «posesión ⇒ faltas contrarias», «trampa de offside ⇒ over de offsides», «centros ⇒ muchos córners» solo son HIPÓTESIS condicionadas y tienen mecanismos inversos. No extrapolar jugadores/DT rivales sin documentación reciente.
+
+En la entrega, justo después del riesgo DEL PARTIDO, añadir `DUELO DE BANQUILLOS` con Plan local→respuesta visitante→contrarrespuesta local, y viceversa. No repetir el reporte Perplexity; 2–3 mecanismos verificables con mercado afectado, alternativa e incertidumbre. Después conservar la evaluación multimercado y la doble decisión final. No hay nueva fase, script ni consulta a API desde Codex.
+
+# 10. CONTROL DE ERRORES DE ESTUDIO DE CASO (DEEPSEEK / ALIANZA ATLÉTICO–GARCILASO)
+
+A) Compara `pos`/`grid` del XI con `SQUADS.position` y rol aportado por Perplexity antes de simular laterales, extremos o protección de espalda. Un XI de 11 IDs no garantiza la distribución de esos roles. `xi_role_review` señala inconsistencias severas sin manipular identidades ni bloquear otras familias.
+B) Comprueba `competition` de cada fixture histórico: liga, copa y amistosos en submuestras separadas; indicar n igual competición y n mixto cuando difieran. Verifica el estadio real si hay localía administrativa en otra sede.
+C) Para cada candidato, enseñar condiciones precisas de ganar/perder y push solo si corresponde. Ejemplo control: 2-2 es derrota en UNDER 3.5, NO devolución.
+D) Nunca inferir DT actual del primer resultado `/coachs`: usar el técnico registrado en lineups objetivo más prensa fechada; si difieren, revisar.
+E) Rechazar afirmaciones «revisadas todas las familias» si solo se recibieron ranking/hipótesis y no la matriz íntegra; si la matriz existe pero solo tiene 10 evaluaciones directas y 212 sin parser/periodo, conservar esos denominadores.
+F) El informe Perplexity puede incluir un promedio arbitral distinto al API: contrastar muestras antes de calificar al árbitro «de muchas tarjetas».
+G) No etiquetar `CONFIRMADO` un plan/intención táctica deducido únicamente del once; distinguir dato XI, posición nominal e inferencia.

@@ -1,14 +1,17 @@
 """Pruebas offline del lanzador. No consulta Bwin/API-Football."""
 import unittest
 import argparse
+import json
 from datetime import datetime, date, time
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from types import SimpleNamespace
 from zoneinfo import ZoneInfo
 from prematch_prospective_trial import (
     allowed_window, kickoff_valid, parse_date, select_fixtures, window_path,
     read, dump, sha, TrialError, parse_clock, local_window,
     load_window_config, resolve_window, parse_date_relative, main, DEFAULT_WINDOW_CONFIG
+    , enrichment_resume_plan, merge_enrichment_batches
 )
 
 TZ=ZoneInfo('Europe/Madrid')
@@ -48,7 +51,7 @@ class TrialTests(unittest.TestCase):
     def test_day_parse(self):
         self.assertEqual(parse_date('2026-11-02'),date(2026,11,2))
     def test_output_folder(self):
-        self.assertEqual(str(window_path(Path('/tmp/root'),date(2026,11,2))), '/tmp/root/outputs/discovery/2026-11-02_1600_0200')
+        self.assertEqual(str(window_path(Path('/tmp/root'),date(2026,11,2))), '/tmp/root/outputs/discovery/2026-11-02_1500_0300')
     def test_custom_window_midnight(self):
         begin,end=local_window(date(2026,11,1),time(16),time(3))
         self.assertEqual(begin.isoformat(),'2026-11-01T16:00:00+01:00')
@@ -78,13 +81,13 @@ class TrialTests(unittest.TestCase):
 class ConfigProfileTests(unittest.TestCase):
     def test_default_profile(self):
         name,start,end=resolve_window(DEFAULT_WINDOW_CONFIG)
-        self.assertEqual((name,start,end),('normal',time(16),time(2)))
+        self.assertEqual((name,start,end),('normal',time(15),time(3)))
     def test_extended_profile(self):
         name,start,end=resolve_window(DEFAULT_WINDOW_CONFIG,'ampliada')
         self.assertEqual((name,start,end),('ampliada',time(15),time(3)))
     def test_override_end(self):
         name,start,end=resolve_window(DEFAULT_WINDOW_CONFIG,'normal',end_override=time(4))
-        self.assertEqual((name,start,end),('normal',time(16),time(4)))
+        self.assertEqual((name,start,end),('normal',time(15),time(4)))
     def test_override_start(self):
         _,start,end=resolve_window(DEFAULT_WINDOW_CONFIG,'ampliada',start_override=time(19))
         self.assertEqual((start,end),(time(19),time(3)))
@@ -109,7 +112,7 @@ class ConfigProfileTests(unittest.TestCase):
         with TemporaryDirectory() as td:
             x,used,_=load_window_config(Path(td))
             self.assertFalse(used)
-            self.assertEqual(resolve_window(x)[2],time(2))
+            self.assertEqual(resolve_window(x)[2],time(3))
     def test_missing_explicit_config_fails(self):
         with TemporaryDirectory() as td:
             with self.assertRaises(TrialError):load_window_config(Path(td),Path('config/noexiste.json'))
@@ -151,5 +154,119 @@ class ConfigProfileTests(unittest.TestCase):
         a=window_path(root,date(2026,11,1),time(16),time(2))
         b=window_path(root,date(2026,11,1),time(16),time(3))
         self.assertNotEqual(a,b)
+
+
+class EnrichmentResumeTests(unittest.TestCase):
+    def args(self, **changes):
+        values=dict(max_matches=5,history=20,details=8,team=[],evaluation_budget=0,
+                    horizon_hours=0,min_lead=45)
+        values.update(changes)
+        return SimpleNamespace(**values)
+
+    def fixture_rows(self, count=10):
+        return [{'fixture_id':i,'home':f'H{i}','away':f'A{i}',
+                 'kickoff_madrid':'2026-11-08T18:00:00+01:00'} for i in range(1,count+1)]
+
+    def write_batch_result(self, pending, args, *, api_errors=None, empty=False):
+        rows=[] if empty else [{**row,'data_readiness_score':1.0,'research_priority_score':1.0,
+            'preliminary_coverage_score':1.0,'region_priority':0} for row in pending['fixtures']]
+        doc={'schema_version':'1.3-preselection','generated_at_utc':'2026-11-08T00:00:00+00:00',
+             'source_filter_sha256':sha(pending['input']),
+             'counts':{'input_filter':len(pending['fixture_ids'])},
+             'methodology':{'sample_history_cap':args.history,'sample_details_cap':args.details},
+             'api_errors':api_errors or {},'matches':rows}
+        dump(pending['dest']/'preselection.json',doc)
+
+    def test_interrupted_batches_resume_without_repeating_completed(self):
+        with TemporaryDirectory() as td:
+            base=Path(td);subset={'schema_version':'1.0-major-leagues','fixtures':self.fixture_rows()}
+            dump(base/'fixtures_major_test.json',subset);args=self.args()
+            first=enrichment_resume_plan(base,subset,args)
+            self.assertEqual((len(first['pending']),first['checkpoint']['counts']['pending_fixtures']),(2,10))
+            self.write_batch_result(first['pending'][0],args)
+            second=enrichment_resume_plan(base,subset,args)
+            completed=base/'enrichment_batches/1/preselection.json'
+            before=(sha(completed),completed.stat().st_mtime_ns)
+            self.assertEqual((second['checkpoint']['counts']['completed_batches'],
+                              second['checkpoint']['counts']['pending_fixtures']),(1,5))
+            checkpoint=base/'enrichment_resume.json'
+            checkpoint_mtime=checkpoint.stat().st_mtime_ns
+            third=enrichment_resume_plan(base,subset,args)
+            self.assertEqual(before,(sha(completed),completed.stat().st_mtime_ns))
+            self.assertEqual(checkpoint.stat().st_mtime_ns,checkpoint_mtime)
+            self.assertEqual([x['index'] for x in third['pending']],[2])
+
+    def test_checkpoint_blocks_parameter_change_and_tampering(self):
+        with TemporaryDirectory() as td:
+            base=Path(td);subset={'schema_version':'1.0-major-leagues','fixtures':self.fixture_rows(5)}
+            dump(base/'fixtures_major_test.json',subset);args=self.args()
+            plan=enrichment_resume_plan(base,subset,args)
+            self.write_batch_result(plan['pending'][0],args)
+            enrichment_resume_plan(base,subset,args)
+            with self.assertRaisesRegex(TrialError,'PARAMETERS_MISMATCH'):
+                enrichment_resume_plan(base,subset,self.args(details=7))
+            result=base/'enrichment_batches/1/preselection.json'
+            result.write_text(result.read_text()+'\n')
+            with self.assertRaisesRegex(TrialError,'BATCH_RESULT_SHA_MISMATCH'):
+                enrichment_resume_plan(base,subset,args)
+
+    def test_incomplete_json_is_archived_and_batch_becomes_resumable(self):
+        with TemporaryDirectory() as td:
+            base=Path(td);subset={'schema_version':'1.0-major-leagues','fixtures':self.fixture_rows(5)}
+            dump(base/'fixtures_major_test.json',subset);args=self.args()
+            pending=enrichment_resume_plan(base,subset,args)['pending'][0]
+            target=pending['dest']/'preselection.json';target.write_text('{')
+            before=target.read_bytes()
+            plan=enrichment_resume_plan(base,subset,args)
+            self.assertFalse(target.exists())
+            self.assertEqual(plan['checkpoint']['counts']['pending_batches'],1)
+            archived=plan['checkpoint']['batches'][0]['interrupted_artifacts'][0]
+            self.assertEqual(Path(archived['path']).read_bytes(),before)
+            self.assertEqual(sha(Path(archived['path'])),archived['sha256'])
+            self.write_batch_result(plan['pending'][0],args)
+            recovered=enrichment_resume_plan(base,subset,args)
+            self.assertEqual(recovered['checkpoint']['counts']['completed_batches'],1)
+            self.assertEqual(recovered['checkpoint']['counts']['pending_batches'],0)
+
+    def test_api_error_result_is_reused_but_flagged(self):
+        with TemporaryDirectory() as td:
+            base=Path(td);subset={'schema_version':'1.0-major-leagues','fixtures':self.fixture_rows(5)}
+            dump(base/'fixtures_major_test.json',subset);args=self.args()
+            pending=enrichment_resume_plan(base,subset,args)['pending'][0]
+            self.write_batch_result(pending,args,api_errors={'detail_batch_0':'EMPTY_RESPONSE'})
+            plan=enrichment_resume_plan(base,subset,args)
+            self.assertEqual(plan['checkpoint']['batches'][0]['status'],'COMPLETED_WITH_API_ERRORS')
+            self.assertEqual(plan['checkpoint']['counts']['pending_batches'],0)
+
+    def test_candidate_ledger_repeated_state_is_idempotent(self):
+        from prematch_audit import CandidateLedger
+        with TemporaryDirectory() as td:
+            path=Path(td)/'candidate_ledger.json';row=self.fixture_rows(1)[0]
+            ledger=CandidateLedger(path,{'test':True})
+            ledger.record(row,'PENDIENTE_BWIN','preselection','READY')
+            ledger.record(row,'PENDIENTE_BWIN','preselection','READY')
+            ledger.write()
+            loaded=CandidateLedger.load(path)
+            self.assertEqual(len(loaded.rows['1']['history']),1)
+
+    def test_real_scale_482_case_recovers_58_batches_then_completes(self):
+        with TemporaryDirectory() as td:
+            base=Path(td);subset={'schema_version':'1.0-major-leagues','fixtures':self.fixture_rows(482)}
+            source=base/'fixtures_major_test.json';dump(source,subset);args=self.args()
+            first=enrichment_resume_plan(base,subset,args)
+            for pending in first['pending'][:58]:self.write_batch_result(pending,args)
+            interrupted=enrichment_resume_plan(base,subset,args)
+            self.assertEqual(interrupted['checkpoint']['counts'],{
+                'fixtures':482,'batches':97,'completed_batches':58,'completed_fixtures':290,
+                'pending_batches':39,'pending_fixtures':192})
+            completed_hashes={row['index']:row['result_sha256'] for row in interrupted['checkpoint']['batches'][:58]}
+            for pending in interrupted['pending']:self.write_batch_result(pending,args)
+            finished=enrichment_resume_plan(base,subset,args)
+            self.assertEqual((finished['checkpoint']['counts']['completed_fixtures'],
+                              finished['checkpoint']['counts']['pending_fixtures']),(482,0))
+            self.assertEqual(completed_hashes,{row['index']:row['result_sha256'] for row in finished['checkpoint']['batches'][:58]})
+            merged=merge_enrichment_batches(finished['completed_docs'],finished['completed_sources'],source)
+            self.assertEqual(len(merged['matches']),482)
+            self.assertEqual(len({row['fixture_id'] for row in merged['matches']}),482)
 
 if __name__=='__main__':unittest.main()

@@ -27,8 +27,15 @@ from urllib.parse import urlsplit, unquote
 from zoneinfo import ZoneInfo
 from prematch_prospective_trial import TrialError
 
-VERSION = '0.1-single-execution-early-selection-fix'
+VERSION = '0.2-single-operation-windows'
 TZ = ZoneInfo('Europe/Madrid')
+# Temporal gates are deliberately operation-specific.  Full preparation and
+# the initial selector still require the conservative 45-minute margin; data
+# refreshes and the final validation path may run until T-5, never at/after
+# kickoff.  Identity, SHA, Bwin-time and freshness checks remain independent.
+PREPARE_MIN_LEAD_MINUTES = 45
+REFRESH_MIN_LEAD_MINUTES = 5
+FINISH_MIN_LEAD_MINUTES = 5
 RE_CAPTURE = re.compile(r'(?im)^Captura:\s*(\S+)\s*$')
 RE_EVENT = re.compile(r'(?im)^Event ID:\s*(\d{6,})\s*$')
 RE_URL = re.compile(r'(?im)^URL:\s*(https://\S+)\s*$')
@@ -90,7 +97,8 @@ def validate_selected(selected: dict, decision: dict):
     for k in ('fixture_id','bwin_event_id','bwin_url','home','away'):
         if str(selected[k])!=str(found.get(k)):
             raise ValueError(f'Inconsistencia selector/decisión: {k}')
-    for k in ('league_id','season','home_api_id','away_api_id','odds_sha256','odds_txt'):
+    for k in ('league_id','season','home_api_id','away_api_id','odds_sha256','odds_txt',
+              'temporal_identity_evidence'):
         if k in selected and str(selected[k])!=str(found.get(k)):
             raise ValueError(f'Inconsistencia selector/decisión: {k}')
     kickoff=dt(selected['kickoff_madrid'],'selected.kickoff_madrid')
@@ -121,8 +129,9 @@ def validate_selected(selected: dict, decision: dict):
 
 def load_context(args):
     root=args.root.expanduser().resolve()
-    selected_path=(root/args.selected).resolve()
-    decision_path=(root/args.decision).resolve() if args.decision else selected_path.parent/'selection_decision.json'
+    from prematch_paths import local_reference
+    selected_path=local_reference(root, args.selected)
+    decision_path=local_reference(root, args.decision) if args.decision else selected_path.parent/'selection_decision.json'
     if not selected_path.is_file():raise ValueError(f'Falta selección: {selected_path}')
     if not decision_path.is_file():raise ValueError(f'Falta decisión: {decision_path}; añade --decision')
     selected=read_json(selected_path)
@@ -173,11 +182,13 @@ def match_manifest(ctx, *, check_files=True):
     if str(manifest.get('event_id'))!=ctx['event_id'] or manifest.get('url')!=ctx['url']:
         raise ValueError('Manifest Event ID / URL distinto a la selección')
     inp=manifest.get('inputs') or {}
-    for kind in ('odds','context','context_json','identity'):
+    for kind in inp:
         e=inp.get(kind)
         if not e:continue
         if check_files:
-            path=Path(e['path'])
+            from prematch_paths import local_reference
+            path=local_reference(ctx['root'], e['path'], e.get('sha256'))
+            e['path']=str(path)
             if not path.is_file() or not e.get('sha256') or sha(path)!=e['sha256']:
                 raise ValueError(f'SHA/ruta de manifest.{kind} inválido: {path}')
     ident=inp.get('identity') or {}
@@ -189,8 +200,12 @@ def match_manifest(ctx, *, check_files=True):
         kick=dt(obj.get('kickoff_utc'),'match_identity.kickoff_utc')
         if abs((kick-ctx['kickoff']).total_seconds())>180:
             raise ValueError('Kickoff del fixture API no coincide con el seleccionado')
-        if obj.get('identity_status')!='FIXTURE_VERIFIED_BY_GENERATOR':
-            raise ValueError('match_identity no está verificado por generador')
+        if obj.get('identity_status') not in {
+                'FIXTURE_AND_BWIN_TIME_VERIFIED',
+                'API_FIXTURE_VERIFIED_BWIN_TIME_UNKNOWN',
+                'FIXTURE_VERIFIED_BY_GENERATOR',
+        }:
+            raise ValueError('match_identity no tiene un estado verificable')
         selected=ctx.get('selection',{})
         for field in ('league_id','season'):
             if selected.get(field) is not None and str(selected[field])!=str(obj.get(field)):
@@ -232,6 +247,121 @@ def snapshot_info(path,ctx, *, max_age=None):
 def state_path(ctx):return ctx['directory']/'single_execution.json'
 
 
+def validate_reuse_odds(ctx, max_age=60):
+    selected=ctx['selection']
+    expected=ctx['directory']/'inputs'/f'cuotas_bwin_{ctx["event_id"]}.txt'
+    if not selected.get('odds_sha256') or not selected.get('odds_txt'):
+        raise ValueError('REUSE_ODDS_SELECTION_BINDING_MISSING: regenerar con selector y preflight originales')
+    from prematch_paths import local_reference
+    if local_reference(ctx['root'],selected['odds_txt'],selected['odds_sha256'])!=expected.resolve():raise ValueError('REUSE_ODDS_SELECTION_PATH_MISMATCH')
+    info=snapshot_info(expected,ctx,max_age=max_age)
+    header=expected.read_text(encoding='utf-8-sig',errors='replace')[:6000]
+    if RE_URL.search(header).group(1).strip()!=ctx['url']:raise ValueError('REUSE_ODDS_SELECTION_URL_MISMATCH')
+    if info['sha256']!=selected['odds_sha256']:raise ValueError('REUSE_ODDS_SELECTION_SHA_MISMATCH')
+    preflight=selected.get('preflight_path')
+    if not preflight or not selected.get('preflight_sha256'):raise ValueError('REUSE_ODDS_PREFLIGHT_BINDING_MISSING')
+    path=local_reference(ctx['root'],preflight,selected['preflight_sha256'])
+    if sha(path)!=selected['preflight_sha256']:raise ValueError('REUSE_ODDS_PREFLIGHT_SHA_MISMATCH')
+    doc=read_json(path)
+    for field, digest in (('source_discovery','source_sha256'),('source_preselection','source_preselection_sha256')):
+        origin=local_reference(ctx['root'],doc.get(field),doc.get(digest))
+        if not origin.is_file() or sha(origin)!=doc.get(digest):raise ValueError('REUSE_ODDS_ORIGINAL_SOURCE_SHA_MISMATCH')
+    rows=[r for r in doc.get('matches',[]) if r.get('fixture_id')==ctx['fixture_id'] and str(r.get('bwin_event_id'))==ctx['event_id'] and r.get('bwin_url')==ctx['url']]
+    if len(rows)!=1:raise ValueError('REUSE_ODDS_PREFLIGHT_IDENTITY_MISMATCH')
+    snapshot=rows[0].get('snapshot') or {}
+    if any(rows[0].get(k)!=ctx[k] for k in ('home','away')):raise ValueError('REUSE_ODDS_PREFLIGHT_TEAMS_MISMATCH')
+    if snapshot.get('sha256')!=info['sha256'] or local_reference(ctx['root'],snapshot.get('snapshot_path'),snapshot.get('sha256'))!=expected.resolve():
+        raise ValueError('REUSE_ODDS_PREFLIGHT_SNAPSHOT_MISMATCH')
+    if dt(rows[0]['kickoff_madrid'],'preflight.kickoff')!=ctx['kickoff']:raise ValueError('REUSE_ODDS_PREFLIGHT_KICKOFF_MISMATCH')
+    info['temporal_identity']=validate_temporal_identity_evidence(
+        ctx,max_age_minutes=180)
+    return info
+
+
+def _source_path(root, value, digest=None):
+    from prematch_paths import local_reference
+    return local_reference(root, value, digest)
+
+
+def validate_temporal_identity_evidence(ctx, *, max_age_minutes=180, reference_now=None):
+    """Revalidate Phase 3's event-specific Bwin kickoff evidence end to end."""
+    selected=ctx['selection'];contract=selected.get('temporal_identity_evidence')
+    if not isinstance(contract,dict):
+        raise ValueError('TEMPORAL_IDENTITY_CONTRACT_MISSING')
+    exact={'fixture_id':ctx['fixture_id'],'bwin_event_id':ctx['event_id'],
+           'bwin_url':ctx['url'],'home':ctx['home'],'away':ctx['away']}
+    for key,value in exact.items():
+        if str(contract.get(key))!=str(value):
+            raise ValueError('TEMPORAL_IDENTITY_WRONG_EVENT: '+key)
+    if contract.get('schema_version')!='1.0-phase3-temporal-identity' or contract.get('status')!='BWIN_API_KICKOFF_VERIFIED':
+        raise ValueError('TEMPORAL_IDENTITY_CONTRACT_INVALID')
+    preflight=_source_path(ctx['root'],selected.get('preflight_path'),selected.get('preflight_sha256'))
+    if (not preflight.is_file() or sha(preflight)!=selected.get('preflight_sha256') or
+            sha(preflight)!=contract.get('preflight_sha256')):
+        raise ValueError('TEMPORAL_IDENTITY_PREFLIGHT_SHA_MISMATCH')
+    doc=read_json(preflight)
+    discovery=_source_path(ctx['root'],doc.get('source_discovery'),doc.get('source_sha256'))
+    if (not discovery.is_file() or sha(discovery)!=doc.get('source_sha256') or
+            sha(discovery)!=contract.get('discovery_sha256')):
+        raise ValueError('TEMPORAL_IDENTITY_DISCOVERY_SHA_MISMATCH')
+    source=read_json(discovery)
+    rows=[r for r in doc.get('matches',[]) if str(r.get('fixture_id'))==str(ctx['fixture_id'])
+          and str(r.get('bwin_event_id'))==ctx['event_id'] and r.get('bwin_url')==ctx['url']]
+    origins=[r for r in source.get('matches',[]) if str(r.get('fixture_id'))==str(ctx['fixture_id'])
+             and str(r.get('bwin_event_id'))==ctx['event_id'] and r.get('bwin_url')==ctx['url']]
+    if len(rows)!=1 or len(origins)!=1:
+        raise ValueError('TEMPORAL_IDENTITY_SOURCE_IDENTITY_MISMATCH')
+    row=rows[0];origin=origins[0]
+    if any(row.get(k)!=ctx[k] for k in ('home','away')):
+        raise ValueError('TEMPORAL_IDENTITY_TEAMS_MISMATCH')
+    if dt(row.get('kickoff_madrid'),'preflight.kickoff')!=ctx['kickoff']:
+        raise ValueError('TEMPORAL_IDENTITY_KICKOFF_MISMATCH')
+    evidence=row.get('time_evidence') or {}
+    accepted={'DISPLAY_TIME_CORROBORATED','COUNTDOWN_TIME_CORROBORATED','ABSOLUTE_TIME_VERIFIED'}
+    if evidence.get('status') not in accepted:
+        raise ValueError('TEMPORAL_IDENTITY_EVIDENCE_NOT_VERIFIED')
+    if evidence.get('status') in {'DISPLAY_TIME_CORROBORATED','COUNTDOWN_TIME_CORROBORATED'}:
+        if source.get('user_time_reference')!='Europe/Madrid' or contract.get('timezone')!='Europe/Madrid':
+            raise ValueError('TEMPORAL_IDENTITY_TIMEZONE_UNKNOWN')
+    now=reference_now or local_now()
+    observed=dt(evidence.get('observed_at_utc'),'time_evidence.observed_at_utc')
+    age=(now-observed).total_seconds()/60
+    if age < -2 or age > max_age_minutes:
+        raise ValueError(f'TEMPORAL_IDENTITY_EVIDENCE_STALE: {age:.1f} min')
+    from bwin_market_preflight import validate_match
+    rebuilt=validate_match(origin,source.get('catalog_observed',[]),now,0,max_age_minutes)
+    if rebuilt.get('status')!='READY_FOR_SCRAPER':
+        raise ValueError('TEMPORAL_IDENTITY_SOURCE_REVALIDATION_FAILED: '+','.join(rebuilt.get('reasons') or []))
+    rebuilt_evidence=rebuilt.get('time_evidence') or {}
+    for key in ('status','source','observed_at_utc','difference_minutes','catalog_text'):
+        if str(evidence.get(key))!=str(rebuilt_evidence.get(key)):
+            raise ValueError('TEMPORAL_IDENTITY_EVIDENCE_CONTRADICTION: '+key)
+    bwin_value=(evidence.get('bwin_visible_kickoff_madrid') or
+                evidence.get('bwin_inferred_kickoff_madrid') or
+                origin.get('inspection',{}).get('event_start_machine_readable'))
+    api_value=evidence.get('api_kickoff_madrid') or row.get('kickoff_madrid')
+    bwin_kickoff=dt(bwin_value,'Bwin kickoff evidence')
+    api_kickoff=dt(api_value,'API kickoff evidence')
+    difference=abs((bwin_kickoff-api_kickoff).total_seconds())/60
+    tolerance=4 if evidence.get('status')=='COUNTDOWN_TIME_CORROBORATED' else 3
+    if difference>tolerance or api_kickoff.astimezone(timezone.utc)!=ctx['kickoff'].astimezone(timezone.utc):
+        raise ValueError(f'TEMPORAL_IDENTITY_KICKOFF_CONFLICT: {difference:.1f} min')
+    expected_contract={
+        'evidence_status':evidence.get('status'),'source':evidence.get('source'),
+        'observed_at_utc':evidence.get('observed_at_utc'),
+        'bwin_kickoff_madrid':bwin_kickoff.astimezone(TZ).isoformat(),
+        'api_kickoff_madrid':api_kickoff.astimezone(TZ).isoformat(),
+        'difference_minutes':evidence.get('difference_minutes'),
+        'catalog_text':evidence.get('catalog_text'),
+    }
+    for key,value in expected_contract.items():
+        if str(contract.get(key))!=str(value):
+            raise ValueError('TEMPORAL_IDENTITY_CONTRACT_SOURCE_MISMATCH: '+key)
+    return {**contract,'kickoff_utc':bwin_kickoff.astimezone(timezone.utc).isoformat(),
+            'verified_at_utc':now.astimezone(timezone.utc).isoformat(),
+            'preflight_path':str(preflight.resolve()),'discovery_path':str(discovery.resolve())}
+
+
 def update_state(ctx,step,result,details=None):
     p=state_path(ctx)
     o=read_json(p) if p.is_file() else {}
@@ -269,6 +399,7 @@ def run(cmd,root,env=None,log=None):
 def cmd_prepare(ctx,args):
     fresh,sel_age=freshness(ctx,min_lead=args.min_lead_minutes,max_selection_age=args.max_selection_age_minutes)
     multi=ensure_root(ctx,args.multi)
+    if args.reuse_odds:validate_reuse_odds(ctx,args.max_odds_age_minutes)
     mpath=ctx['directory']/'manifest.json'
     if mpath.exists() and not args.force_prepare:
         raise ValueError('Ya existe manifest.json: usa status/finish. Si deseas rehacer API y cuotas, usa --force-prepare explícitamente.')
@@ -308,6 +439,92 @@ def cmd_prepare(ctx,args):
     label='cuotas seleccionadas reutilizadas por SHA' if args.reuse_odds else 'cuotas recién capturadas'
     print(f'PREPARADO {ctx["event_id"]}: fixture API {ctx["fixture_id"]}; {label}; contexto fijado por SHA.')
     print(f'SIGUIENTE: informe cualitativo para el evento {ctx["event_id"]}; luego finish --report ...')
+    return 0
+
+
+def cmd_verify_temporal_identity(ctx,args):
+    """Promote an already acquired provisional context without API or scraping."""
+    ensure_prematch(ctx,min_lead=args.min_refresh_lead_minutes)
+    evidence=validate_temporal_identity_evidence(ctx,max_age_minutes=180)
+    manifest=match_manifest(ctx)
+    if manifest.get('status') not in {'PREPARADO_PROVISIONAL','PREPARADO'}:
+        raise ValueError(f'verify-temporal-identity no procede con manifest={manifest.get("status")}')
+    inputs=manifest.get('inputs') or {}
+    txt=Path((inputs.get('context') or {}).get('path') or '')
+    js=Path((inputs.get('context_json') or {}).get('path') or '')
+    identity=Path((inputs.get('identity') or {}).get('path') or '')
+    payload=read_json(js)
+    match=payload.get('match') or {};fixture=payload.get('fixture') or {}
+    if (str(match.get('event_id'))!=ctx['event_id'] or match.get('url')!=ctx['url'] or
+            int(fixture.get('fixture_id') or 0)!=ctx['fixture_id']):
+        raise ValueError('TEMPORAL_IDENTITY_CONTEXT_MISMATCH')
+    fixture_kickoff=dt(fixture.get('date'),'context.fixture.date')
+    if fixture_kickoff.astimezone(timezone.utc).isoformat()!=evidence['kickoff_utc']:
+        raise ValueError('TEMPORAL_IDENTITY_CONTEXT_KICKOFF_CONFLICT')
+    if match.get('identity_status') not in {'API_FIXTURE_VERIFIED_BWIN_TIME_UNKNOWN',
+                                            'FIXTURE_AND_BWIN_TIME_VERIFIED'}:
+        raise ValueError('TEMPORAL_IDENTITY_CONTEXT_STATUS_INVALID')
+    if match.get('home_name_raw')!=ctx['home']:
+        raise ValueError('TEMPORAL_IDENTITY_CONTEXT_HOME_MISMATCH')
+    existing_evidence=match.get('temporal_identity_evidence') or {}
+    immutable_evidence=('schema_version','status','fixture_id','bwin_event_id','bwin_url',
+                        'home','away','timezone','evidence_status','source','observed_at_utc',
+                        'bwin_kickoff_madrid','api_kickoff_madrid','difference_minutes',
+                        'catalog_text','discovery_sha256','preflight_sha256','kickoff_utc')
+    if (match.get('identity_status')=='FIXTURE_AND_BWIN_TIME_VERIFIED' and
+            all(existing_evidence.get(k)==evidence.get(k) for k in immutable_evidence) and
+            manifest.get('identity_status')=='FIXTURE_AND_BWIN_TIME_VERIFIED' and
+            manifest.get('status')=='PREPARADO'):
+        print(f'IDENTIDAD TEMPORAL YA VERIFICADA: Bwin {ctx["event_id"]} / fixture {ctx["fixture_id"]}; sin cambios.')
+        return 0
+    payload['match']['event_date']=evidence['bwin_kickoff_madrid']
+    payload['match']['identity_status']='FIXTURE_AND_BWIN_TIME_VERIFIED'
+    payload['match']['temporal_identity_evidence']=evidence
+    old='API_FIXTURE_VERIFIED_BWIN_TIME_UNKNOWN';new='FIXTURE_AND_BWIN_TIME_VERIFIED'
+    text=txt.read_text(encoding='utf-8-sig')
+    if old in text:
+        if text.count(old)!=3:
+            raise ValueError('TEMPORAL_IDENTITY_CONTEXT_TEXT_UNEXPECTED')
+        text=text.replace(old,new)
+    elif text.count(new)!=3:
+        raise ValueError('TEMPORAL_IDENTITY_CONTEXT_TEXT_STATUS_MISSING')
+    stamp=datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%S%fZ')
+    archive=ctx['directory']/'archives'/('temporal_identity_'+stamp)
+    for path in (txt,js,identity,ctx['directory']/'manifest.json'):
+        backup(path,archive)
+    tmp_json=js.with_name('.'+js.name+'.temporal.tmp')
+    tmp_txt=txt.with_name('.'+txt.name+'.temporal.tmp')
+    tmp_identity=identity.with_name('.'+identity.name+'.temporal.tmp')
+    try:
+        tmp_json.write_text(json.dumps(payload,ensure_ascii=False,indent=2),encoding='utf-8')
+        tmp_txt.write_text(text,encoding='utf-8')
+        from match_identity import write_identity,validate_identity
+        write_identity(tmp_json,tmp_identity)
+        ident=read_json(tmp_identity)
+        validate_identity(ident,payload,ctx['event_id'],ctx['url'])
+        tmp_json.replace(js);tmp_txt.replace(txt);tmp_identity.replace(identity)
+    finally:
+        for path in (tmp_json,tmp_txt,tmp_identity):path.unlink(missing_ok=True)
+    inputs['context']['sha256']=sha(txt)
+    inputs['context_json']['sha256']=sha(js)
+    inputs['identity']['sha256']=sha(identity)
+    manifest['identity_status']='FIXTURE_AND_BWIN_TIME_VERIFIED'
+    manifest['status']='PREPARADO'
+    manifest['temporal_identity_evidence']=evidence
+    manifest['temporal_identity_verified_at_utc']=iso_utc()
+    previous_archive=manifest.get('temporal_identity_archive')
+    if previous_archive:
+        manifest.setdefault('temporal_identity_revalidation_archives',[]).append(str(archive.resolve()))
+    else:
+        manifest['temporal_identity_archive']=str(archive.resolve())
+    manifest['warnings']=[w for w in manifest.get('warnings',[]) if 'BWIN_KICKOFF_UNVERIFIED' not in w]
+    atomic_json(ctx['directory']/'manifest.json',manifest)
+    match_manifest(ctx)
+    update_state(ctx,'verify-temporal-identity','OK',{
+        'manifest_sha256':sha(ctx['directory']/'manifest.json'),
+        'preflight_sha256':evidence['preflight_sha256'],
+        'discovery_sha256':evidence['discovery_sha256']})
+    print(f'IDENTIDAD TEMPORAL VERIFICADA: Bwin {ctx["event_id"]} / fixture {ctx["fixture_id"]}; sin API ni scraper.')
     return 0
 
 
@@ -363,6 +580,8 @@ def cmd_refresh(ctx,args):
         m['invalidated_by_odds_refresh']={'previous_status':m.get('status'),'previous_sha256':previous['sha256'],
                                           'invalidated_at_utc':iso_utc(),'stages':['validation','probabilistic','codex_analysis','final_review']}
         m['status']='PREPARADO'
+        for step in ('validacion', 'motor'):
+            m.get('steps', {}).pop(step, None)
         m.pop('codex_prompt',None)
         m.pop('validation_state',None)
         atomic_json(ctx['directory']/'manifest.json',m)
@@ -382,22 +601,42 @@ def cmd_refresh(ctx,args):
         raise
 
 
+def cmd_refresh_context(ctx, args):
+    ensure_prematch(ctx, min_lead=args.min_refresh_lead_minutes)
+    manifest = match_manifest(ctx)
+    from prematch_context_delta import refresh_lineups
+    updated, out = refresh_lineups(ctx, manifest, args.snapshot, args.snapshot_sha256, local_now())
+    # Preserve every prior downstream artifact before any later finish rewrites it.
+    for folder in ('validation', 'probabilistic', 'analysis'):
+        source = ctx['directory'] / folder
+        if source.is_dir():
+            shutil.copytree(source, out / 'previous_outputs' / folder)
+    for name in (f'CODEX_{ctx["event_id"]}.md', 'analysis_input_binding.json', 'final_review.json'):
+        backup(ctx['directory'] / name, out / 'previous_outputs')
+    atomic_json(ctx['directory'] / 'manifest.json', updated)
+    update_state(ctx, 'refresh-context', 'REVALIDATION_REQUIRED', {'run': str(out)})
+    print(f'Contexto diferencial local incorporado: {out}; finish y análisis pendientes.')
+    return 0
+
+
 def cmd_retry(ctx,args,kind):
     ensure_prematch(ctx,min_lead=args.min_refresh_lead_minutes)
     multi=ensure_root(ctx,args.multi)
     manifest=match_manifest(ctx)
-    permitted={'retry-context':{'ERROR_CONTEXTO','ERROR_ARCHIVOS'},
+    permitted={'retry-context':{'ERROR_CONTEXTO','ERROR_ARCHIVOS','PREPARADO_PROVISIONAL'},
                'retry-scraper':{'PARCIAL_SIN_CUOTAS','ERROR_ARCHIVOS'}}
     if manifest.get('status') not in permitted[kind]:
         raise ValueError(f'{kind} no procede con manifest={manifest.get("status")}')
     cmd=[sys.executable,str(multi),'--root',str(ctx['root']),kind,'--event-id',ctx['event_id'],'--workers','1']
     if kind=='retry-context':
         cmd.extend(['--api-minute',str(args.api_minute),'--api-second',str(args.api_second)])
+        cmd.extend(['--temporal-identity-selected',str(ctx['selected_path'])])
         if args.force_api:cmd.append('--force')
     code=run(cmd,ctx['root'])
     if code:raise ValueError(f'{kind} falló, código {code}; revisar logs del mismo evento')
     m=match_manifest(ctx)
-    if m.get('status')!='PREPARADO':raise ValueError(f'Estado tras {kind}: {m.get("status")}')
+    if m.get('status') not in {'PREPARADO', 'PREPARADO_PROVISIONAL'}:
+        raise ValueError(f'Estado tras {kind}: {m.get("status")}')
     update_state(ctx,kind,'OK',{'manifest_sha256':sha(ctx['directory']/'manifest.json')})
     print(f'{kind} correcto para {ctx["event_id"]}; evento único conservado.')
     return 0
@@ -488,18 +727,23 @@ def main(argv=None):
     p.add_argument('--max-selection-age-minutes',type=int,default=0,
                    help='0 = sin caducidad de selección; el kickoff y cuotas mantienen sus límites')
     p.add_argument('--max-odds-age-minutes',type=int,default=60)
-    p.add_argument('--min-lead-minutes',type=int,default=45,help='Margen mínimo para prepare/check')
-    p.add_argument('--min-refresh-lead-minutes',type=int,default=5,help='Margen mínimo para actualizar cuotas')
-    p.add_argument('--min-finish-lead-minutes',type=int,default=20,help='Margen mínimo para iniciar finish')
+    p.add_argument('--min-lead-minutes',type=int,default=PREPARE_MIN_LEAD_MINUTES,help='Margen mínimo para prepare/check')
+    p.add_argument('--min-refresh-lead-minutes',type=int,default=REFRESH_MIN_LEAD_MINUTES,help='Margen mínimo para actualizar cuotas/contexto')
+    p.add_argument('--min-finish-lead-minutes',type=int,default=FINISH_MIN_LEAD_MINUTES,help='Margen mínimo para iniciar finish (T-5 por defecto)')
     s=p.add_subparsers(dest='action',required=True)
-    s.add_parser('check',help='Validar selección y tiempo; no usar herramientas externas')
+    check=s.add_parser('check',help='Validar selección y tiempo; no usar herramientas externas')
+    check.add_argument('--reuse-odds',action='store_true',help='Exigir también contrato, SHA y frescura para reutilizar el TXT')
     s.add_parser('status',help='Estado del único evento seleccionado')
+    s.add_parser('verify-temporal-identity',help='Revalidar y transmitir evidencia Fase 3 sin API ni scraper')
     pp=s.add_parser('prepare',help='Scraper+API-Football únicamente para el elegido')
     pp.add_argument('--api-minute',type=int,default=180)
     pp.add_argument('--api-second',type=int,default=3)
     pp.add_argument('--force-prepare',action='store_true',help='Rehacer desde cero; respaldar capturas y manifest')
     pp.add_argument('--reuse-odds',action='store_true',help='Reutiliza cuotas seleccionadas por SHA y prepara únicamente el contexto completo')
     s.add_parser('refresh-odds',help='Solo scraper Bwin, sin repetir API ni actualizar otros eventos')
+    delta=s.add_parser('refresh-context',help='Incorpora XI de un registro local adquirido antes del kickoff; sin API')
+    delta.add_argument('--snapshot',type=Path,required=True)
+    delta.add_argument('--snapshot-sha256',required=True)
     rc=s.add_parser('retry-context',help='Reintenta contexto API si falló, sin repetir cuotas')
     rc.add_argument('--api-minute',type=int,default=180)
     rc.add_argument('--api-second',type=int,default=3)
@@ -511,19 +755,22 @@ def main(argv=None):
     args=p.parse_args(argv)
     if (args.max_selection_age_minutes<0 or args.max_odds_age_minutes<1 or
             args.min_lead_minutes<45 or args.min_refresh_lead_minutes<5 or
-            args.min_finish_lead_minutes<20):
-        p.error('Límites de frescura inválidos: check/prepare >=45, refresh >=5 y finish >=20 minutos')
+            args.min_finish_lead_minutes<FINISH_MIN_LEAD_MINUTES):
+        p.error('Límites de frescura inválidos: check/prepare >=45, refresh >=5 y finish >=5 minutos')
     try:
         ctx=load_context(args)
         if args.action=='check':
             remain,age=freshness(ctx,min_lead=args.min_lead_minutes,max_selection_age=args.max_selection_age_minutes)
+            if args.reuse_odds:validate_reuse_odds(ctx,args.max_odds_age_minutes)
             print(f'SELECCIÓN VÁLIDA PARA INVESTIGACIÓN NIVEL {ctx["selection_tier"]}: {ctx["home"]} - {ctx["away"]}; Bwin {ctx["event_id"]}; fixture {ctx["fixture_id"]}')
             print(f'Kickoff {ctx["kickoff"].astimezone(TZ).isoformat()} | margen {remain:.1f} min | selección hace {age:.1f} min')
             print('No se ha ejecutado el scraper ni API-Football.')
             return 0
         if args.action=='status':return cmd_status(ctx,args)
+        if args.action=='verify-temporal-identity':return cmd_verify_temporal_identity(ctx,args)
         if args.action=='prepare':return cmd_prepare(ctx,args)
         if args.action=='refresh-odds':return cmd_refresh(ctx,args)
+        if args.action=='refresh-context':return cmd_refresh_context(ctx,args)
         if args.action in ('retry-context','retry-scraper'):return cmd_retry(ctx,args,args.action)
         if args.action=='finish':return cmd_finish(ctx,args)
     except (ValueError,KeyError,TypeError,OSError,TrialError) as exc:

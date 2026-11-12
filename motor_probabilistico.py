@@ -1189,6 +1189,29 @@ def resolve_report_for_event(args, guard, event):
     return candidate
 
 
+def evaluate_selection(market, selection, odd, ctx, market_aliases, min_n, cache):
+    teams = [ctx['target']['home'], ctx['target']['away']]
+    spec = identify_market(market, selection, teams, market_aliases)
+    live = bool(re.search(r'(?i)(en vivo|\blive\b|resto del partido|resultado actual|rest of the match|current score)', market))
+    item = {'market': market, 'selection': selection, 'odd': odd,
+            'market_live_excluded': live,
+            'break_even_raw_1_over_odd': round(1 / odd, 5) if odd > 0 else None,
+            'parsed_market': spec, 'value_state': 'VALUE_NO_VERIFICADO'}
+    if live:
+        item['evidence_status'] = 'MERCADO_EN_VIVO_NO_APTO'
+    elif spec.get('type'):
+        item['evidence'] = cache.evaluate(spec, ctx, evidence_for)
+        item['fragility_heuristic'] = quick_fragility(spec)
+        groups = item['evidence'].get('groups', [])
+        is_direct = bool(groups and groups[0]['sample_valid'] >= min_n)
+        item['evidence_status'] = ('EVIDENCIA_DESCRIPTIVA' if is_direct else
+                                   'EVIDENCIA_PARCIAL' if groups and groups[0]['sample_valid'] >= 1 else
+                                   'MUESTRA_INSUFICIENTE_O_IDENTIDAD')
+    else:
+        item['evidence_status'] = spec.get('reason', 'NO_EVALUABLE')
+    return item
+
+
 def run(args):
     odds_path, ctx_path, val_path, expected = paths_for_event(args)
     ctx = parse_context(ctx_path)
@@ -1210,29 +1233,15 @@ def run(args):
         guard['temporal_state'] = 'BLOQUEADO_PREPARTIDO'
     competitive = build_competitive_context(args.context_json or (ctx_path.with_suffix('.json') if ctx_path.with_suffix('.json').is_file() else None), ctx, ctx_path)
     market_aliases = verified_market_aliases(ctx)
+    from prematch_context_delta import EvidenceCache
+    evidence_cache = EvidenceCache(event, getattr(args, 'evidence_cache', None),
+                                   getattr(args, 'evidence_cache_sha256', None))
     catalog = []
     rows = []
     teams = [ctx['target']['home'], ctx['target']['away']]
     for block in odds['markets']:
         for sel in block['selections']:
-            spec = identify_market(block['market'], sel['selection'], teams, market_aliases)
-            live = bool(re.search(r'(?i)(en vivo|\blive\b|resto del partido|resultado actual|rest of the match|current score)', block['market']))
-            item = {'market': block['market'], 'selection': sel['selection'], 'odd': sel['odd'],
-                    'market_live_excluded': live,
-                    'break_even_raw_1_over_odd': round(1 / sel['odd'], 5) if sel['odd'] > 0 else None,
-                    'parsed_market': spec, 'value_state': 'VALUE_NO_VERIFICADO'}
-            if live:
-                item['evidence_status'] = 'MERCADO_EN_VIVO_NO_APTO'
-            elif spec.get('type'):
-                item['evidence'] = evidence_for(spec, ctx)
-                item['fragility_heuristic'] = quick_fragility(spec)
-                groups = item['evidence'].get('groups', [])
-                is_direct = bool(groups and groups[0]['sample_valid'] >= args.min_n)
-                item['evidence_status'] = ('EVIDENCIA_DESCRIPTIVA' if is_direct else
-                                           'EVIDENCIA_PARCIAL' if groups and groups[0]['sample_valid'] >= 1 else
-                                           'MUESTRA_INSUFICIENTE_O_IDENTIDAD')
-            else:
-                item['evidence_status'] = spec.get('reason', 'NO_EVALUABLE')
+            item = evaluate_selection(block['market'], sel['selection'], sel['odd'], ctx, market_aliases, args.min_n, evidence_cache)
             catalog.append(item)
             if args.min_odd <= sel['odd'] <= args.max_odd:
                 rows.append(item)
@@ -1290,6 +1299,7 @@ def run(args):
            'competitive_context_snapshot': competitive.get('source_sha256')}
     out = args.output_dir
     out.mkdir(parents=True, exist_ok=True)
+    (out / f'evidence_cache_{event}.json').write_text(json.dumps(evidence_cache.document(), ensure_ascii=False))
     def write_json(path, obj):
         path.write_text(json.dumps(obj, ensure_ascii=False, indent=2), encoding='utf-8')
     ranking = out / f'ranking_probabilistico_{event}.json'
@@ -1464,6 +1474,8 @@ def main():
     ap.add_argument('--min-odd', type=float, default=1.01)
     ap.add_argument('--max-odd', type=float, default=1000.0)
     ap.add_argument('--top', type=int, default=30)
+    ap.add_argument('--evidence-cache', type=Path, help='Cálculos descriptivos previos vinculados por SHA; precios siempre reevaluados')
+    ap.add_argument('--evidence-cache-sha256')
     args = ap.parse_args()
     if args.no_odds and args.odds is not None:
         ap.error('No combinar --no-odds y --odds')

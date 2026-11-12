@@ -49,6 +49,8 @@ def norm(value: str) -> str:
 
 
 def load_json(path):
+    from prematch_paths import control_file
+    path = control_file(path)
     return json.loads(Path(path).read_text(encoding='utf-8-sig'))
 
 
@@ -223,7 +225,9 @@ def preflight_for_fixture(root: dict, fixture_id: int):
     return m[0] if m else None
 
 
-def validate_snapshot(f, pf, pfroot, pfpath, prepath, override, asof, age_limit, lead_min, historical):
+def validate_snapshot(f, pf, pfroot, pfpath, prepath, override, asof, age_limit, lead_min, historical, project_root=None):
+    from prematch_paths import local_reference, reference_root
+    project = project_root or reference_root(prepath, pfpath)
     reasons=match_identity(f,pf)
     if pf.get('status') not in ('MARKET_TRIPLES_EXTRACTED', 'HISTORICAL_MARKET_TRIPLES_EXTRACTED'):
         reasons.append('PREFLIGHT_NOT_VALID')
@@ -234,7 +238,7 @@ def validate_snapshot(f, pf, pfroot, pfpath, prepath, override, asof, age_limit,
     if (pf.get('time_evidence') or {}).get('status') in ('COUNTDOWN_TIME_CORROBORATED', 'ABSOLUTE_TIME_VERIFIED'):
         from bwin_market_preflight import validate_match
         try:
-            discovery_path = Path(pfroot.get('source_discovery') or '')
+            discovery_path = local_reference(project, pfroot.get('source_discovery'), pfroot.get('source_sha256'))
             if sha(discovery_path) != pfroot.get('source_sha256'):
                 raise ValueError('COUNTDOWN_DISCOVERY_SHA_MISMATCH')
             discovery = load_json(discovery_path)
@@ -252,7 +256,11 @@ def validate_snapshot(f, pf, pfroot, pfpath, prepath, override, asof, age_limit,
     eid = str(pf.get('bwin_event_id') or '')
     if not re.search(r'-2:'+re.escape(eid)+r'(?:\?|$)',str(pf.get('bwin_url') or '')):
         reasons.append('BWIN_URL_EVENT_ID_CONFLICT')
-    path = Path(override) if override else Path(source.get('snapshot_path') or '')
+    try:
+        path = local_reference(project, override or source.get('snapshot_path'), source.get('sha256'))
+    except (ValueError, OSError) as exc:
+        reasons.append('SNAPSHOT_PATH_OR_SHA_INVALID:' + str(exc))
+        return reasons, None, None
     if not path.is_file():
         reasons.append('SNAPSHOT_PATH_NOT_ACCESSIBLE')
         return reasons, None, None

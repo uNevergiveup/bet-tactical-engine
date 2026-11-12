@@ -1,0 +1,171 @@
+#!/usr/bin/env python3
+"""Fase 2: robustness, matchup and historical performance context (descriptive)."""
+from __future__ import annotations
+import math
+from statistics import mean, median
+from typing import Any
+
+METRICS = ("goals_for", "shots_for", "on_target_for", "xg_for", "corners_for",
+           "goals_against", "shots_against", "on_target_against", "xg_against", "corners_against")
+
+
+def metric(row: dict, name: str) -> float | None:
+    if name == "goals_for":
+        value = row.get("goals_for")
+    elif name == "goals_against":
+        value = row.get("goals_against")
+    else:
+        ending = "against" if name.endswith("_against") else "for"
+        source = row.get("conceded") if ending == "against" else row.get("own")
+        short = name[:-(len(ending) + 1)]
+        value = (source or {}).get({"on_target": "on_target", "shots": "shots",
+                                   "corners": "corners", "xg": "xg"}.get(short, short))
+    return float(value) if isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value) else None
+
+
+def avg(rows: list[dict], key: str) -> dict:
+    values = [metric(r, key) for r in rows]
+    kept = [x for x in values if x is not None]
+    return {"n": len(kept), "requested_n": len(rows),
+            "mean": round(mean(kept), 3) if kept else None,
+            "median": round(median(kept), 3) if kept else None,
+            "min": min(kept) if kept else None, "max": max(kept) if kept else None}
+
+
+def trend_robustness(rows: list[dict], key: str) -> dict:
+    # L5 vs previous L5. For 6..9 rows, n3 vs n3 EXPLORATORY.
+    n = 5 if len(rows) >= 10 else 3 if len(rows) >= 6 else None
+    if n is None:
+        return {"status": "MUESTRA_INSUFICIENTE", "required": 6, "observed": len(rows)}
+    recent, earlier = rows[:n], rows[n:2*n]
+    ra, eb = avg(recent, key), avg(earlier, key)
+    if ra["n"] < n or eb["n"] < n:
+        return {"status": "DATOS_INCOMPLETOS", "recent": ra, "previous": eb}
+    base_diff = ra["mean"] - eb["mean"]
+    # Jackknife: separately remove each recent/earlier game, assess sign stability.
+    alt = []
+    for x in range(n):
+        alt.append(mean([metric(r, key) for i, r in enumerate(recent) if i != x]) - eb["mean"])
+        alt.append(ra["mean"] - mean([metric(r, key) for i, r in enumerate(earlier) if i != x]))
+    # Stable sign after leave-one-out; if full diff near 0 it is noninformative.
+    agree = sum(1 for d in alt if (d > 0) == (base_diff > 0) and d != 0) / len(alt) if base_diff != 0 else 0.0
+    return {"status": "COMPARACION_L5_VS_L5" if n == 5 else "EXPLORATORIA_N3_VS_N3",
+            "metric": key, "recent": ra, "previous": eb,
+            "difference": round(base_diff, 3), "leave_one_out_sign_agreement": round(agree, 2),
+            "sensitive_to_single_match": agree < 0.85,
+            "caution": "No es prueba estadística calibrada ni predicción"}
+
+
+def group_rows(rows: list[dict]) -> dict:
+    groups = {"home": [], "away": []}
+    by_comp: dict[str, list] = {}
+    for r in rows:
+        groups["home" if r.get("venue") == "HOME" else "away"].append(r)
+        key = f"{r.get('league_id')}:{r.get('season')}"
+        by_comp.setdefault(key, []).append(r)
+    return {"venue": {k: {"count": len(v), "shots_for": avg(v, "shots_for"),
+                                "xg_for": avg(v, "xg_for"), "shots_against": avg(v, "shots_against")}
+                      for k, v in groups.items()},
+            "competition_season": {k: {"count": len(v), "shots_for": avg(v, "shots_for"),
+                                       "xg_for": avg(v, "xg_for"), "xg_against": avg(v, "xg_against")}
+                                    for k, v in sorted(by_comp.items())}}
+
+
+def disruptions(rows: list[dict]) -> dict:
+    recent = rows[:5]
+    return {"last5_red_card_games": [r["fixture_id"] for r in recent if (r.get("events") or {}).get("red_cards")],
+            "last5_failed_xg_conversion": [r["fixture_id"] for r in recent
+                                           if (metric(r, "goals_for") is not None and metric(r, "xg_for") is not None
+                                               and metric(r, "goals_for") - metric(r, "xg_for") <= -0.75)],
+            "coach_names_observed": sorted({str((r.get("lineup") or {}).get("coach_name")) for r in rows
+                                            if (r.get("lineup") or {}).get("coach_name")}),
+            "note": "No atribuir caídas a conflictos, lesiones o causalidad sin evidencia fechada"}
+
+
+def build(perf: dict, form: dict) -> dict:
+    if perf.get("event_id_bwin") != form.get("event_id_bwin") or perf.get("target_fixture_id") != form.get("target_fixture_id"):
+        raise ValueError("INPUT_IDENTITY_MISMATCH")
+    out: dict[str, Any] = {"schema": "prematch-depth-v1042", "event_id_bwin": perf["event_id_bwin"],
+                           "target_fixture_id": perf["target_fixture_id"],
+                           "analysis_cutoff_utc": perf["analysis_cutoff_utc"], "teams": {},
+                           "scope": "DESCRIPTIVE_NO_CALIBRATED_PROBABILITIES",
+                           "warnings": ["Ajuste por fortaleza de rivales no implementado; no comparar competiciones como equivalentes",
+                                        "Sin proveedor independiente: coherencia interna no verifica exactitud externa",
+                                        "Un único partido puede distorsionar ventanas pequeñas; revisar sensibilidad",
+                                        "NO usar resultados de fixture objetivo ni investigaciones posteriores al kickoff"]}
+    for side in ("home", "away"):
+        entry = perf["teams"][side]
+        rows = sorted(entry.get("historical_fixtures") or [],
+                      key=lambda r: (r["kickoff_utc"], r["fixture_id"]), reverse=True)
+        out["teams"][side] = {"name": entry["team_name"], "team_id": entry["team_id"],
+                              "observed_n": len(rows), "coverage": {"L10": len(rows) >= 10, "L20": len(rows) >= 20},
+                              "robustness": {m: trend_robustness(rows, m) for m in METRICS},
+                              "splits": group_rows(rows), "context": disruptions(rows),
+                              "coach_regime": form["teams"][side]["regime_evidence"],
+                              "historic_quality_issues": [{"fixture_id": r["fixture_id"], "status": r["data_quality"]["status"]}
+                                                        for r in rows if r["data_quality"]["status"] != "OK"],
+                              "xg_advantage_quality": [
+                                  {"fixture_id": r["fixture_id"], "difference": round(metric(r, "xg_for") - metric(r, "xg_against"), 3),
+                                   "interpretation": "DIFERENCIA_MARGINAL_NO_CONCLUYENTE"}
+                                  for r in rows if metric(r, "xg_for") is not None and metric(r, "xg_against") is not None
+                                  and 0 < abs(metric(r, "xg_for") - metric(r, "xg_against")) < 0.2] }
+    left = perf["teams"]["home"]["historical_fixtures"][:5]
+    right = perf["teams"]["away"]["historical_fixtures"][:5]
+    out["matchup"] = {}
+    for team_side, offense, conceding in (("home", left, right), ("away", right, left)):
+        entries = []
+        for m in ("shots", "on_target", "xg", "corners"):
+            prod, allowed = avg(offense, f"{m}_for"), avg(conceding, f"{m}_against")
+            entries.append({"market_family": m, "production_L5": prod, "opponent_allowed_L5": allowed,
+                            "directional_concordance": "DESCRIPTIVO_SIN_UMBRAL_CALIBRADO",
+                            "warning": "No constituye p_model ni tiene ajuste de fuerza de rival"})
+        out["matchup"][team_side] = {"team": out["teams"][team_side]["name"], "markets": entries}
+    return out
+
+
+def markdown(result: dict, *, original_source: str, calls: dict | None = None) -> str:
+    lines = [f"# PREMATCH V1.0.4 Fase 2 — {result['event_id_bwin']}", "",
+             f"- Fixture: **{result['target_fixture_id']}**", f"- Corte: `{result['analysis_cutoff_utc']}`",
+             f"- Fuente: {original_source}",
+             "- En esta entrega las diferencias descriptivas **no son probabilidades ni apuestas**.", ""]
+    if calls is not None:
+        lines.append(f"- Solicitudes API: {calls.get('api_calls', 0)}; caché: {calls.get('cache_hits', 0)}")
+        lines.append("")
+    for side in ("home", "away"):
+        team = result["teams"][side]
+        lines.extend([f"## {team['name']} ({'local' if side == 'home' else 'visitante'})", "",
+                      f"Históricos completos: **{team['observed_n']}**; "
+                      f"L10 {'OK' if team['coverage']['L10'] else 'INCOMPLETA'}, "
+                      f"L20 {'OK' if team['coverage']['L20'] else 'INCOMPLETA'}.", "",
+                      "| Indicador | Media reciente | Media anterior | Diferencia | Sensibilidad |",
+                      "|---|---:|---:|---:|---|"])
+        for key in ("goals_for", "shots_for", "on_target_for", "xg_for", "corners_for", "xg_against"):
+            t = team["robustness"][key]
+            if "recent" not in t:
+                lines.append(f"| {key} | N/D | N/D | N/D | {t['status']} |")
+            else:
+                l = t["recent"]["mean"]; r = t["previous"]["mean"]
+                lines.append(f"| {key} | {l} | {r} | {t['difference']} | "
+                             f"{'FRÁGIL' if t['sensitive_to_single_match'] else t['status']} |")
+        lines.extend(["", "**Localía (observaciones, sin ajuste por rivales):**", ""])
+        for venue, data in team["splits"]["venue"].items():
+            lines.append(f"- {venue}: n={data['count']}; tiros {data['shots_for']['mean']}; "
+                         f"xG {data['xg_for']['mean']}; tiros concedidos {data['shots_against']['mean']}.")
+        marginal = team["xg_advantage_quality"]
+        if marginal:
+            lines.append("**xG cercanos (sin superioridad concluyente):** " + ", ".join(
+                f"fixture {x['fixture_id']} (Δ={x['difference']})" for x in marginal) + ".")
+            lines.append("")
+        lines.extend(["", "**Incidencias detectadas:** " +
+                      f"rojas en últimos 5: {team['context']['last5_red_card_games']}; "
+                      f"desviaciones de conversión: {team['context']['last5_failed_xg_conversion']}.", ""])
+    lines.extend(["## Cruce de producción vs concesión rival (L5)", "",
+                  "| Equipo | Familia | Producción | Rival concede |",
+                  "|---|---|---:|---:|"])
+    for side in ("home", "away"):
+        for item in result["matchup"][side]["markets"]:
+            lines.append(f"| {result['matchup'][side]['team']} | {item['market_family']} | "
+                         f"{item['production_L5']['mean']} | {item['opponent_allowed_L5']['mean']} |")
+    lines.extend(["", "**Próxima fase:** validar fuerza del rival as-of, agregar distribuciones por mercado "
+                  "y cruzar cuotas Bwin con incertidumbre y backtesting, sin eliminar candidatos exploratorios."])
+    return "\n".join(lines) + "\n"

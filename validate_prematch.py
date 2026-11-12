@@ -273,6 +273,7 @@ def api_meta(raw: str) -> dict:
         'home_id':field(head,r'^Home:\s*.+?\s*\((\d+)\)\s*$'),
         'away_api':field(head,r'^Away:\s*(.+?)\s*\(\d+\)\s*$'),
         'away_id':field(head,r'^Away:\s*.+?\s*\((\d+)\)\s*$'),
+        'identity_status':field(head,r'^Identity status:\s*(\S+)'),
         'status':field(head,r'^Status:\s*(\S+)'),
         'competition':field(head,r'^League:\s*(.+)$'),
         'season':field(head,r'^Season:\s*(\d{4})'),
@@ -801,6 +802,13 @@ def audit_api(meta: dict, out: dict, url_id: str):
         issue(out,'BLOCK','API_WRONG_EVENT',f'Contexto API del evento {meta["event_id"]}, esperado {url_id}.')
     if not meta['fixture_id']:
         issue(out,'BLOCK','API_NO_FIXTURE','El contexto no contiene un fixture_id identificado.')
+    if meta.get('identity_status') == 'API_FIXTURE_VERIFIED_BWIN_TIME_UNKNOWN':
+        issue(out,'REVIEW','API_BWIN_TIME_UNKNOWN',
+              'Fixture API inequívoco y futuro, pero kickoff Bwin no corroborado; contexto provisional aislado.')
+    elif meta.get('identity_status') and meta.get('identity_status') not in {
+            'FIXTURE_AND_BWIN_TIME_VERIFIED', 'FIXTURE_VERIFIED_BY_GENERATOR'}:
+        issue(out,'BLOCK','API_IDENTITY_UNVERIFIED',
+              f"Estado de identidad no verificable: {meta.get('identity_status') or 'N/D'}")
     for key in ('home_bwin','away_bwin','home_api','away_api'):
         if not meta[key]:issue(out,'REVIEW',f'API_NO_{key.upper()}',f'No se reconoció el campo {key}.')
     for side in ('home','away'):
@@ -839,6 +847,9 @@ def audit_api(meta: dict, out: dict, url_id: str):
 def audit_odds(meta:dict, out:dict, url_id:str, api:dict):
     if meta['event_id']!=url_id:
         issue(out,'BLOCK','ODDS_WRONG_EVENT',f'Cuotas pertenecen al evento {meta["event_id"]}, esperado {url_id}.')
+    if api.get('identity_status') == 'API_FIXTURE_VERIFIED_BWIN_TIME_UNKNOWN':
+        issue(out,'BLOCK','ODDS_BWIN_TIME_UNVERIFIED',
+              'No se permite vincular cuotas Bwin a un fixture cuya hora Bwin no fue corroborada.')
     if meta['url']:
         try:
             if event_id_from_url(meta['url'])!=url_id:
@@ -1056,7 +1067,12 @@ def main() -> int:
                     raise ValueError('Team ID contradice TXT API: '+side)
             if api.get('kickoff_utc') and abs((api['kickoff_utc']-iso_dt(identity['kickoff_utc'])).total_seconds())>60:
                 raise ValueError('Kickoff contradice TXT API')
-            issue(output,'INFO','CANONICAL_IDENTITY_VERIFIED',f"Fixture {identity['api_fixture_id']} vinculado al evento Bwin {event_id}.")
+            if identity.get('identity_status') == 'API_FIXTURE_VERIFIED_BWIN_TIME_UNKNOWN':
+                issue(output, 'BLOCK' if odds else 'INFO',
+                      'CANONICAL_IDENTITY_BWIN_TIME_UNKNOWN',
+                      'Fixture API identificado, pero la hora Bwin no está corroborada; no habilita cuotas ni picks finales.')
+            else:
+                issue(output,'INFO','CANONICAL_IDENTITY_VERIFIED',f"Fixture {identity['api_fixture_id']} vinculado al evento Bwin {event_id}.")
         except (ValueError,TypeError,OSError,KeyError,json.JSONDecodeError) as err:
             issue(output,'BLOCK','IDENTITY_INVALID',str(err))
             identity=None

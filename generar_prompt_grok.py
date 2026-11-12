@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Genera COPIAR_GROK_<EVENT_ID>.md a partir de selected_match.json.
 
-python generar_prompt_grok.py --selected outputs/latest/selected_match.json
+python generar_prompt_grok.py --selected outputs/matches/<event_id>/selection/<run>/selected_match.json
 """
 import argparse
 import json
@@ -14,7 +14,8 @@ MADRID = ZoneInfo('Europe/Madrid')
 
 
 def generar(selected_path: Path, output_dir: Path | None = None) -> Path:
-    selected_path = Path(selected_path).expanduser().resolve(strict=True)
+    from prematch_paths import explicit_selection
+    selected_path = explicit_selection(selected_path)
     data = json.loads(selected_path.read_text(encoding='utf-8'))
     eid = str(data.get('bwin_event_id') or '').strip()
     fid = str(data.get('fixture_id') or '').strip()

@@ -86,6 +86,76 @@ class RefreshTests(unittest.TestCase):
         self.assertIn('prematch_single',result['error'])
 
 
+class ResearchKitV2Tests(unittest.TestCase):
+    def setUp(self):
+        self.temp=tempfile.TemporaryDirectory();self.addCleanup(self.temp.cleanup)
+        self.root=Path(self.temp.name);self.directory=self.root/'outputs/matches/7903872'
+        inputs=self.directory/'inputs';inputs.mkdir(parents=True)
+        self.identity=inputs/'match_identity.json'
+        t.dump(self.identity,{
+            'identity_status':'FIXTURE_AND_BWIN_TIME_VERIFIED','bwin_event_id':'7903872',
+            'bwin_url':'https://www.bwin.es/es/sports/eventos/osasuna-athletic-club-2:7903872',
+            'api_fixture_id':1570448,'league_id':140,'league_name':'La Liga','season':2026,
+            'kickoff_utc':(NOW+timedelta(hours=1)).isoformat(),
+            'home':{'api_name':'Osasuna','api_team_id':727},
+            'away':{'api_name':'Athletic Club','api_team_id':531}})
+        self.context_file=inputs/'match_engine_7903872.json'
+        t.dump(self.context_file,{'match':{'event_id':7903872},'fixture':{'fixture_id':1570448},
+            'context':{'history':[{'fixture_id':111}],'api_odds':{'secret_price':9.99},
+                       'predictions':{'winner':'forbidden'},'shots':12}})
+        self.manifest={'status':'PREPARADO','inputs':{
+            'identity':release.reference(self.identity),'context_json':release.reference(self.context_file)}}
+        selected=self.directory/'selection/selected_match.json';selected.parent.mkdir()
+        selected.write_text('{}');decision=selected.parent/'selection_decision.json';decision.write_text('{}')
+        self.ctx={'root':self.root,'directory':self.directory,'event_id':'7903872','fixture_id':1570448,
+            'url':'https://www.bwin.es/es/sports/eventos/osasuna-athletic-club-2:7903872',
+            'home':'Osasuna','away':'Athletic Club','kickoff':NOW+timedelta(hours=1),
+            'selection_time':NOW,'selection':{},'selected_path':selected,'decision_path':decision}
+        active=self.directory/'research/external';active.mkdir(parents=True)
+        self.active={}
+        for name in ('COPIAR_GEMINI_7903872.md','COPIAR_GROK_7903872.md',
+                     'ENTRADA_GEMINI_7903872.md','ENTRADA_GROK_7903872.md','ENTRADA_ARGON_7903872.md',
+                     'gemini_7903872.md','grok_7903872.md','fusion_7903872.md','reporte_cualitativo_7903872.md'):
+            path=active/name;path.write_text('ACTIVE '+name)
+            self.active[path]=t.sha(path)
+        for target,name,value in ((release,'selected_context',self.ctx),(single,'match_manifest',self.manifest)):
+            mocked=patch.object(target,name,return_value=value);mocked.start();self.addCleanup(mocked.stop)
+        allowed=patch.object(single,'ensure_prematch',return_value=30);allowed.start();self.addCleanup(allowed.stop)
+
+    def test_three_specialized_prompts_correct_metadata_and_no_active_overwrite(self):
+        folder=release.research_kit(self.root,Path('selected.json'))
+        prompts=sorted(folder.glob('PROMPT_*.txt'))
+        self.assertEqual([p.name for p in prompts],[
+            'PROMPT_ARGON_7903872.txt','PROMPT_GEMINI_7903872.txt','PROMPT_GROK_7903872.txt'])
+        bodies={p.name:p.read_text() for p in prompts}
+        for body in bodies.values():
+            self.assertIn('La Liga (League ID 140)',body)
+            self.assertIn('Temporada API-Football: 2026',body)
+            self.assertIn('cutoff_utc estricto:',body)
+            self.assertNotIn('9.99',body);self.assertNotIn('api_odds',body)
+        self.assertIn('mecanismos colectivos',bodies['PROMPT_GEMINI_7903872.txt'])
+        self.assertIn('cuentas oficiales en X',bodies['PROMPT_GROK_7903872.txt'])
+        self.assertIn('auditoría cruzada',bodies['PROMPT_ARGON_7903872.txt'])
+        self.assertIn(str(self.directory/'research/external/reporte_cualitativo_7903872.md'),
+                      bodies['PROMPT_ARGON_7903872.txt'])
+        projection=t.read(folder/'contexto_cualitativo_7903872.json')
+        self.assertNotIn('api_odds',projection['data']['context'])
+        self.assertNotIn('predictions',projection['data']['context'])
+        self.assertEqual({p:t.sha(p) for p in self.active},self.active)
+
+    def test_idempotent_and_different_existing_prompt_blocks_transaction(self):
+        folder=release.research_kit(self.root,Path('selected.json'))
+        before={p:t.sha(p) for p in folder.iterdir()}
+        self.assertEqual(release.research_kit(self.root,Path('selected.json')),folder)
+        self.assertEqual({p:t.sha(p) for p in folder.iterdir()},before)
+        target=folder/'PROMPT_GROK_7903872.txt';target.write_text('DO NOT OVERWRITE')
+        protected=folder/'PROMPT_GEMINI_7903872.txt';digest=t.sha(protected)
+        with self.assertRaisesRegex(ValueError,'WOULD_OVERWRITE'):
+            release.research_kit(self.root,Path('selected.json'))
+        self.assertEqual(t.sha(protected),digest)
+        self.assertEqual(target.read_text(),'DO NOT OVERWRITE')
+
+
 class FinalReviewTests(unittest.TestCase):
     def setUp(self):
         self.temp=tempfile.TemporaryDirectory();self.addCleanup(self.temp.cleanup)

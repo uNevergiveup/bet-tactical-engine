@@ -531,7 +531,13 @@ def rutas_salida_evento(info):
         # La carpeta enviada desde prematch_multi pertenece al mismo proyecto
         # donde se ejecuta el scraper. No admitir rutas externas por accidente.
         base = OUTPUT_DIR_SCRAPER.parent.resolve() / 'matches' / event / 'inputs'
-        if inputs != base:
+        staged=False
+        if os.getenv('PREMATCH_IMMUTABLE_CAPTURE')=='1':
+            staging=base.parent/'staging'
+            if inputs.is_relative_to(staging):
+                parts=inputs.relative_to(staging).parts
+                staged=len(parts)==3 and parts[-2:]==(event,'inputs') and bool(re.fullmatch(r'\d{8}T\d{12}Z',parts[0]))
+        if inputs != base and not staged:
             raise ValueError(f'La carpeta de cuotas del evento no coincide con el proyecto: '
                              f'{inputs} != {base}')
     else:

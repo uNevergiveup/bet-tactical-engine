@@ -16,6 +16,7 @@ from datetime import datetime, timedelta, timezone
 from functools import lru_cache, partial
 from pathlib import Path
 from typing import Any, Callable, Optional
+from zoneinfo import ZoneInfo
 from urllib.parse import unquote, urlparse
 from playwright.sync_api import sync_playwright
 
@@ -98,6 +99,10 @@ from config.constants import (
 
 # Identificador independiente de VERSION en config/constants.py.
 RESOLVER_PATCH_VERSION = '5.7.9-verified-pair-institutional-brazilian-fixture'
+MADRID_TZ = ZoneInfo('Europe/Madrid')
+IDENTITY_TIME_VERIFIED = 'FIXTURE_AND_BWIN_TIME_VERIFIED'
+IDENTITY_API_ONLY = 'API_FIXTURE_VERIFIED_BWIN_TIME_UNKNOWN'
+IDENTITY_UNVERIFIED = 'FIXTURE_UNVERIFIED'
 
 
 # =============================================================================
@@ -160,6 +165,8 @@ class BwinMatch:
     # Solo se rellena cuando un fixture concreto de API-Football acreditó
     # ambos clubes + orden + ventana horaria durante el rescate.
     verified_fixture_id: Optional[int] = None
+    identity_status: str = IDENTITY_UNVERIFIED
+    temporal_identity_evidence: Optional[dict[str, Any]] = None
 
 
 @dataclass
@@ -236,6 +243,7 @@ _BWIN_COMPETITION_LABELS = (
     r"(?:serie|série)\s+[abcd]", r"(?:ligue)\s+[12]",
     r"(?:la\s*liga|laliga)(?:\s+ea\s+sports|\s+hypermotion)?",
     r"(?:premier\s+league|championship|league\s+(?:one|two))",
+    r"(?:jupiler\s+pro\s+league)",
     r"(?:eredivisie|eerste\s+divisie|primeira\s+liga)",
     r"(?:(?:saudi|uae|emirates|qatar|egyptian|english|scottish|belgian|turkish|french|german|brazilian|colombian|portuguese|spanish|italian)\s+)?"
     r"(?:pro\s+league|professional\s+league|premier\s+league|super\s+league|superliga|liga\s+pro)",
@@ -275,9 +283,125 @@ def parse_date(value: Optional[str]) -> Optional[datetime]:
     if not value:
         return None
     try:
-        return datetime.fromisoformat(value.replace("Z", "+00:00"))
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=timezone.utc)
+        return parsed.astimezone(timezone.utc)
     except ValueError:
         return None
+
+
+_BWIN_LOCAL_DATETIME = re.compile(
+    r'(?<!\d)(\d{1,2})[/-](\d{1,2})[/-](\d{2,4})\s+(\d{1,2}):(\d{2})(?!\d)'
+)
+_BWIN_STRUCTURED_KEYS = {'starttime', 'startdate', 'kickoff', 'eventdate', 'scheduledstart', 'date'}
+_BWIN_STRUCTURED_PRIMARY_KEYS = _BWIN_STRUCTURED_KEYS - {'date'}
+
+
+def _structured_bwin_event_datetimes(html: str, event_id: Optional[int]) -> dict[str, datetime]:
+    """Extrae timestamps del objeto estructurado que contiene exactamente el Event ID."""
+    found: dict[str, datetime] = {}
+    if event_id is None:
+        return found
+    scripts = re.findall(r'<script\b[^>]*>(.*?)</script>', html, flags=re.I | re.S)
+    def visit(node: Any) -> None:
+        if isinstance(node, dict):
+            ids = {str(node.get(k)) for k in ('id', 'eventId', 'event_id', 'eventID') if node.get(k) is not None}
+            if str(event_id) in ids:
+                normalized_keys = {normalize_text(str(k)).replace(' ', '') for k in node}
+                has_primary = bool(normalized_keys & _BWIN_STRUCTURED_PRIMARY_KEYS)
+                for key, value in node.items():
+                    normalized_key = normalize_text(str(key)).replace(' ', '')
+                    if normalized_key not in _BWIN_STRUCTURED_KEYS:
+                        continue
+                    # Un campo genérico ``date`` no puede desplazar a startTime/
+                    # kickoff del objeto del evento; suele ser fecha de catálogo
+                    # o actualización y no el inicio del partido.
+                    if has_primary and normalized_key == 'date':
+                        continue
+                    if not isinstance(value, str):
+                        continue
+                    try:
+                        candidate = datetime.fromisoformat(value.replace('Z', '+00:00'))
+                    except ValueError:
+                        continue
+                    if candidate.tzinfo is None:
+                        LOG.warn(f'BWIN_KICKOFF_CANDIDATE source=structured_event key={key} status=REJECTED_NO_TIMEZONE')
+                        continue
+                    utc = candidate.astimezone(timezone.utc)
+                    found[utc.isoformat()] = utc
+                    LOG.info(
+                        f'BWIN_KICKOFF_CANDIDATE source=structured_event key={key} '
+                        f'raw={value!r} utc={utc.isoformat()} status=CANDIDATE'
+                    )
+            for value in node.values():
+                visit(value)
+        elif isinstance(node, list):
+            for value in node:
+                visit(value)
+    for block in scripts:
+        try:
+            visit(json.loads(unescape(block)))
+        except (TypeError, ValueError, json.JSONDecodeError):
+            continue
+    return found
+
+
+def bwin_event_datetime_utc(html: Optional[str], event_id: Optional[int]) -> Optional[datetime]:
+    """Extrae el kickoff mostrado por Bwin y lo normaliza a UTC.
+
+    Bwin muestra la hora en Europe/Madrid (por ejemplo ``5/11/26 23:30``),
+    mientras API-Football entrega ISO-8601. Solo se acepta una fecha localizada
+    cerca del Event ID; si no es inequívoca se devuelve ``None`` y el evento
+    queda explícitamente no verificable temporalmente.
+    """
+    if not html:
+        return None
+    structured = _structured_bwin_event_datetimes(html, event_id)
+    if len(structured) == 1:
+        value = next(iter(structured.values()))
+        LOG.ok(f'BWIN_KICKOFF_ACCEPTED event_id={event_id} utc={value.isoformat()} reason=UNIQUE_STRUCTURED_EVENT_METADATA')
+        return value
+    if len(structured) > 1:
+        LOG.warn(f'BWIN_KICKOFF_REJECTED event_id={event_id} candidates={len(structured)} reason=MULTIPLE_STRUCTURED_EVENT_TIMES')
+        return None
+    text = re.sub(r'<[^>]+>', ' ', unescape(html))
+    text = re.sub(r'\s+', ' ', text)
+    needles = [str(event_id)] if event_id is not None else []
+    windows: list[tuple[str, str]] = []
+    for needle in needles:
+        for hit in re.finditer(re.escape(needle), text):
+            windows.append(('event_id_window', text[max(0, hit.start() - 800):hit.end() + 800]))
+    if windows:
+        candidates = [(source, hit) for source, window in windows
+                      for hit in _BWIN_LOCAL_DATETIME.finditer(window)]
+    else:
+        candidates = [('html_general', hit) for hit in _BWIN_LOCAL_DATETIME.finditer(text)]
+    parsed: dict[str, datetime] = {}
+    for source, hit in candidates:
+        day, month, year, hour, minute = map(int, hit.groups())
+        year += 2000 if year < 100 else 0
+        try:
+            local = datetime(year, month, day, hour, minute, tzinfo=MADRID_TZ)
+        except ValueError:
+            LOG.warn(f'BWIN_KICKOFF_CANDIDATE source={source} raw={hit.group(0)!r} status=REJECTED_INVALID_DATE')
+            continue
+        utc = local.astimezone(timezone.utc)
+        parsed[utc.isoformat()] = utc
+        LOG.info(
+            f'BWIN_KICKOFF_CANDIDATE source={source} raw={hit.group(0)!r} '
+            f'local={local.isoformat()} utc={utc.isoformat()} status=CANDIDATE'
+        )
+    if len(parsed) == 1:
+        value = next(iter(parsed.values()))
+        LOG.ok(f'BWIN_KICKOFF_ACCEPTED event_id={event_id} utc={value.isoformat()} reason=UNIQUE_EVENT_CANDIDATE')
+        return value
+    if len(parsed) > 1:
+        LOG.warn(
+            f'BWIN_KICKOFF_REJECTED event_id={event_id} candidates={len(parsed)} '
+            'reason=MULTIPLE_EVENT_KICKOFF_CANDIDATES'
+        )
+    return None
 
 
 def iso_date(value: Optional[str]) -> Optional[str]:
@@ -408,7 +532,7 @@ def _club_identity_tokens(value: str) -> list[str]:
 # Se aplican solo al PRINCIPIO del nombre, y conservan números sustantivos:
 # Mainz 05 != Mainz 07; Elversberg B != Elversberg.
 _OPTIONAL_CLUB_PREFIXES = {
-    'sv', 'fsv', 'fc', 'sc', 'cf', 'cd', 'afc', 'ac', 'as',
+    'sv', 'fsv', 'kv', 'fc', 'sc', 'cf', 'cd', 'afc', 'ac', 'as',
     'fk', 'bk', 'bsc', 'vfb', 'tsg', 'ca', 'rc', 'ssc', 'ud', 'sd',
 }
 
@@ -458,7 +582,13 @@ def team_name_similarity(name_a: str, name_b: str,
         return 0
     # Quitar W/F SOLO de la similitud textual, nunca de la validación de género.
     if expected_gender == 'female':
-        a, b = _club_identity_tokens(base_name(name_a)), _club_identity_tokens(base_name(name_b))
+        a, b = (_club_identity_tokens(base_name(n.replace('ø','o').replace('Ø','O')))
+                for n in (name_a, name_b))
+        aliases = {'ol lyonnes':'lyon', 'hb koge':'koge', 'psv eindhoven':'psv eindhoven'}
+        ka = aliases.get(' '.join(a), ' '.join(a))
+        kb = aliases.get(' '.join(b), ' '.join(b))
+        if ka == kb:
+            return 100
     else:
         a, b = _club_identity_tokens(name_a), _club_identity_tokens(name_b)
     if not a or not b:
@@ -493,6 +623,9 @@ def name_variants(normalized: str, use_translation: bool = False) -> list[str]:
     """Variantes de nombre: original, alias manuales, país en inglés, traducción."""
     variants = [normalized]
     variants.extend(normalize_text(a) for a in TEAM_ALIASES.get(normalized, ()))
+    # Search hints only. Gender and the unique ordered fixture remain mandatory.
+    variants.extend({'ol lyonnes':('lyon w',), 'hb koge':('køge w','koge w'),
+                     'psv eindhoven':('psv/eindhoven w',)}.get(normalized, ()))
     # Acrónimo institucional Bwin: sin estas variantes, la búsqueda de PSG
     # no encuentra necesariamente la denominación completa de API-Football.
     # Son candidatos textuales; se sigue exigiendo validación del fixture.
@@ -565,6 +698,69 @@ def name_variants(normalized: str, use_translation: bool = False) -> list[str]:
         if v and v not in result:
             result.append(v)
     return result
+
+
+# Exónimos que solo son válidos con contexto de pareja. No se incorporan a
+# TEAM_ALIASES ni a name_variants(): "Marsella" puede referirse a más de una
+# entidad en una búsqueda aislada. La equivalencia se activa únicamente al
+# comprobar la pareja Bayer Leverkusen–O. Marsella contra un fixture real.
+_CONTEXTUAL_PAIR_ALIASES: dict[tuple[str, str], tuple[str, ...]] = {
+    ("o. marsella", "bayer leverkusen"): ("marseille",),
+    ("o marsella", "bayer leverkusen"): ("marseille",),
+}
+
+
+def contextual_name_variants(
+        name: str,
+        *,
+        counterpart: Optional[str] = None,
+        competition: Optional[str] = None,
+) -> list[str]:
+    """Genera pistas de nombre solo cuando la pareja aporta contexto.
+
+    La salida sigue siendo una lista de candidatos; nunca autoriza por sí sola
+    un team ID. ``competition`` se acepta para dejar trazabilidad y reservar
+    el alias a una futura validación más estricta, pero la pareja exacta es el
+    requisito mínimo actual.
+    """
+    normalized = normalize_text(name)
+    variants = list(name_variants(normalized))
+    key = (normalized, normalize_text(counterpart or ""))
+    for alias in _CONTEXTUAL_PAIR_ALIASES.get(key, ()):
+        if alias not in variants:
+            variants.append(alias)
+    return variants
+
+
+def fixture_season_compatible(match: BwinMatch, league: dict[str, Any], reference: datetime) -> bool:
+    """Comprueba que el fixture trae temporada y que encaja con su fecha."""
+    raw_season = league.get("season")
+    if raw_season is None:
+        return False
+    try:
+        season = int(raw_season)
+    except (TypeError, ValueError):
+        return False
+    expected = reference.year if reference.month >= 7 else reference.year - 1
+    return season == expected
+
+
+def fixture_competition_compatible(
+        match: BwinMatch,
+        league: dict[str, Any],
+        reference: datetime,
+) -> bool:
+    """Exige liga identificable, temporada coherente y, si existe, torneo."""
+    league_id = league.get("id")
+    if league_id is None:
+        return False
+    if match.tournament_id is not None:
+        try:
+            if int(league_id) != int(match.tournament_id):
+                return False
+        except (TypeError, ValueError):
+            return False
+    return bwin_league_compatible(match.competition_display, league) and fixture_season_compatible(match, league, reference)
 
 
 def weak_team_search_terms(name: str) -> list[str]:
@@ -652,22 +848,25 @@ class JSONCache:
         if not path.exists():
             return None
         try:
-            age = time.time() - path.stat().st_mtime
+            from prematch_cache_record import unpack_record
             with path.open("r", encoding="utf-8") as file:
-                data = json.load(file)
+                data, acquired = unpack_record(json.load(file))
+            age = (datetime.now(timezone.utc) - acquired).total_seconds()
         except Exception:
             return None
 
         ttl = self.ttl_for(endpoint, params)
         if isinstance(data, dict) and data.get("response") == []:
             ttl = min(ttl, CACHE_TTL_EMPTY)  # las respuestas vacías caducan rápido
-        return data if age <= ttl else None
+        return data if 0 <= age <= ttl else None
 
     def set(self, endpoint: str, params: dict[str, Any], data: dict[str, Any]) -> None:
         path = self._path(endpoint, params)
         tmp_path = path.with_suffix(f".{threading.get_ident()}.tmp")
+        from prematch_cache_record import acquisition_record
+        self.directory.mkdir(parents=True, exist_ok=True)
         with tmp_path.open("w", encoding="utf-8") as file:
-            json.dump(data, file, ensure_ascii=False, indent=2)
+            json.dump(acquisition_record(data), file, ensure_ascii=False, indent=2)
         tmp_path.replace(path)
 
 
@@ -885,6 +1084,10 @@ class APIFootballClient:
 
                 if use_cache:
                     CACHE.set(endpoint, params, data)
+                if endpoint == 'fixtures/lineups':
+                    from prematch_cache_record import store_acquisition
+                    acquired_path = store_acquisition(CACHE_DIR / 'acquisitions' / 'fixtures_lineups', data)
+                    LOG.info(f'XI acquisition record: {acquired_path}')
                 return data
 
             except requests.RequestException as exc:
@@ -926,6 +1129,9 @@ def title_club_from_slug(home_raw: str, away_raw: str, slug: str) -> Optional[tu
     if flat[:len(visitor_slug)] != visitor_slug or len(words) <= len(visitor_slug):
         return None
     split_end = words[len(visitor_slug)-1].end()
+    # Preserve the closing parenthesis of an explicitly matched category (F).
+    if away_raw[:split_end].count('(') > away_raw[:split_end].count(')') and away_raw[split_end:].startswith(')'):
+        split_end += 1
     club, tail = away_raw[:split_end].strip(), away_raw[split_end:].strip()
     if not club or not tail or not re.search(r"\bf[uú]t(?:bol|ebol)\s*$", tail, re.I):
         return None
@@ -952,7 +1158,7 @@ class BwinParser:
     # Captura el slug y el ID de URLs como: /eventos/valencia-villarreal-2:7893914
     EVENT_REGEX = re.compile(r"/eventos/([^/?#]+)-2:(\d+)", flags=re.IGNORECASE)
 
-    def parse(self, url: str, html: Optional[str] = None) -> BwinMatch:
+    def parse(self, url: str, html: Optional[str] = None, *, browser_catalog=None) -> BwinMatch:
         path = unquote(urlparse(url).path)
         match = self.EVENT_REGEX.search(path)
         if not match:
@@ -982,6 +1188,25 @@ class BwinParser:
                 and not BWIN_GENDER_TAG.search(away_raw)):
             home_gender = away_gender = 'female'
 
+        event_date_utc = bwin_event_datetime_utc(html, event_id)
+        visible = browser_event_datetime_utc(browser_catalog or [], event_id)
+        if visible is not None:
+            if len(_structured_bwin_event_datetimes(html or '', event_id)) > 1:
+                raise ValueError('BWIN_KICKOFF_CONFLICT: ambiguous structured event times')
+            if event_date_utc is not None and event_date_utc != visible:
+                raise ValueError('BWIN_KICKOFF_CONFLICT: structured and visible event times disagree')
+            event_date_utc = visible
+        if event_date_utc is not None:
+            LOG.info(
+                f"Kickoff Bwin normalizado: local={event_date_utc.astimezone(MADRID_TZ).isoformat()} "
+                f"UTC={event_date_utc.isoformat()}"
+            )
+        else:
+            LOG.warn(
+                f"BWIN_KICKOFF_UNVERIFIED: no hay una única fecha/hora verificable "
+                f"para Event ID {event_id}; no se inferirá desde datetime.now()."
+            )
+
         return BwinMatch(
             url=url,
             event_id=event_id,
@@ -997,6 +1222,16 @@ class BwinParser:
             competition_display=competition_from_title,
             stage=None,
             round_name=None,
+            # Conservamos la hora de origen Bwin con su offset para auditoría;
+            # parse_date() la normaliza a UTC antes de cualquier comparación.
+            event_date=(event_date_utc.astimezone(MADRID_TZ).isoformat()
+                         if event_date_utc else None),
+            temporal_identity_evidence=({'schema_version':'1.0-browser-event-time',
+                'source':'SINGLE_EVENT_TILE', 'timezone':'Europe/Madrid',
+                'kickoff_utc':visible.isoformat(),
+                'catalog_observations':[r for r in browser_catalog or []
+                                        if str(r.get('bwin_event_id'))==str(event_id)]}
+                if visible is not None else None),
         )
 
     def _extract_teams_from_html(self, html: Optional[str], slug: str) -> tuple[str, str]:
@@ -1045,17 +1280,58 @@ class BwinParser:
         return slug.replace("-", " "), "Rival"
 
 
-def fetch_bwin_html(url: str) -> str:
+def browser_event_datetime_utc(catalog, event_id):
+    """Use only timestamped, single-event tiles from a Madrid browser context."""
+    from bwin_market_preflight import CATALOG_TIME_RE, LIVE_RE, published_event_id
+    found = set()
+    for row in catalog:
+        if (str(row.get('bwin_event_id')) != str(event_id)
+                or published_event_id(row.get('bwin_url')) != str(event_id)
+                or row.get('text_source') != 'SINGLE_EVENT_TILE'
+                or row.get('browser_timezone') != 'Europe/Madrid'):
+            continue
+        text = row.get('text', '')
+        observed = parse_date(row.get('text_observed_at_utc'))
+        times = list(CATALOG_TIME_RE.finditer(text))
+        if LIVE_RE.search(text) or not observed or len(times) != 1:
+            continue
+        # The capture timestamp, never the API kickoff, anchors Hoy/Mañana.
+        local = observed.astimezone(MADRID_TZ)
+        hit = times[0]
+        day = local.date() + timedelta(days=int(hit[1].lower().startswith('ma')))
+        try:
+            value = datetime(day.year, day.month, day.day, int(hit[2]), int(hit[3]), tzinfo=MADRID_TZ)
+        except ValueError:
+            continue
+        found.add(value.astimezone(timezone.utc))
+        LOG.info(f'BWIN_KICKOFF_CANDIDATE source=SINGLE_EVENT_TILE event_id={event_id} raw={text!r} observed={observed.isoformat()} timezone=Europe/Madrid utc={value.astimezone(timezone.utc).isoformat()}')
+    if len(found) != 1:
+        if len(found) > 1:
+            raise ValueError('BWIN_KICKOFF_CONFLICT: multiple visible times for one Event ID')
+        return None
+    return next(iter(found))
+
+
+def fetch_bwin_html(url: str, *, catalog_out=None) -> str:
     LOG.info("Descargando HTML de Bwin con Playwright para extraer nombres reales...")
     try:
         with sync_playwright() as p:
             browser = p.chromium.launch(headless=True)
-            page = browser.new_page()
+            page = browser.new_page(locale='es-ES', timezone_id='Europe/Madrid')
             # Navegamos a la URL y esperamos a que el DOM esté listo
             page.goto(url, wait_until='domcontentloaded', timeout=45000)
             # Pausa de 2.5s para que el JavaScript de Bwin inyecte el <title> completo
             page.wait_for_timeout(2500)
             html = page.content()
+            if catalog_out is not None:
+                from bwin_discovery import browser_collect_anchors
+                catalog_out.extend({**r, 'browser_timezone':'Europe/Madrid'}
+                                   for r in browser_collect_anchors(page, 0))
+                output = context_output_dir()
+                output.mkdir(parents=True, exist_ok=True)
+                stamp = datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%S%fZ')
+                (output / f'bwin_metadata_{stamp}.html').write_text(html, encoding='utf-8')
+                (output / f'bwin_metadata_{stamp}.json').write_text(json.dumps(catalog_out, ensure_ascii=False, indent=2), encoding='utf-8')
             browser.close()
             # No modificar HTML globalmente: las colas de competición se
             # recortan solo del nombre extraído en clean_team_name().
@@ -1472,7 +1748,11 @@ class ContextualTeamResolver:
         )
 
         normalized = normalize_text(target_name)
-        variants = name_variants(normalized, use_translation=False)
+        variants = contextual_name_variants(
+            target_name,
+            counterpart=known_opponent.name,
+            competition=None,
+        )
         variant_bases = {base_name(v) for v in variants}
         expected_national = normalized in COUNTRY_ES_EN
 
@@ -1671,12 +1951,18 @@ class FixtureResolver:
         verified_id = getattr(match, "verified_fixture_id", None)
         if verified_id:
             try:
+                reference = parse_date(match.event_date) if match.event_date else datetime.now(timezone.utc)
                 rows = self.api.get("fixtures", {"id": verified_id}).get("response", []) or []
                 exact = [row for row in rows if
                          (row.get("teams", {}).get("home", {}) or {}).get("id") == home_team.id and
                          (row.get("teams", {}).get("away", {}) or {}).get("id") == away_team.id and
-                         (row.get("fixture", {}) or {}).get("id") == verified_id]
+                         (row.get("fixture", {}) or {}).get("id") == verified_id and
+                         fixture_competition_compatible(match, row.get('league') or {}, reference)]
                 if len(exact) == 1:
+                    ok, status, reason, _ = fixture_temporal_eligibility(match, exact[0])
+                    if not ok:
+                        raise RuntimeError(f'fixture temporalmente no elegible: {reason}')
+                    match.identity_status = status
                     LOG.ok(f"FIXTURE confirmado por ID de calendario: {verified_id}")
                     return self._to_resolved_fixture(exact[0])
                 LOG.warn(f"El fixture {verified_id} no reproduce ambos IDs y localía; se rechaza.")
@@ -2952,6 +3238,7 @@ class ContextFormatter:
             f"Away Bwin: {match.away_name_raw}",
             f"Gender Home: {match.home_gender}",
             f"Gender Away: {match.away_gender}",
+            f"Identity status: {match.identity_status}",
             f"Tournament ID: {match.tournament_id}",
             f"Tournament: {match.tournament_name}",
             f"Competition display: {match.competition_display}",
@@ -2984,12 +3271,12 @@ class ContextFormatter:
 
         cls._section(lines, "VALIDACIÓN")
         lines.extend([
-            "Bwin event -> API fixture: OK",
+            f"Bwin event -> API fixture: {match.identity_status}",
             "Home team resolution: OK",
             "Away team resolution: OK",
             "Competition resolution: OK",
             "Season resolution: OK",
-            "Exact fixture resolution: OK",
+            f"Exact fixture resolution: {match.identity_status}",
             "",
         ])
 
@@ -3737,7 +4024,11 @@ def resolve_missing_from_fixture_calendar(
     now = datetime.now(timezone.utc)
     day0 = (reference - timedelta(days=1)).date()
     days = [(day0 + timedelta(days=i)).isoformat() for i in range(3)]
-    expected_variants = name_variants(normalize_text(target_name))
+    expected_variants = contextual_name_variants(
+        target_name,
+        counterpart=anchor.name,
+        competition=match.competition_display,
+    )
     found: dict[int, tuple[APITeam, APITeam, int, datetime]] = {}
     rejection_counts = {'anchor_or_order':0, 'name_or_category':0, 'date':0, 'invalid':0}
     source_counts: list[str] = []
@@ -3772,6 +4063,10 @@ def resolve_missing_from_fixture_calendar(
                     similarity < 0.88):
                 rejection_counts['name_or_category'] += 1
                 continue
+            league = row.get('league') or {}
+            if not fixture_competition_compatible(match, league, reference):
+                rejection_counts['date'] += 1
+                continue
             fx = row.get('fixture') or {}
             dt = parse_date(fx.get('date'))
             if dt is None or not fx.get('id'):
@@ -3779,14 +4074,10 @@ def resolve_missing_from_fixture_calendar(
                 continue
             if dt.tzinfo is None:
                 dt = dt.replace(tzinfo=timezone.utc)
-            distance = (dt - reference).total_seconds()
-            # Sin timestamp Bwin se exige proximidad al momento de ejecución.
-            if abs(distance) > (36 * 3600 if match.event_date else 36 * 3600):
+            temporal_ok, temporal_reason, _ = temporal_identity_check(match, row)
+            if not temporal_ok:
                 rejection_counts['date'] += 1
-                continue
-            # Evitar confirmar un fixture pasado a partir de una referencia ambigua.
-            if not match.event_date and (dt - now).total_seconds() < -36 * 3600:
-                rejection_counts['date'] += 1
+                LOG.warn(f"RESCATE_FECHA rechazo fixture={fx.get('id')}: motivo={temporal_reason}")
                 continue
             new_team = APITeam(
                 id=int(candidate['id']), name=cand_name, code=None,
@@ -3861,6 +4152,8 @@ def resolve_missing_from_fixture_calendar(
         LOG.error(f'No fue posible validar fixture.id={fixture_id}: {exc}')
         return home, away
     match.verified_fixture_id = fixture_id
+    match.identity_status = (IDENTITY_TIME_VERIFIED if match.event_date
+                             else IDENTITY_API_ONLY)
     LOG.ok(f'Identidad confirmada API fixture={fixture_id}, fecha={dt.isoformat()}: '
            f'{h_team.name} ({h_team.id}) vs {a_team.name} ({a_team.id}).')
     return h_team, a_team
@@ -3897,29 +4190,10 @@ def resolve_full_pair_from_competition_fixture(
     year = ref.year
     seasons = [year] + ([year-1] if ref.month <= 7 else [])
 
-    # Estas equivalencias institucionales se usan ÚNICAMENTE para contrastar
-    # un fixture. No significan que dos IDs de /teams sean intercambiables.
-    verified_name_aliases = {
-        'atletico mineiro': {'atletico mg', 'clube atletico mineiro'},
-        'atletico mg': {'atletico mineiro', 'clube atletico mineiro'},
-    }
-
-    def name_compatible(bwin_name: str, api_name: str) -> bool:
-        # En esta fase los alias textuales son pistas: las identidades requieren
-        # un fixture único con fecha, categoría, orden y liga verificados.
-        variants = name_variants(normalize_text(bwin_name))
-        norm = normalize_text(api_name)
-        aliases = {
-            'atletico mineiro': {'atletico mg', 'clube atletico mineiro'},
-            'atletico mg': {'atletico mineiro', 'clube atletico mineiro'},
-        }
-        return any(norm == v or institutional_name_match(v,api_name)
-                   or norm in aliases.get(v,set()) for v in variants)
-
     def competition_compatible(league: dict) -> bool:
         return bwin_league_compatible(match.competition_display, league)
 
-    accepted: dict[int, tuple[dict, datetime, str]] = {}
+    accepted: dict[int, tuple[dict, datetime, str, str]] = {}
     sources: list[str] = []
     rejected = {'name':0, 'gender':0, 'competition':0, 'time':0, 'malformed':0}
 
@@ -3938,24 +4212,29 @@ def resolve_full_pair_from_competition_fixture(
                 continue
             if dt.tzinfo is None:
                 dt = dt.replace(tzinfo=timezone.utc)
-            # El mismo encuentro deberá pertenecer a la ventana del evento.
-            if abs((dt-ref).total_seconds()) > 36 * 3600:
-                rejected['time'] += 1
-                continue
-            if not (name_compatible(match.home_name, ht.get('name','')) and
-                    name_compatible(match.away_name, at.get('name',''))):
+            identity_ok, identity_reason = fixture_pair_identity_match(
+                match, item, home_team=home, away_team=away,
+                allow_alias_after_id_mismatch=True)
+            if not identity_ok:
                 rejected['name'] += 1
                 continue
+            LOG.info(f"PAREJA_FIXTURE identidad={identity_reason} fixture={fid}")
             if (detect_gender(ht.get('name','')) != match.home_gender or
                     detect_gender(at.get('name','')) != match.away_gender or
                     not club_category_compatible(match.home_name, ht.get('name',''), match.home_gender) or
                     not club_category_compatible(match.away_name, at.get('name',''), match.away_gender)):
                 rejected['gender'] += 1
                 continue
-            if not competition_compatible(league):
+            if not competition_compatible(league) or not fixture_competition_compatible(match, league, ref):
                 rejected['competition'] += 1
                 continue
-            accepted[int(fid)] = (item, dt, origin)
+            # Filtrar primero identidad; solo después comparar el tiempo.
+            temporal_ok, temporal_status, temporal_reason, _ = fixture_temporal_eligibility(match, item)
+            if not temporal_ok:
+                rejected['time'] += 1
+                LOG.warn(f"PAREJA_FIXTURE rechazo fixture={fid}: motivo={temporal_reason}")
+                continue
+            accepted[int(fid)] = (item, dt, origin, temporal_status)
 
     # Si la resolución inicial de un lado fue errónea, el otro (aunque sea
     # ambiguo) permite consultar fixtures sin usar aquel ID incorrecto.
@@ -4008,7 +4287,7 @@ def resolve_full_pair_from_competition_fixture(
                  f'fuentes={sources}; descartes={rejected}. No se asigna ID.')
         return home, away
 
-    fid, (row, kickoff, origin) = next(iter(accepted.items()))
+    fid, (row, kickoff, origin, temporal_status) = next(iter(accepted.items()))
     try:
         details = api.get('fixtures', {'id':fid}).get('response',[]) or []
         exact = [it for it in details if
@@ -4026,14 +4305,17 @@ def resolve_full_pair_from_competition_fixture(
     detail_dt = parse_date((check.get('fixture') or {}).get('date'))
     if detail_dt is not None and detail_dt.tzinfo is None:
         detail_dt = detail_dt.replace(tzinfo=timezone.utc)
-    if not (name_compatible(match.home_name, check['teams']['home']['name']) and
-            name_compatible(match.away_name, check['teams']['away']['name']) and
+    identity_ok, identity_reason = fixture_pair_identity_match(
+        match, check, home_team=home, away_team=away)
+    if not (identity_ok and
             detect_gender(check['teams']['home']['name']) == match.home_gender and
             detect_gender(check['teams']['away']['name']) == match.away_gender and
             competition_compatible(check.get('league') or {}) and
+            fixture_competition_compatible(match, check.get('league') or {}, ref) and
             detail_dt is not None and abs((detail_dt-ref).total_seconds()) <= 36 * 3600):
         LOG.warn('PAREJA_FIXTURE detalle contradice identidades, fecha o competición')
         return home, away
+    LOG.info(f"PAREJA_FIXTURE detalle identidad={identity_reason} fixture={fid}")
 
     def team(side: str, gender: str) -> APITeam:
         raw = check['teams'][side]
@@ -4049,6 +4331,7 @@ def resolve_full_pair_from_competition_fixture(
         LOG.warn(f'AWAY REASIGNADO POR FIXTURE, NO POR ALIAS: '
                  f'{away.name} ({away.id}) -> {validated_away.name} ({validated_away.id})')
     match.verified_fixture_id = fid
+    match.identity_status = temporal_status
     LOG.ok(f'PAREJA_CONFIRMADA fixture={fid}, liga={check["league"].get("id")}, '
            f'season={check["league"].get("season")}, fecha={kickoff.isoformat()}, '
            f'fuente={origin}: {validated_home.name} ({validated_home.id}) vs '
@@ -4077,48 +4360,246 @@ def bwin_league_compatible(label: Optional[str], league: dict[str, Any]) -> bool
         return bool(country == 'brazil' and tier and re.search(r'\bserie\s+'+tier.group(1)+r'\b', name))
     if 'champions league' in query:
         return 'champions league' in name
+    if 'uefa copa europa' in query:
+        return bool(re.fullmatch(r'uefa europa cup(?:\s*-\s*|\s+)women', name)
+                    and re.search(r'\(f\)|\bwomen\b', query))
     return True
 
 
-def bwin_fixture_names_match(match: BwinMatch, row: dict[str, Any]) -> bool:
+def _fixture_institutional_key(name: str) -> str:
+    """Núcleo institucional conservador para un detalle de fixture.
+
+    La forma brasileña ``Clube do X`` puede aparecer como ``X`` en
+    API-Football. Solo se elimina el prefijo institucional completo; nunca se
+    quitan categorías, números o sufijos de reservas/femeninos.
+    """
+    tokens = _club_tokens(name)
+    if len(tokens) >= 2 and tokens[0] == 'clube' and tokens[1] in {'do', 'da', 'de'}:
+        tokens = tokens[2:]
+    elif len(tokens) >= 2 and tokens[0] == 'club' and tokens[1] in {'do', 'da', 'de'}:
+        tokens = tokens[2:]
+    return institutional_club_key(' '.join(tokens))
+
+
+def _fixture_text_name_match(match: BwinMatch, side: str, candidate: str) -> bool:
+    target = match.home_name if side == 'home' else match.away_name
+    counterpart = match.away_name if side == 'home' else match.home_name
+    gender = match.home_gender if side == 'home' else match.away_gender
+    if not candidate or detect_gender(candidate) != gender:
+        return False
+    if not club_category_compatible(target, candidate, gender):
+        return False
+    variants = contextual_name_variants(
+        target, counterpart=counterpart, competition=match.competition_display)
+    candidate_norm = normalize_text(candidate)
+    return any(
+        candidate_norm == normalize_text(variant)
+        or team_name_similarity(variant, candidate, gender) == 100
+        or institutional_name_match(variant, candidate, gender)
+        or (_fixture_institutional_key(variant) == _fixture_institutional_key(candidate)
+            and len(_fixture_institutional_key(candidate)) >= 4)
+        for variant in variants
+    )
+
+
+def fixture_side_name_match(
+        match: BwinMatch,
+        side: str,
+        candidate_name: str,
+        *,
+        candidate_id: Optional[int],
+        expected_id: Optional[int],
+        allow_alias_after_id_mismatch: bool = False,
+) -> tuple[bool, str]:
+    """Comprueba una pareja de fixture por ID exacto o por alias textual.
+
+    Un ID solo es válido cuando proviene del equipo ya resuelto y coincide en
+    la localía esperada. Si no se dispone de ese ID, el texto sigue siendo
+    únicamente una pista y queda sujeto a los filtros de categoría, torneo,
+    fecha y unicidad del fixture.
+    """
+    if expected_id is not None:
+        try:
+            exact_id = candidate_id is not None and int(candidate_id) == int(expected_id)
+        except (TypeError, ValueError):
+            exact_id = False
+        if exact_id:
+            return True, 'EXACT_API_ID'
+        # Un ID previo puede ser una resolución nominal errónea. El rescate
+        # solo puede sustituirlo por el ID que trae un fixture único y
+        # completamente validado; aquí se conserva el motivo para auditarlo.
+        if allow_alias_after_id_mismatch and _fixture_text_name_match(match, side, candidate_name):
+            return True, 'TEXTUAL_ALIAS_AFTER_ID_MISMATCH'
+        return False, 'API_ID_MISMATCH'
+    if _fixture_text_name_match(match, side, candidate_name):
+        return True, 'TEXTUAL_ALIAS'
+    return False, 'TEXTUAL_NAME_MISMATCH'
+
+
+def fixture_pair_identity_match(
+        match: BwinMatch,
+        row: dict[str, Any],
+        *,
+        home_team: Optional[APITeam] = None,
+        away_team: Optional[APITeam] = None,
+        expected_home_id: Optional[int] = None,
+        expected_away_id: Optional[int] = None,
+        allow_alias_after_id_mismatch: bool = False,
+) -> tuple[bool, str]:
     pair = row.get('teams') or {}
-    for side, target, gender in (
-            ('home', match.home_name, match.home_gender),
-            ('away', match.away_name, match.away_gender),
-    ):
-        candidate = (pair.get(side) or {}).get('name') or ''
-        if not candidate or detect_gender(candidate) != gender or not club_category_compatible(target,candidate,gender):
-            return False
-        variants = name_variants(normalize_text(target))
-        specials = {
-            'atletico mineiro': {'atletico mg', 'clube atletico mineiro'},
-            'atletico mg': {'atletico mineiro', 'clube atletico mineiro'},
-        }
-        if not any(normalize_text(candidate) == v
-                   or institutional_name_match(v,candidate,gender)
-                   or normalize_text(candidate) in specials.get(v,set())
-                   for v in variants):
-            return False
-    return True
+    home = pair.get('home') or {}
+    away = pair.get('away') or {}
+    checks = []
+    for side, raw, expected in (
+        ('home', home, home_team), ('away', away, away_team)):
+        expected_id = (
+            expected.id if expected is not None else
+            (expected_home_id if side == 'home' else expected_away_id)
+        )
+        ok, reason = fixture_side_name_match(
+            match, side, raw.get('name') or '',
+            candidate_id=raw.get('id'),
+            expected_id=expected_id,
+            allow_alias_after_id_mismatch=allow_alias_after_id_mismatch,
+        )
+        if not ok:
+            return False, reason
+        checks.append(reason)
+    if all(reason == 'EXACT_API_ID' for reason in checks):
+        return True, 'EXACT_API_IDS'
+    if any(reason == 'EXACT_API_ID' for reason in checks):
+        return True, 'EXACT_API_ID_PLUS_ALIAS'
+    return True, 'TEXTUAL_ALIAS'
+
+
+def bwin_fixture_names_match(
+        match: BwinMatch,
+        row: dict[str, Any],
+        *,
+        expected_home_id: Optional[int] = None,
+        expected_away_id: Optional[int] = None,
+) -> bool:
+    ok, _ = fixture_pair_identity_match(
+        match, row,
+        expected_home_id=expected_home_id,
+        expected_away_id=expected_away_id,
+    )
+    return ok
+
+
+def temporal_identity_check(
+        match: BwinMatch,
+        row: dict[str, Any],
+        *,
+        reference_now: Optional[datetime] = None,
+) -> tuple[bool, str, dict[str, Any]]:
+    """Compara exclusivamente instantes UTC y devuelve diagnóstico auditable."""
+    api_raw = (row.get('fixture') or {}).get('date')
+    api_source = None
+    bwin_source = None
+    try:
+        api_source = datetime.fromisoformat(str(api_raw).replace('Z', '+00:00')) if api_raw else None
+    except ValueError:
+        api_source = None
+    try:
+        bwin_source = datetime.fromisoformat(str(match.event_date).replace('Z', '+00:00')) if match.event_date else None
+    except ValueError:
+        bwin_source = None
+    api_dt = parse_date(api_raw)
+    bwin_dt = parse_date(match.event_date) if match.event_date else None
+    if api_dt is not None and api_dt.tzinfo is None:
+        api_dt = api_dt.replace(tzinfo=timezone.utc)
+    if bwin_dt is not None and bwin_dt.tzinfo is None:
+        bwin_dt = bwin_dt.replace(tzinfo=timezone.utc)
+    def offset_minutes(value: Optional[datetime]) -> Optional[int]:
+        offset = value.utcoffset() if value is not None else None
+        return int(offset.total_seconds() / 60) if offset is not None else None
+    diagnostics = {
+        'bwin_kickoff_utc': bwin_dt.astimezone(timezone.utc).isoformat() if bwin_dt else None,
+        'api_kickoff_utc': api_dt.astimezone(timezone.utc).isoformat() if api_dt else None,
+        'bwin_offset_minutes': offset_minutes(bwin_source),
+        'api_offset_minutes': offset_minutes(api_source),
+        'difference_minutes': None,
+    }
+    if bwin_dt is None:
+        LOG.warn(
+            f"PRECHECK_ID temporal: kickoff Bwin=NO_VERIFICADO; "
+            f"kickoff API={diagnostics['api_kickoff_utc']}; motivo=BWIN_KICKOFF_UNVERIFIED"
+        )
+        return False, 'BWIN_KICKOFF_UNVERIFIED', diagnostics
+    if api_dt is None:
+        LOG.warn(
+            f"PRECHECK_ID temporal: kickoff Bwin={diagnostics['bwin_kickoff_utc']}; "
+            f"kickoff API=NO_VERIFICADO; motivo=API_KICKOFF_UNVERIFIED"
+        )
+        return False, 'API_KICKOFF_UNVERIFIED', diagnostics
+    difference_minutes = (api_dt - bwin_dt).total_seconds() / 60
+    diagnostics['difference_minutes'] = round(difference_minutes, 3)
+    LOG.info(
+        f"PRECHECK_ID temporal: Bwin={bwin_dt.isoformat()} "
+        f"(offset {diagnostics['bwin_offset_minutes']}m), "
+        f"API={api_dt.isoformat()} (offset {diagnostics['api_offset_minutes']}m), "
+        f"diferencia={difference_minutes:.3f} min"
+    )
+    if abs(difference_minutes) > 36 * 60:
+        LOG.warn(
+            f"PRECHECK_ID rechazo temporal: diferencia={difference_minutes:.3f} min "
+            f"> tolerancia=2160 min; motivo=KICKOFF_OUTSIDE_VERIFICATION_WINDOW"
+        )
+        return False, 'KICKOFF_OUTSIDE_VERIFICATION_WINDOW', diagnostics
+    return True, 'OK', diagnostics
+
+
+def fixture_temporal_eligibility(
+        match: BwinMatch,
+        row: dict[str, Any],
+        *,
+        reference_now: Optional[datetime] = None,
+) -> tuple[bool, str, str, dict[str, Any]]:
+    """Decide si el fixture puede continuar tras comprobar identidad.
+
+    Cuando Bwin no aporta una hora inequívoca, solo permite un contexto
+    provisional si API-Football lo marca futuro y su kickoff es posterior al
+    reloj de referencia. Nunca convierte ese caso en una vinculación Bwin.
+    """
+    if match.event_date:
+        ok, reason, diagnostics = temporal_identity_check(
+            match, row, reference_now=reference_now)
+        return (ok, IDENTITY_TIME_VERIFIED if ok else IDENTITY_UNVERIFIED,
+                reason, diagnostics)
+    api_dt = parse_date((row.get('fixture') or {}).get('date'))
+    now = reference_now or datetime.now(timezone.utc)
+    now = parse_date(now.isoformat()) or now.astimezone(timezone.utc)
+    status = (row.get('fixture', {}).get('status', {}) or {}).get('short')
+    diagnostics = {
+        'bwin_kickoff_utc': None,
+        'api_kickoff_utc': api_dt.isoformat() if api_dt else None,
+        'bwin_offset_minutes': None,
+        'api_offset_minutes': 0 if api_dt else None,
+        'difference_minutes': None,
+    }
+    if api_dt is None:
+        LOG.warn('PRECHECK_ID temporal: Bwin=NO_VERIFICADO, API=NO_VERIFICADO; motivo=API_KICKOFF_UNVERIFIED')
+        return False, IDENTITY_UNVERIFIED, 'API_KICKOFF_UNVERIFIED', diagnostics
+    if status not in FUTURE_STATUSES or api_dt <= now:
+        reason = 'API_FIXTURE_NOT_FUTURE'
+        LOG.warn(
+            f'PRECHECK_ID temporal: Bwin=NO_VERIFICADO, API={api_dt.isoformat()}, '
+            f'ahora={now.isoformat()}, estado={status or "N/D"}; motivo={reason}'
+        )
+        return False, IDENTITY_UNVERIFIED, reason, diagnostics
+    LOG.warn(
+        f'PRECHECK_ID temporal: Bwin=NO_VERIFICADO, API={api_dt.isoformat()}, '
+        f'ahora={now.isoformat()}, estado={status}; motivo=BWIN_KICKOFF_UNVERIFIED; '
+        'se conserva como contexto provisional'
+    )
+    return True, IDENTITY_API_ONLY, 'BWIN_KICKOFF_UNVERIFIED', diagnostics
 
 
 def fixture_in_event_window(match: BwinMatch, row: dict[str, Any], *,
                             reference_now: Optional[datetime] = None) -> bool:
-    dt = parse_date((row.get('fixture') or {}).get('date'))
-    if dt is None:
-        return False
-    if dt.tzinfo is None:
-        dt = dt.replace(tzinfo=timezone.utc)
-    now = reference_now or datetime.now(timezone.utc)
-    if now.tzinfo is None:
-        now = now.replace(tzinfo=timezone.utc)
-    expected = parse_date(match.event_date) if match.event_date else now
-    if expected is None:
-        return False
-    if expected.tzinfo is None:
-        expected = expected.replace(tzinfo=timezone.utc)
-    gap = (dt-expected).total_seconds()
-    return abs(gap) <= 36*3600 if match.event_date else -36*3600 <= gap <= 45*86400
+    ok, _, _ = temporal_identity_check(match, row, reference_now=reference_now)
+    return ok
 
 
 def verify_initial_pair_fixture(match: BwinMatch, home: APITeam, away: APITeam,
@@ -4130,6 +4611,9 @@ def verify_initial_pair_fixture(match: BwinMatch, home: APITeam, away: APITeam,
     ID 'confirmado' cuando las respuestas de la API son insuficientes.
     """
     possible: dict[int, dict[str, Any]] = {}
+    reference = parse_date(match.event_date) if match.event_date else datetime.now(timezone.utc)
+    if reference.tzinfo is None:
+        reference = reference.replace(tzinfo=timezone.utc)
     for window, limit in (('next', CONTEXT_FIXTURE_LOOKAHEAD),
                           ('last', CONTEXT_FIXTURE_HISTORY)):
         try:
@@ -4140,12 +4624,21 @@ def verify_initial_pair_fixture(match: BwinMatch, home: APITeam, away: APITeam,
         for row in rows:
             teams = row.get('teams') or {}
             fid = (row.get('fixture') or {}).get('id')
-            if (fid and (teams.get('home') or {}).get('id') == home.id
+            if not (fid and (teams.get('home') or {}).get('id') == home.id
                     and (teams.get('away') or {}).get('id') == away.id
-                    and bwin_fixture_names_match(match,row)
+                    and bwin_fixture_names_match(
+                        match, row,
+                        expected_home_id=home.id,
+                        expected_away_id=away.id)
                     and bwin_league_compatible(match.competition_display,row.get('league') or {})
-                    and fixture_in_event_window(match,row)):
+                    and fixture_competition_compatible(match, row.get('league') or {}, reference)):
+                continue
+            temporal_ok, temporal_status, temporal_reason, _ = fixture_temporal_eligibility(match, row)
+            if temporal_ok:
                 possible[int(fid)] = row
+                match.identity_status = temporal_status
+            else:
+                LOG.warn(f'PRECHECK_ID rechazo fixture={fid}: motivo={temporal_reason}')
     if len(possible) != 1:
         LOG.warn(f'PRECHECK_ID: {len(possible)} fixture(s) compatibles para '
                  f'{home.name} ({home.id}) vs {away.name} ({away.id}); activar rescate si procede.')
@@ -4156,13 +4649,24 @@ def verify_initial_pair_fixture(match: BwinMatch, home: APITeam, away: APITeam,
     except Exception as exc:
         LOG.warn(f'PRECHECK_ID no pudo confirmar fixture={fid}: {exc}')
         return False
-    verified = [r for r in details if
-                (r.get('fixture') or {}).get('id') == fid and
+    verified = []
+    for r in details:
+        if not ((r.get('fixture') or {}).get('id') == fid and
                 (r.get('teams') or {}).get('home',{}).get('id') == home.id and
                 (r.get('teams') or {}).get('away',{}).get('id') == away.id and
-                bwin_fixture_names_match(match,r) and
+                bwin_fixture_names_match(
+                    match, r,
+                    expected_home_id=home.id,
+                    expected_away_id=away.id) and
                 bwin_league_compatible(match.competition_display,r.get('league') or {}) and
-                fixture_in_event_window(match,r)]
+                fixture_competition_compatible(match, r.get('league') or {}, reference)):
+            continue
+        temporal_ok, temporal_status, temporal_reason, _ = fixture_temporal_eligibility(match, r)
+        if temporal_ok:
+            verified.append(r)
+            match.identity_status = temporal_status
+        else:
+            LOG.warn(f'PRECHECK_ID detalle rechazo fixture={fid}: motivo={temporal_reason}')
     if len(verified) != 1:
         LOG.warn(f'PRECHECK_ID: fixture {fid} no verificable por ID y metadatos.')
         return False
@@ -4212,17 +4716,40 @@ def main() -> int:
 
     # ---------------------------------------------------------------- Bwin
     html: Optional[str] = None
+    browser_catalog = []
     try:
-        html = fetch_bwin_html(bwin_url)
+        html = fetch_bwin_html(bwin_url, catalog_out=browser_catalog)
     except Exception as exc:
         # Parche: el HTML solo aporta metadatos; los equipos salen de la URL.
         LOG.warn(f"No se pudo descargar el HTML de Bwin ({exc}). Se continúa solo con la URL.")
 
     try:
-        match = parser.parse(bwin_url, html)
+        match = parser.parse(bwin_url, html, browser_catalog=browser_catalog)
     except Exception as exc:
         LOG.error(f"Error parseando Bwin: {exc}")
         return 1
+
+    selected_contract=os.environ.get('PREMATCH_TEMPORAL_IDENTITY_SELECTED','').strip()
+    if selected_contract:
+        try:
+            from prematch_single import load_context, validate_temporal_identity_evidence
+            from types import SimpleNamespace
+            selected_ctx=load_context(SimpleNamespace(
+                root=Path.cwd(),selected=Path(selected_contract),decision=None))
+            if str(match.event_id)!=selected_ctx['event_id'] or match.url!=selected_ctx['url']:
+                raise ValueError('Event ID/URL del contrato no coincide con la ejecución')
+            evidence=validate_temporal_identity_evidence(selected_ctx,max_age_minutes=180)
+            match.event_date=evidence['bwin_kickoff_madrid']
+            match.identity_status=IDENTITY_TIME_VERIFIED
+            match.temporal_identity_evidence=evidence
+            LOG.ok(
+                'BWIN_KICKOFF_ACCEPTED source=PHASE3_VERIFIED_CONTRACT '
+                f'event_id={match.event_id} local={match.event_date} '
+                f'preflight_sha256={evidence["preflight_sha256"]}'
+            )
+        except Exception as exc:
+            LOG.error(f'PHASE3_TEMPORAL_IDENTITY_CONTRACT_REJECTED: {exc}')
+            return 1
 
     LOG.ok(f"Evento Bwin: {match.event_id}")
     LOG.info(f"Partido detectado: {match.home_name_raw} vs {match.away_name_raw}")
@@ -4329,7 +4856,23 @@ def main() -> int:
         return 1
     if fixture_dt.tzinfo is None:
         fixture_dt = fixture_dt.replace(tzinfo=timezone.utc)
-    expected_dt = parse_date(match.event_date) if match.event_date else datetime.now(timezone.utc)
+    if not match.event_date:
+        if fixture.status not in FUTURE_STATUSES or fixture_dt <= datetime.now(timezone.utc):
+            LOG.error(
+                'FIXTURE_KICKOFF_INCERTAIN: Bwin no aportó una fecha/hora única verificable '
+                'y el fixture API no acredita un encuentro futuro.'
+            )
+            match.identity_status = IDENTITY_UNVERIFIED
+            return 1
+        match.identity_status = IDENTITY_API_ONLY
+        LOG.warn(
+            f'API_FIXTURE_VERIFIED_BWIN_TIME_UNKNOWN: fixture={fixture.fixture_id}; '
+            'contexto histórico provisional aislado, sin vínculo temporal Bwin verificado.'
+        )
+        expected_dt = fixture_dt
+    else:
+        expected_dt = parse_date(match.event_date)
+        match.identity_status = IDENTITY_TIME_VERIFIED
     if expected_dt.tzinfo is None:
         expected_dt = expected_dt.replace(tzinfo=timezone.utc)
     gap = (fixture_dt - expected_dt).total_seconds()

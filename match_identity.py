@@ -14,6 +14,10 @@ from pathlib import Path
 from urllib.parse import unquote, urlsplit
 
 VERSION='1.0-fixture-bound'
+IDENTITY_TIME_VERIFIED='FIXTURE_AND_BWIN_TIME_VERIFIED'
+IDENTITY_API_ONLY='API_FIXTURE_VERIFIED_BWIN_TIME_UNKNOWN'
+IDENTITY_UNVERIFIED='FIXTURE_UNVERIFIED'
+LEGACY_IDENTITY='FIXTURE_VERIFIED_BY_GENERATOR'
 LEGAL={'fc','cf','ec','sc','ac','afc','fk','bk','cd','ca','ss','ssc','club','de','del','do','da'}
 FEMALE={'w','women','woman','f','femenino','femenina','feminino','feminina','frauen','damen'}
 CATEGORY={'b','ii','iii','reserves','reserve',*FEMALE}
@@ -75,9 +79,15 @@ def identity_from_payload(payload):
         raise ValueError('URL Bwin no coincide con Event ID')
     dt=datetime.fromisoformat(str(fx.get('date') or '').replace('Z','+00:00'))
     if dt.tzinfo is None: raise ValueError('Fixture sin timezone')
+    source_status=str((match.get('identity_status') or LEGACY_IDENTITY))
+    if source_status not in {IDENTITY_TIME_VERIFIED, IDENTITY_API_ONLY, LEGACY_IDENTITY}:
+        raise ValueError('Contexto sin estado de identidad temporal verificable')
     out={
-        'schema_version':VERSION,'identity_status':'FIXTURE_VERIFIED_BY_GENERATOR',
-        'provenance':'generate_context.py: fixture validado y persistido; no equivale a vínculo oficial publicado por Bwin',
+        'schema_version':VERSION,'identity_status':source_status,
+        'provenance':('Fase 3 + PREMATCH: fixture API y kickoff publicado por Bwin '
+                      'revalidados mediante contrato temporal con fuentes SHA-256'
+                      if match.get('temporal_identity_evidence') else
+                      'generate_context.py: fixture validado y persistido; no equivale a vínculo oficial publicado por Bwin'),
         'bwin_event_id':eid,'bwin_url':url,'api_fixture_id':fid,
         'league_id':fx.get('league_id'),'season':fx.get('season'),'league_name':fx.get('league_name'),
         'kickoff_utc':dt.astimezone(timezone.utc).isoformat(),
@@ -88,17 +98,35 @@ def identity_from_payload(payload):
                 'bwin_name':match.get('away_name_raw') or match.get('away_name'),
                 'category':match.get('away_gender','male')},
     }
+    temporal=match.get('temporal_identity_evidence')
+    if temporal is not None:
+        if source_status!=IDENTITY_TIME_VERIFIED or not isinstance(temporal,dict):
+            raise ValueError('Evidencia temporal incompatible con estado de identidad')
+        for field in ('fixture_id','bwin_event_id','bwin_url','home','away','kickoff_utc',
+                      'preflight_sha256','discovery_sha256'):
+            if temporal.get(field) in (None,''):
+                raise ValueError('Evidencia temporal incompleta: '+field)
+        if (str(temporal['fixture_id'])!=str(fid) or str(temporal['bwin_event_id'])!=eid or
+                temporal['bwin_url']!=url or norm(temporal['home'])!=norm(out['home']['api_name']) or
+                norm(temporal['away'])!=norm(out['away']['api_name'])):
+            raise ValueError('Evidencia temporal contradice la identidad del contexto')
+        temporal_kickoff=datetime.fromisoformat(str(temporal['kickoff_utc']).replace('Z','+00:00'))
+        if temporal_kickoff.tzinfo is None or abs((temporal_kickoff-dt).total_seconds())>180:
+            raise ValueError('Evidencia temporal contradice el kickoff API')
+        out['temporal_identity_evidence']=temporal
     if not all(out[s]['api_name'] and out[s]['bwin_name'] for s in ('home','away')):
         raise ValueError('Fixture sin nombres de equipo acreditados')
     return out
 
 def validate_identity(identity, payload=None, event=None, url=None):
-    if identity.get('identity_status')!='FIXTURE_VERIFIED_BY_GENERATOR':raise ValueError('Estado de identidad inválido')
+    if identity.get('identity_status') not in {IDENTITY_TIME_VERIFIED, IDENTITY_API_ONLY, LEGACY_IDENTITY}:
+        raise ValueError('Estado de identidad inválido')
     if event is not None and str(identity.get('bwin_event_id'))!=str(event):raise ValueError('Event ID de identidad diferente')
     if url and identity.get('bwin_url')!=url:raise ValueError('URL de identidad diferente')
     if payload is not None:
         expected=identity_from_payload(payload)
-        for field in ('bwin_event_id','bwin_url','api_fixture_id','league_id','season','kickoff_utc','home','away'):
+        for field in ('bwin_event_id','bwin_url','api_fixture_id','league_id','season','kickoff_utc','home','away',
+                      'temporal_identity_evidence'):
             if identity.get(field)!=expected.get(field):raise ValueError('Identidad contradice contexto API: '+field)
     return True
 

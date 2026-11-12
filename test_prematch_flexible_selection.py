@@ -170,9 +170,9 @@ class IntegrationTests(unittest.TestCase):
         self.assertEqual(doc['status'],'INSUFFICIENT_EVIDENCE')
         self.assertNotIn('fixture_id',doc)
 
-    def test_single_cli_cannot_lower_prematch_margins(self):
+    def test_single_cli_preserves_operation_safety_floors(self):
         for option,value in (('--min-lead-minutes','44'),('--min-refresh-lead-minutes','4'),
-                             ('--min-finish-lead-minutes','19')):
+                             ('--min-finish-lead-minutes','4')):
             with self.assertRaises(SystemExit) as caught:
                 single.main(['--root',str(self.root),'--selected','missing.json',option,value,'check'])
             self.assertEqual(caught.exception.code,2)

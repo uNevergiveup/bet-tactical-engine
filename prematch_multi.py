@@ -23,6 +23,8 @@ from urllib.parse import unquote, urlsplit
 from match_identity import write_identity, validate_identity
 
 PRINT_LOCK = threading.Lock()
+UTC = timezone.utc
+FINISH_MIN_LEAD_MINUTES = 5
 
 
 def say(message: str) -> None:
@@ -43,6 +45,11 @@ def identifier(url: str) -> str:
 
 def utc_now() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+def utc_now_dt() -> datetime:
+    """Injectable clock seam for operation-window checks and offline tests."""
+    return datetime.now(UTC)
 
 
 def sha(path: Path) -> str:
@@ -72,7 +79,80 @@ def load_manifest(root: Path, event: str) -> dict:
     obj = json.loads(path.read_text(encoding='utf-8'))
     if obj.get('event_id') != event or identifier(obj.get('url', '')) != event:
         raise ValueError(f'Manifiesto del evento {event} inconsistente')
+    from prematch_paths import local_reference
+    for entry in (obj.get('inputs') or {}).values():
+        if isinstance(entry, dict) and entry.get('path'):
+            entry['path'] = str(local_reference(root, entry['path'], entry.get('sha256')))
     return obj
+
+
+def _kickoff_from_manifest(root: Path, event: str, state: dict) -> datetime:
+    """Resolve kickoff only from this Event ID's pinned identity/context.
+
+    Direct ``prematch_multi.py`` invocations retain the same temporal safety as
+    ``prematch_single.py``. If no canonical kickoff is available, fail closed
+    instead of guessing from a filename or another event.
+    """
+    inputs = state.get('inputs') or {}
+    candidates = []
+    for key in ('identity', 'context_json'):
+        entry = inputs.get(key) or {}
+        path = Path(entry.get('path') or '')
+        if not path.is_file():
+            continue
+        try:
+            obj = json.loads(path.read_text(encoding='utf-8-sig'))
+        except (OSError, ValueError, TypeError):
+            continue
+        candidates.extend([
+            obj.get('kickoff_utc'),
+            (obj.get('fixture') or {}).get('date'),
+            (obj.get('match') or {}).get('kickoff_utc'),
+        ])
+    # A failed retry deliberately removes manifest references to the context
+    # before regenerating it, but the event-scoped files remain intact.  Use
+    # those same-event files as a read-only clock source so a later retry is
+    # still possible; never search globally or borrow another Event ID.
+    if not candidates:
+        for path in (event_dir(root, event) / 'inputs' / 'match_identity.json',
+                     event_dir(root, event) / 'inputs' / f'match_engine_{event}.json'):
+            if not path.is_file():
+                continue
+            try:
+                obj = json.loads(path.read_text(encoding='utf-8-sig'))
+            except (OSError, ValueError, TypeError):
+                continue
+            candidates.extend([
+                obj.get('kickoff_utc'),
+                (obj.get('fixture') or {}).get('date'),
+                (obj.get('match') or {}).get('kickoff_utc'),
+            ])
+    parsed = []
+    for raw in candidates:
+        try:
+            value = datetime.fromisoformat(str(raw).replace('Z', '+00:00'))
+            if value.tzinfo is not None and value.utcoffset() is not None:
+                parsed.append(value.astimezone(UTC))
+        except (TypeError, ValueError, OverflowError):
+            continue
+    if not parsed:
+        raise ValueError(f'{event}: FINISH_KICKOFF_UNVERIFIED; falta kickoff canónico del propio evento')
+    if any(abs((value - parsed[0]).total_seconds()) > 60 for value in parsed[1:]):
+        raise ValueError(f'{event}: KICKOFF_IDENTITY_CONFLICT; no se ejecuta la operación')
+    return parsed[0]
+
+
+def ensure_event_operation_window(root: Path, event: str, state: dict,
+                                  *, min_lead: int = FINISH_MIN_LEAD_MINUTES,
+                                  operation: str = 'operation', now: datetime | None = None) -> float:
+    """Allow an operation only while the fixture is future and >= T-min_lead."""
+    kickoff = _kickoff_from_manifest(root, event, state)
+    remaining = (kickoff - (now or utc_now_dt()).astimezone(UTC)).total_seconds() / 60
+    if remaining <= 0:
+        raise ValueError(f'{event}: {operation.upper()}_AFTER_KICKOFF; PREMATCH bloqueado')
+    if remaining < min_lead:
+        raise ValueError(f'{event}: {operation.upper()}_WINDOW_EXPIRED; quedan {remaining:.1f} min, se requieren {min_lead}')
+    return remaining
 
 
 def match_header(path: Path, event: str) -> bool:
@@ -175,6 +255,13 @@ def execute(root: Path, event: str, name: str, command: list[str], env: dict | N
 def prepare_one(root: Path, url: str, python: str, shared_file: Path,
                 api_minute: int, api_second: int, reuse_odds: bool = False) -> bool:
     event = identifier(url)
+    if reuse_odds:
+        from prematch_single import load_context,freshness,validate_reuse_odds
+        from types import SimpleNamespace
+        before=load_context(SimpleNamespace(root=root,selected=Path(reuse_odds),decision=None))
+        if before['event_id']!=event or before['url']!=url:raise ValueError('REUSE_ODDS_SELECTION_IDENTITY_MISMATCH')
+        freshness(before,min_lead=45)
+        validate_reuse_odds(before,max_age=120)
     location = event_dir(root,event)
     location.mkdir(parents=True, exist_ok=True)
     # Archive stale identity/context before preparation; never allow a failed API
@@ -196,13 +283,13 @@ def prepare_one(root: Path, url: str, python: str, shared_file: Path,
     env['PREMATCH_EVENT_ID'] = event
     env['PREMATCH_EVENT_DATA_DIR'] = str((location/'inputs').resolve())
     if reuse_odds:
-        from prematch_single import snapshot_info,load_context,freshness,read_json
+        from prematch_single import snapshot_info,load_context,freshness,read_json,validate_reuse_odds
         from types import SimpleNamespace
         ctx=load_context(SimpleNamespace(root=root,selected=Path(reuse_odds),decision=None))
         if ctx['event_id']!=event or ctx['url']!=url:raise ValueError('REUSE_ODDS_SELECTION_IDENTITY_MISMATCH')
         freshness(ctx,min_lead=45)
-        snap=snapshot_info(location/'inputs'/f'cuotas_bwin_{event}.txt',ctx,max_age=120)
-        if snap['sha256']!=read_json(ctx['selected_path']).get('odds_sha256'):raise ValueError('REUSE_ODDS_SELECTION_SHA_MISMATCH')
+        snap=validate_reuse_odds(ctx,max_age=120)
+        env['PREMATCH_TEMPORAL_IDENTITY_SELECTED']=str(ctx['selected_path'])
         odds_code=0
         state['odds_reused']=True
     else:
@@ -275,17 +362,20 @@ def prepare_one(root: Path, url: str, python: str, shared_file: Path,
             state['error'] = str(exc)
     if api_code == 0 and state['status'] != 'ERROR_ARCHIVOS':
         try:
-            bind_identity(root,event,state)
+            identity_status = bind_identity(root,event,state)
+            if identity_status == 'API_FIXTURE_VERIFIED_BWIN_TIME_UNKNOWN':
+                state['status'] = 'PREPARADO_PROVISIONAL'
+                state.setdefault('warnings', []).append('BWIN_KICKOFF_UNVERIFIED: contexto aislado sin vínculo temporal Bwin verificado')
         except (OSError,ValueError,KeyError) as exc:
             state['status']='ERROR_ARCHIVOS'
             state['error']='Identidad: '+str(exc)
     state['finished_at'] = utc_now()
     save_manifest(root,event,state)
     say(f'[{event}] PREPARACIÓN: {state["status"]}')
-    return state['status']=='PREPARADO'
+    return state['status'] in {'PREPARADO', 'PREPARADO_PROVISIONAL'}
 
 
-def bind_identity(root: Path, event: str, state: dict) -> None:
+def bind_identity(root: Path, event: str, state: dict) -> str:
     """Vincula identidad comprobando el JSON de contexto y el snapshot SHA."""
     entry=(state.get('inputs') or {}).get('context_json')
     if not entry:
@@ -300,11 +390,18 @@ def bind_identity(root: Path, event: str, state: dict) -> None:
     validate_identity(obj,json.loads(j.read_text(encoding='utf-8')),event,state['url'])
     state['inputs']['identity']={'path':str(dst.resolve()),'sha256':sha(dst),
                                  'generated_from':str(j.resolve())}
+    state['identity_status'] = obj.get('identity_status')
+    return str(obj.get('identity_status'))
 
 
 def finish_one(root: Path, event: str, python: str, override_report: str | None = None,
                allow_no_odds: bool = False, historical: bool = False) -> bool:
     state = load_manifest(root,event)
+    if not historical:
+        ensure_event_operation_window(root, event, state,
+                                      min_lead=FINISH_MIN_LEAD_MINUTES, operation='finish')
+    if state.get('status') == 'PREPARADO_PROVISIONAL':
+        raise ValueError('API_FIXTURE_VERIFIED_BWIN_TIME_UNKNOWN: contexto provisional; no procede finish ni picks finales')
     if state.get('status') not in {'PREPARADO','PARCIAL_SIN_CUOTAS','VALIDADO','FINALIZADO',
                                    'BLOQUEADO_VALIDACION','ERROR_VALIDACION','ERROR_MOTOR','AUDITORIA_HISTORICA'}:
         raise ValueError(f'Evento {event}: preparación incompleta ({state.get("status")})')
@@ -324,22 +421,25 @@ def finish_one(root: Path, event: str, python: str, override_report: str | None 
     if label and label.group(1) != event:
         raise ValueError(f'Reporte {report.name} declara Event ID {label.group(1)} en vez de {event}')
     existing_meta = (state.get('inputs') or {}).get('report') or {}
-    unchanged = (report.resolve() == pinned.resolve() and existing_meta.get('sha256') == sha(report))
+    # Preserve canonical and inbox originals. A changed report receives a new
+    # immutable pin instead of replacing evidence from an earlier evaluation.
+    if pinned.is_file() and sha(pinned) != sha(report):
+        pinned = pinned.parent / 'report_versions' / sha(report) / pinned.name
+    if pinned.is_file() and sha(pinned) != sha(report):
+        raise ValueError('REPORT_VERSION_SHA_CONFLICT: preserve the existing evidence')
+    unchanged = (pinned.is_file() and existing_meta.get('sha256') == sha(report)
+                 and Path(existing_meta.get('path', '')).resolve() == pinned.resolve())
     if not unchanged:
         source_mtime = datetime.fromtimestamp(report.stat().st_mtime,timezone.utc).isoformat()
-        is_inbox = report.resolve() == incoming.resolve()
-        # Sólo mover el archivo de entrada que pertenece al proyecto.
-        # Un --report externo se conserva en su ubicación de origen.
+        # Both inbox and external reports remain at their original locations.
         pinned.parent.mkdir(parents=True, exist_ok=True)
-        if report.resolve() != pinned.resolve():
+        if report.resolve() != pinned.resolve() and not pinned.exists():
             temporary = pinned.with_name(pinned.name+f'.tmp-{os.getpid()}-{threading.get_ident()}')
             try:
                 shutil.copy2(report,temporary)
                 if sha(temporary) != sha(report):
                     raise ValueError('Falló la importación verificada del informe')
                 temporary.replace(pinned)
-                if is_inbox and sha(pinned) == sha(report):
-                    report.unlink()
             finally:
                 temporary.unlink(missing_ok=True)
         state['inputs']['report']={'path':str(pinned.resolve()),'sha256':sha(pinned),
@@ -413,7 +513,16 @@ def finish_one(root: Path, event: str, python: str, override_report: str | None 
         engine.extend(['--odds',inputs['odds']['path']])
     else:
         engine.append('--no-odds')
+    previous_cache = state.get('evidence_cache')
+    if previous_cache:
+        from prematch_paths import local_reference
+        cache_path = local_reference(root, previous_cache['path'], previous_cache['sha256'])
+        engine.extend(['--evidence-cache', str(cache_path), '--evidence-cache-sha256', previous_cache['sha256']])
     code=execute(root,event,'motor',engine)
+    cache_path = probdir / f'evidence_cache_{event}.json'
+    if code == 0 and cache_path.is_file():
+        state['evidence_cache'] = {'path': str(cache_path.resolve()),
+                                 'sha256': hashlib.sha256(cache_path.read_bytes()).hexdigest()}
     state['steps']['motor']=code
     state['status']='FINALIZADO' if code==0 else 'ERROR_MOTOR'
     state['finish_completed_at'] = utc_now()
@@ -456,14 +565,17 @@ Produce `outputs/matches/{event}/analysis/analisis_{event}.md` exclusivamente pa
 
 
 def retry_context_one(root: Path, event: str, python: str, shared_file: Path,
-                      api_minute: int, api_second: int, force: bool = False) -> bool:
+                      api_minute: int, api_second: int, force: bool = False,
+                      temporal_identity_selected: Path | None = None) -> bool:
     """Reintenta SOLO API-Football; conserva snapshot Bwin y su hash original.
 
     Nunca ejecuta scraper_bwin ni usa capturas de otro Event ID. Un fallo de
     reintento conserva el snapshot Bwin y permite reintentar de nuevo.
     """
     state = load_manifest(root, event)
-    if state.get('status') not in {'ERROR_CONTEXTO', 'ERROR_ARCHIVOS'}:
+    ensure_event_operation_window(root, event, state,
+                                  min_lead=FINISH_MIN_LEAD_MINUTES, operation='retry-context')
+    if state.get('status') not in {'ERROR_CONTEXTO', 'ERROR_ARCHIVOS', 'PREPARADO_PROVISIONAL'}:
         raise ValueError(f'{event}: estado={state.get("status")}. '
                          'retry-context es solo para fallos previos del contexto.')
     if state.get('steps', {}).get('scraper') != 0:
@@ -489,6 +601,8 @@ def retry_context_one(root: Path, event: str, python: str, shared_file: Path,
     env['PREMATCH_API_MAX_PER_SECOND'] = str(api_second)
     env['PREMATCH_EVENT_ID'] = event
     env['PREMATCH_EVENT_DATA_DIR'] = str((event_dir(root,event)/'inputs').resolve())
+    if temporal_identity_selected:
+        env['PREMATCH_TEMPORAL_IDENTITY_SELECTED']=str(temporal_identity_selected.resolve())
     command = [python, '-u', 'generate_context.py', state['url']]
     if force:
         command.append('--force')
@@ -556,16 +670,18 @@ def retry_context_one(root: Path, event: str, python: str, shared_file: Path,
         return False
 
     try:
-        bind_identity(root,event,state)
+        identity_status = bind_identity(root,event,state)
     except (OSError,ValueError,KeyError) as exc:
         state['status']='ERROR_ARCHIVOS'
         state['error']='Identidad: '+str(exc)
         save_manifest(root,event,state)
         return False
-    state['status'] = 'PREPARADO'
+    state['status'] = ('PREPARADO_PROVISIONAL'
+                       if identity_status == 'API_FIXTURE_VERIFIED_BWIN_TIME_UNKNOWN'
+                       else 'PREPARADO')
     state.pop('error', None)
     save_manifest(root, event, state)
-    say(f'[{event}] CONTEXTO RECUPERADO; cuotas originales preservadas; listo para finish.')
+    say(f'[{event}] CONTEXTO RECUPERADO; cuotas originales preservadas; estado={state["status"]}.')
     return True
 
 
@@ -576,6 +692,8 @@ def retry_scraper_one(root: Path, event: str, python: str) -> bool:
     producido en ESTE intento. Solo para partidas sin snapshot de cuotas válido.
     """
     state = load_manifest(root, event)
+    ensure_event_operation_window(root, event, state,
+                                  min_lead=FINISH_MIN_LEAD_MINUTES, operation='retry-scraper')
     if state.get('status') not in {'PARCIAL_SIN_CUOTAS', 'ERROR_ARCHIVOS'}:
         raise ValueError(f'{event}: estado={state.get("status")}; '
                          'retry-scraper requiere contexto válido y cuotas ausentes.')
@@ -650,17 +768,21 @@ def main(argv: list[str] | None = None) -> int:
     r.add_argument('--api-minute',type=int,default=180)
     r.add_argument('--api-second',type=int,default=3)
     r.add_argument('--force',action='store_true',help='Ignora caché API (usa más llamadas)')
+    r.add_argument('--temporal-identity-selected',type=Path,
+                   help='selected_match.json con evidencia temporal Fase 3 verificable')
     f=sub.add_parser('finish',help='Validación + motor para reportes cualitativos por evento')
     f.add_argument('--event-id',action='append',required=True)
     f.add_argument('--report',help='Ruta explícita del informe; solo con un --event-id')
     f.add_argument('--workers',type=int,default=2)
     f.add_argument('--allow-no-odds',action='store_true')
     f.add_argument('--historical',action='store_true',help='Auditoría retrospectiva de snapshots prepartido; nunca apuestas en vivo')
-    s=sub.add_parser('status',help='Resumen por Event ID')
+    s=sub.add_parser('status',help='Manifiestos multi, o el handoff diario con --date (sin manifest.json)')
     s.add_argument('--event-id',action='append')
+    s.add_argument('--date',help='YYYY-MM-DD, hoy o mañana. Lee outputs/discovery de prematch_daily; no exige manifest')
+    s.add_argument('--window',choices=['normal','ampliada'])
     args=parser.parse_args(argv)
     root=args.root.expanduser().resolve()
-    if not (root/'config'/'constants.py').is_file():
+    if args.action != 'status' and not (root/'config'/'constants.py').is_file():
         parser.error(f'No existe config/constants.py en {root}; ejecuta/copia el lanzador en la raíz scraper')
     python=sys.executable
     if args.action=='prepare':
@@ -713,7 +835,8 @@ def main(argv: list[str] | None = None) -> int:
         shared.parent.mkdir(parents=True, exist_ok=True)
         with concurrent.futures.ThreadPoolExecutor(max_workers=args.workers) as pool:
             future_map = {pool.submit(retry_context_one, root, event, python, shared,
-                                      args.api_minute, args.api_second, args.force):event for event in ids}
+                                      args.api_minute, args.api_second, args.force,
+                                      args.temporal_identity_selected):event for event in ids}
             results = []
             for task in concurrent.futures.as_completed(future_map):
                 try:
@@ -740,8 +863,20 @@ def main(argv: list[str] | None = None) -> int:
                     results.append(False)
         return 0 if all(results) else 1
     parent=root/'outputs'/'matches'
+    if getattr(args, 'date', None):
+        import prematch_daily as daily_flow
+        report = daily_flow.discovery_status(root, args.date, getattr(args, 'window', None))
+        print(json.dumps(report, ensure_ascii=False, indent=2))
+        ready = report.get('artifacts', {}).get('handoff', {}).get('present') and report.get('status') not in (
+            'NO_DAILY_HANDOFF', 'HANDOFF_UNREADABLE')
+        if not args.event_id:
+            return 0 if ready else 2
     ids=args.event_id or ([p.name for p in parent.iterdir() if p.is_dir() and p.name.isdigit()]
                           if parent.exists() else [])
+    if not ids and not getattr(args, 'date', None):
+        say('STATUS_MULTI_EMPTY: no hay outputs/matches/<event_id>/manifest.json. '
+            'La jornada diaria se consulta con: python prematch_multi.py status --date YYYY-MM-DD')
+        return 2
     for event in sorted(ids):
         try:
             d=load_manifest(root,event)

@@ -15,21 +15,26 @@ class CandidateLedger:
         if Path(path).is_file():
             doc = trial.read(Path(path))
             obj.scope = doc.get('scope', {})
-            obj.rows = {str(r['fixture_id']): r for r in doc.get('fixtures', [])}
+            rows = doc.get('fixtures', [])
+            if len({str(r['fixture_id']) for r in rows}) != len(rows):
+                raise trial.TrialError('CANDIDATE_LEDGER_DUPLICATE_FIXTURE')
+            obj.rows = {str(r['fixture_id']): r for r in rows}
         return obj
 
     def record(self, fixture, state, stage, reason, evidence=None):
         fid = str(fixture['fixture_id'])
         row = self.rows.setdefault(fid, {k: fixture.get(k) for k in
             ('fixture_id', 'home', 'away', 'kickoff_madrid', 'league', 'league_id','country','season')})
-        row.setdefault('history', []).append({'state': state, 'stage': stage, 'reason': reason,
-            'at_madrid': trial.now_madrid().isoformat(), 'evidence': evidence})
+        event={'state': state, 'stage': stage, 'reason': reason, 'evidence': evidence}
+        history=row.setdefault('history', [])
+        if not history or any(history[-1].get(key)!=value for key,value in event.items()):
+            history.append({**event,'at_madrid': trial.now_madrid().isoformat()})
         row['state'] = state
         row['stage'] = stage
         row['reason'] = reason
 
     def write(self, path=None):
-        trial.dump(Path(path) if path else self.path, {'schema_version': '2.0-candidate-ledger',
+        trial.atomic_dump(Path(path) if path else self.path, {'schema_version': '2.0-candidate-ledger',
             'generated_madrid': trial.now_madrid().isoformat(), 'scope': self.scope,
             'fixtures': list(self.rows.values())})
         from prematch_daily_csv import export_daily

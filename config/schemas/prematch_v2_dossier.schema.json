@@ -1,0 +1,123 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:prematch:v2:dossier:1",
+  "title": "Motor V2 dossier — design contract, not an implemented engine",
+  "type": "object",
+  "required": ["schema_version", "entity", "evaluation_at_utc", "source_cutoff_utc", "evidence", "hypotheses", "stage_report", "actionable_bet"],
+  "additionalProperties": false,
+  "properties": {
+    "schema_version": {"const": "2.0-dossier-draft-1"},
+    "entity": {"$ref": "#/$defs/entity"},
+    "evaluation_at_utc": {"type": "string", "format": "date-time"},
+    "source_cutoff_utc": {"type": "string", "format": "date-time"},
+    "evidence": {"type": "array", "items": {"$ref": "#/$defs/evidence"}},
+    "hypotheses": {"type": "array", "items": {"$ref": "#/$defs/hypothesis"}},
+    "markets": {"type": "array", "items": {"$ref": "#/$defs/market"}},
+    "lineup": {"$ref": "#/$defs/lineup"},
+    "stage_report": {"$ref": "#/$defs/stage_report"},
+    "actionable_bet": {"const": false}
+  },
+  "$defs": {
+    "entity": {
+      "type": "object",
+      "required": ["type", "api_id", "category", "competition_id", "season"],
+      "properties": {
+        "type": {"enum": ["TEAM", "PLAYER", "MATCH"]},
+        "api_id": {"type": "integer", "minimum": 1},
+        "category": {"type": "string"},
+        "team_kind": {"enum": ["CLUB", "NATIONAL_TEAM", "UNKNOWN"]},
+        "competition_id": {"type": "integer"},
+        "season": {"type": "integer"},
+        "fixture_id": {"type": ["integer", "null"]},
+        "home_team_id": {"type": ["integer", "null"]},
+        "away_team_id": {"type": ["integer", "null"]},
+        "kickoff_utc": {"type": "string", "format": "date-time"},
+        "bwin_event_id": {"type": ["string", "null"]},
+        "identity_status": {"enum": ["VERIFIED", "CORROBORATED", "UNVERIFIED", "CONFLICT"]}
+      }
+    },
+    "evidence": {
+      "type": "object",
+      "required": ["evidence_id", "source", "sha256", "acquired_at_utc", "available_at_utc", "verification", "fixture_ids", "metrics"],
+      "properties": {
+        "evidence_id": {"type": "string"},
+        "source": {"type": "string"},
+        "sha256": {"type": "string", "pattern": "^[a-f0-9]{64}$"},
+        "acquired_at_utc": {"type": "string", "format": "date-time"},
+        "available_at_utc": {"type": ["string", "null"], "format": "date-time"},
+        "verification": {"enum": ["CONFIRMADO", "PROBABLE", "INFERIDO", "NO_VERIFICADO"]},
+        "fixture_ids": {"type": "array", "items": {"type": "integer"}, "uniqueItems": true},
+        "metrics": {"type": "array", "items": {"$ref": "#/$defs/metric"}}
+      }
+    },
+    "metric": {
+      "type": "object", "required": ["name", "unit", "value", "valid_n", "requested_n", "period", "venue", "source_fixture_ids"],
+      "properties": {
+        "name": {"type": "string"}, "unit": {"type": "string"},
+        "value": {"type": ["number", "null"]},
+        "valid_n": {"type": "integer", "minimum": 0}, "requested_n": {"type": "integer", "minimum": 0},
+        "period": {"type": "string"}, "venue": {"enum": ["HOME", "AWAY", "ALL"]},
+        "eligible_minutes": {"type": ["number", "null"]},
+        "source_fixture_ids": {"type": "array", "items": {"type": "integer"}, "uniqueItems": true}
+      }
+    },
+    "hypothesis": {
+      "type": "object",
+      "required": ["hypothesis_id", "pattern_ids", "original_statistics", "historical_fixture_ids", "conditions", "mechanisms", "evidence_for", "evidence_against", "verification", "invalidation_conditions", "next_match_applicability", "pending_research", "validation", "producer"],
+      "properties": {
+        "hypothesis_id": {"type": "string"},
+        "pattern_ids": {"type": "array", "items": {"type": "string"}},
+        "original_statistics": {"type": "array", "items": {"$ref": "#/$defs/metric"}},
+        "historical_fixture_ids": {"type": "array", "items": {"type": "integer"}, "uniqueItems": true},
+        "conditions": {"type": "array", "items": {"type": "string"}},
+        "mechanisms": {"type": "array", "items": {"type": "string"}},
+        "evidence_for": {"type": "array", "items": {"type": "string"}},
+        "evidence_against": {"type": "array", "items": {"type": "string"}},
+        "verification": {"enum": ["CONFIRMADO", "PROBABLE", "INFERIDO", "NO_VERIFICADO"]},
+        "invalidation_conditions": {"type": "array", "items": {"type": "string"}},
+        "next_match_applicability": {"type": "object", "required": ["fixture_id", "reason", "missing_information"], "properties": {"fixture_id": {"type": "integer"}, "reason": {"type": "string"}, "missing_information": {"type": "array", "items": {"type": "string"}}}},
+        "pending_research": {"type": "array", "items": {"type": "string"}},
+        "validation": {"type": "object", "required": ["status", "tested_hypotheses", "holdout_fixture_ids", "multiple_testing_method"], "properties": {"status": {"enum": ["NOT_TESTED", "EXPLORATORY", "TEMPORALLY_VALIDATED", "REJECTED"]}, "tested_hypotheses": {"type": "integer", "minimum": 0}, "holdout_fixture_ids": {"type": "array", "items": {"type": "integer"}}, "multiple_testing_method": {"type": ["string", "null"]}}},
+        "producer": {"enum": ["PYTHON", "CODEX_MANUAL", "LLM_API"]}
+      }
+    },
+    "market": {
+      "type": "object", "required": ["fixture_id", "event_id", "identity_status", "snapshot_sha256", "captured_at_utc", "team_id", "player_id", "metric", "period", "line", "direction", "odd", "settlement_rule", "status", "reason", "minimum_odd"],
+      "properties": {
+        "fixture_id": {"type": "integer"}, "event_id": {"type": ["string", "null"]},
+        "identity_status": {"enum": ["VERIFIED", "CORROBORATED", "UNVERIFIED", "CONFLICT"]},
+        "snapshot_sha256": {"type": ["string", "null"], "pattern": "^[a-f0-9]{64}$"},
+        "captured_at_utc": {"type": ["string", "null"], "format": "date-time"},
+        "team_id": {"type": ["integer", "null"]}, "player_id": {"type": ["integer", "null"]},
+        "metric": {"type": "string"}, "period": {"type": "string"},
+        "line": {"type": ["number", "null"]}, "direction": {"type": ["string", "null"]},
+        "odd": {"type": ["number", "null"]}, "minimum_odd": {"type": "number", "default": 1.2},
+        "settlement_rule": {"type": ["string", "null"]},
+        "status": {"enum": ["SUPPORTED_COMMERCIAL_CANDIDATE", "EXPERIMENTAL_CANDIDATE", "PENDING_INFORMATION", "DISCARDED_WITH_CAUSE", "BLOCKED"]},
+        "reason": {"type": "string"}
+      }
+    },
+    "lineup": {
+      "type": "object", "required": ["source_kind", "status", "evidence_ids", "player_ids", "observed_at_utc"],
+      "properties": {
+        "source_kind": {"enum": ["API_FOOTBALL", "MANUAL_OFFICIAL_SOURCE"]},
+        "status": {"enum": ["OFFICIAL_VERIFIED", "PROVIDER_REPORTED", "PROBABLE", "UNKNOWN", "CONFLICT"]},
+        "evidence_ids": {"type": "array", "items": {"type": "string"}},
+        "player_ids": {"type": "array", "items": {"type": "integer"}, "uniqueItems": true},
+        "observed_at_utc": {"type": "string", "format": "date-time"}
+      }
+    },
+    "stage_report": {
+      "type": "object", "required": ["stage", "completed", "findings", "missing", "next_step_reason", "next_command", "requirement", "external_inputs", "reused_artifacts"],
+      "properties": {
+        "stage": {"type": "string"}, "completed": {"type": "boolean"},
+        "findings": {"type": "array", "items": {"type": "string"}},
+        "missing": {"type": "array", "items": {"type": "string"}},
+        "next_step_reason": {"type": "string"}, "next_command": {"type": ["string", "null"]},
+        "requirement": {"enum": ["OBLIGATORY", "RECOMMENDED", "OPTIONAL"]},
+        "external_inputs": {"type": "array", "items": {"type": "string"}},
+        "reused_artifacts": {"type": "array", "items": {"type": "string"}}
+      }
+    }
+  }
+}

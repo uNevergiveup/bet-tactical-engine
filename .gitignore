@@ -18,6 +18,8 @@ env/
 # Datos, dumps de cuotas y salidas
 outputs/
 *.txt
+!requirements.txt
+!instructions/analysis_instructions.txt
 *.log
 
 # macOS

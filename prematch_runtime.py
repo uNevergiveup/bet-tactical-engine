@@ -17,9 +17,12 @@ from market_quality_gate import is_period, is_player_market
 from prematch_opportunity_scanner import match_identity, validate_snapshot
 
 
-def resolve_source(root, raw):
-    path = Path(raw or '__missing__')
-    return path if path.is_absolute() else root / path
+def resolve_source(root, raw, digest=None):
+    from prematch_paths import local_reference
+    try:
+        return local_reference(root, raw, digest)
+    except ValueError as exc:
+        raise trial.TrialError(str(exc)) from exc
 
 
 def stamp():
@@ -29,6 +32,8 @@ def stamp():
 def reusable_preparation(root, folder, day, args):
     """Revalidate the source chain; legacy preparations need no invented hashes."""
     base = folder / 'prospective_trial'
+    if not (base / 'prospective_test_summary.json').is_file():
+        raise trial.TrialError('PREPARATION_SCOPE_INCOMPLETE:MISSING_PREPARATION_SUMMARY')
     summary = trial.read(base / 'prospective_test_summary.json')
     methodology = summary.get('preselection', {}).get('methodology', {})
     if not methodology:
@@ -75,7 +80,7 @@ def reusable_preparation(root, folder, day, args):
     if eligible_pre & disc_deferred and (not disc_budget or len(eligible_pre-disc_deferred)<min(disc_budget,len(eligible_pre))):
         raise trial.TrialError('DISCOVERY_SCOPE_INCOMPLETE: el presupuesto actual permite evaluar pendientes')
     for batch in pre.get('source_batches',[]):
-        if trial.sha(resolve_source(root,batch['path']))!=batch['sha256'] or trial.sha(resolve_source(root,batch['input']))!=batch['input_sha256']:
+        if trial.sha(resolve_source(root,batch['path'],batch['sha256']))!=batch['sha256'] or trial.sha(resolve_source(root,batch['input'],batch['input_sha256']))!=batch['input_sha256']:
             raise trial.TrialError('ENRICHMENT_BATCH_SHA_MISMATCH')
     pattern = trial.read(base / 'patterns/pattern_engine.json')
     if pattern.get('data_sources', {}).get('preselection_sha256') != trial.sha(prepath):
@@ -93,7 +98,10 @@ def verified_preflight(root, path, fixture, prepath, args):
     if len(matches) != 1:
         raise trial.TrialError('PREFLIGHT_FIXTURE_NOT_UNIQUE')
     match = matches[0]
-    discovery_path = resolve_source(root, doc.get('source_discovery'))
+    if match.get('snapshot', {}).get('snapshot_path'):
+        snapshot = match['snapshot']
+        snapshot['snapshot_path'] = str(resolve_source(root, snapshot['snapshot_path'], snapshot.get('sha256')))
+    discovery_path = resolve_source(root, doc.get('source_discovery'), doc.get('source_sha256'))
     if trial.sha(discovery_path) != doc.get('source_sha256'):
         raise trial.TrialError('DISCOVERY_SHA_MISMATCH')
     discovery = trial.read(discovery_path)
@@ -107,7 +115,7 @@ def verified_preflight(root, path, fixture, prepath, args):
     if checked['status'] != 'READY_FOR_SCRAPER':
         raise trial.TrialError(','.join(checked['reasons']))
     reasons, _, _ = validate_snapshot(fixture, match, doc, path, prepath, None,
-                                     trial.now_madrid(), args.max_odds_age, args.min_lead, False)
+                                     trial.now_madrid(), args.max_odds_age, args.min_lead, False, project_root=root)
     if reasons:
         raise trial.TrialError(','.join(reasons))
     snapshot = match.get('snapshot', {})
@@ -190,7 +198,22 @@ def write_handoff(root, run_dir, ready, failures, scanner=None, min_lead=45, max
            'requires_pre_kickoff_odds_refresh': True,
            'final_odds_policy': {'capture_within_kickoff_minutes':60,'max_age_minutes':15},
            'ready_to_bet': False,
-           'minimum_lead_minutes': min_lead, 'max_odds_age_minutes': max_odds_age, 'discard_reasons': failures,
+           # Keep the original preparation gate for auditability, while
+           # documenting the narrower gates for later operations.  A handoff
+           # can therefore be revalidated/refreshed at T-5 without claiming
+           # that its original deep preparation happened that late.
+           'minimum_lead_minutes': min_lead,
+           'review_minimum_lead_minutes': 5,
+           'refresh_minimum_lead_minutes': 5,
+           'finish_minimum_lead_minutes': 5,
+           'operation_windows': {
+               'preparation': {'minimum_lead_minutes': min_lead, 'purpose': 'full discovery/context/preflight'},
+               'review': {'minimum_lead_minutes': 5, 'purpose': 'revalidate prepared handoff'},
+               'refresh_odds': {'minimum_lead_minutes': 5, 'purpose': 'new Bwin capture'},
+               'retry_context': {'minimum_lead_minutes': 5, 'purpose': 'new API context without scraper'},
+               'finish': {'minimum_lead_minutes': 5, 'purpose': 'validation and engine before kickoff'}
+           },
+           'max_odds_age_minutes': max_odds_age, 'discard_reasons': failures,
            'scanner': str(scanner) if scanner else None,
            'warning': 'Investigación manual únicamente; sin ventaja, probabilidad calibrada ni apuesta acreditadas.'}
     if valid:

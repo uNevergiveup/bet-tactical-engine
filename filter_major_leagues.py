@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
-"""Filtro conservador de primeras divisiones ADULTAS nacionales, M/F.
+"""Filtro configurable de competiciones adultas PREMATCH, sin consultar Bwin.
 
-Consume un fixtures.json de discover_fixtures.py y conserva un nuevo fichero.
-No llama a API, no reescribe el descubrimiento ni presupone cuotas Bwin.
-Un league_id no incluido en el catálogo queda en REVIEW, nunca aceptado por nombre.
+Por defecto admite todas las ligas y copas adultas identificables, incluidas
+las internacionales. Excluye categorias juveniles/reservas detectables y envia
+a REVIEW los casos ambiguos. Conserva el esquema de salida legacy.
+La politica estricta anterior sigue disponible con --policy domestic-top-tier.
 
 Ejemplo:
  python filter_major_leagues.py --input outputs/discovery/2026-11-01_1600_0200/fixtures.json
@@ -13,13 +14,15 @@ import argparse
 import csv
 import hashlib
 import json
+import os
 import sys
 from collections import Counter
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-VERSION = '1.0-major-leagues'
+VERSION = '1.0-major-leagues'  # Esquema compatible con preselect_matches y trial
+FILTER_IMPLEMENTATION = '2.0-adult-open'
 # allowlist EXPLÍCITA de primeras divisiones nacionales adultas.
 # No presume que API-Football marque el nivel de una liga con league.type.
 # Revisar este catálogo para cada liga nueva; IDs de API-Football, no Bwin.
@@ -108,55 +111,120 @@ def region_for(country: str) -> str:
     return 'OTHER'
 
 
-def classify(row: dict[str,Any]) -> tuple[str,str]:
-    country = row.get('country') or ''
+# Etiquetas inequivocas: no bloquear "Boca Juniors", "Young Boys", etc.
+YOUTH_PATTERN = re.compile(
+    r"(?i)(?:\bu\s*[- ]?\s*(?:1[0-9]|2[0-3])\b|"
+    r"\bunder\s*[- ]?\s*(?:1[0-9]|2[0-3])\b|"
+    r"\bsub\s*[- ]?\s*(?:1[0-9]|2[0-3])\b|"
+    r"\b(?:youth|juvenil(?:es)?|juniores|primavera|academy|academia)\b)"
+)
+RESERVE_LEAGUE_PATTERN = re.compile(
+    r"(?i)\b(?:reserves?|reservas?|reserve\s+league|"
+    r"development\s+league|second\s+teams?)\b"
+)
+RESERVE_TEAM_PATTERN = re.compile(
+    r"(?i)(?:\b(?:reserves?|reservas?|reserve\s+team)\b|"
+    r"\s+(?:B|II|III|2)\s*$|\s+\(B\)\s*$)"
+)
+WOMEN_PATTERN = re.compile(
+    r"(?i)(?:\bwomen(?:'s)?\b|\bwomens\b|\bfemenin[oa]\b|"
+    r"\bfeminin[ea]\b|\bfrauen\b|\bfemminile\b|"
+    r"\bdamen\b|\(W\)|\sW\s*$)"
+)
+
+
+def classify(row: dict[str,Any], policy: str='adult-open') -> tuple[str,str]:
+    """Decision conservadora: adultos por defecto, duda explicita en REVIEW."""
+    if policy not in ('adult-open', 'domestic-top-tier'):
+        raise ValueError(f'Politica no admitida: {policy}')
+    if row.get('status') != 'NS':
+        return 'EXCLUDED', 'NOT_PREMATCH'
+    country = str(row.get('country') or '')
     league = str(row.get('league') or '')
     lid = row.get('league_id')
-    if not isinstance(lid,int) or isinstance(lid,bool) or lid <= 0 or not country or not league:
+    if not isinstance(lid,int) or isinstance(lid,bool) or lid <= 0 or not league:
         return 'REVIEW','MISSING_LEAGUE_ID_OR_NAME'
-    if HARD_STOP.search(league):
-        return 'EXCLUDED','YOUTH_RESERVES_OR_CUP'
-    if lid in KNOWN_EXCLUDED_IDS:
-        return 'EXCLUDED','KNOWN_NON_TOP_TIER_OR_CUP'
-    if lid not in CATALOG_BY_COUNTRY.get(country,()):
-        return 'REVIEW','NOT_IN_CURATED_TOP_TIER_CATALOG'
-    if row.get('status') != 'NS':
-        return 'EXCLUDED','NOT_PREMATCH'
-    return 'ELIGIBLE','CURATED_DOMESTIC_TOP_TIER'
+    if policy == 'domestic-top-tier':
+        if not country:
+            return 'REVIEW','MISSING_LEAGUE_ID_OR_NAME'
+        if HARD_STOP.search(league):
+            return 'EXCLUDED','YOUTH_RESERVES_OR_CUP'
+        if lid in KNOWN_EXCLUDED_IDS:
+            return 'EXCLUDED','KNOWN_NON_TOP_TIER_OR_CUP'
+        if lid not in CATALOG_BY_COUNTRY.get(country,()):
+            return 'REVIEW','NOT_IN_CURATED_TOP_TIER_CATALOG'
+        return 'ELIGIBLE','CURATED_DOMESTIC_TOP_TIER'
+    if not country:
+        return 'REVIEW','MISSING_COUNTRY_FOR_IDENTITY'
+    if YOUTH_PATTERN.search(league):
+        return 'EXCLUDED','YOUTH_COMPETITION'
+    if RESERVE_LEAGUE_PATTERN.search(league):
+        return 'EXCLUDED','RESERVE_COMPETITION'
+    home, away = str(row.get('home') or ''),str(row.get('away') or '')
+    if not home or not away:
+        return 'REVIEW','MISSING_TEAM_NAME'
+    if YOUTH_PATTERN.search(home) or YOUTH_PATTERN.search(away):
+        return 'EXCLUDED','YOUTH_TEAM'
+    if RESERVE_TEAM_PATTERN.search(home) or RESERVE_TEAM_PATTERN.search(away):
+        return 'EXCLUDED','RESERVE_TEAM'
+    # No hay un campo universal de categoria de edad. La ausencia de indicios
+    # no demuestra la adultez; conservar esa limitacion en la politica.
+    return 'ELIGIBLE','NO_YOUTH_OR_RESERVE_SIGNALS'
 
 
-def filter_document(data:dict[str,Any],source_bytes:bytes) -> dict[str,Any]:
+def gender_for(row:dict[str,Any]) -> str:
+    """No inventar masculino si API-Football no publica el genero."""
+    if WOMEN_PATTERN.search(str(row.get('league') or '')):
+        return 'F'
+    if any(WOMEN_PATTERN.search(str(row.get(key) or '')) for key in ('home','away')):
+        return 'F'
+    if row.get('league_id') in WOMENS_LEAGUE_IDS:
+        return 'F'
+    if row.get('league_id') in {lid for lids in CATALOG_BY_COUNTRY.values() for lid in lids}:
+        return 'M'
+    return 'UNKNOWN'
+
+
+def filter_document(data:dict[str,Any],source_bytes:bytes,policy:str='adult-open') -> dict[str,Any]:
+    if policy not in ('adult-open','domestic-top-tier'):
+        raise ValueError(f'Politica no admitida: {policy}')
     if data.get('schema_version')!='1.0-discovery' or not isinstance(data.get('fixtures'),list):
-        raise ValueError('Entrada no es fixtures.json V1.0 válido')
+        raise ValueError('Entrada no es fixtures.json V1.0 valido')
     ids:set[int]=set()
     included=[]; excluded=[]; review=[]
     for row in data['fixtures']:
-        if not isinstance(row,dict): raise ValueError('Entrada contiene fixture inválido')
+        if not isinstance(row,dict):raise ValueError('Entrada contiene fixture invalido')
         fid=row.get('fixture_id')
-        if not isinstance(fid,int) or fid in ids: raise ValueError('Fixture ID inválido/duplicado')
+        if not isinstance(fid,int) or isinstance(fid,bool) or fid <= 0 or fid in ids:
+            raise ValueError('Fixture ID invalido/duplicado')
         ids.add(fid)
-        status, reason=classify(row)
+        status,reason=classify(row,policy=policy)
+        region=region_for(row.get('country') or '')
         enriched={**row,'filter_status':status,'filter_reason':reason,
-                  'gender': 'F' if row['league_id'] in WOMENS_LEAGUE_IDS else ('M' if status=='ELIGIBLE' else 'UNKNOWN'),
-                  'region':region_for(row.get('country') or ''),
-                  'region_priority':REGION_PRIORITY[region_for(row.get('country') or '')]}
-        if status=='ELIGIBLE': included.append(enriched)
-        elif status=='REVIEW': review.append(enriched)
-        else: excluded.append(enriched)
-    return {'schema_version':VERSION,'generated_at_utc':datetime.now(timezone.utc).isoformat(),
+                  'gender':gender_for(row),
+                  'region':region,'region_priority':REGION_PRIORITY[region]}
+        if status=='ELIGIBLE':included.append(enriched)
+        elif status=='REVIEW':review.append(enriched)
+        else:excluded.append(enriched)
+    return {'schema_version':VERSION,'filter_implementation':FILTER_IMPLEMENTATION,
+      'generated_at_utc':datetime.now(timezone.utc).isoformat(),
       'source_discovery_generated_at_utc':data.get('generated_at_utc'),
-      'source_window':data.get('window'), 'source_sha256':hashlib.sha256(source_bytes).hexdigest(),
-      'policy':{'competition_tier':'DOMESTIC_TOP_TIER','age':'ADULT','gender':['M','F'],
-                'cups':False,'secondary_divisions':False,'unknown_tiers':'REVIEW_NOT_INCLUDED',
+      'source_window':data.get('window'),'source_sha256':hashlib.sha256(source_bytes).hexdigest(),
+      'policy':{'competition_tier':'ADULT_OPEN' if policy=='adult-open' else 'DOMESTIC_TOP_TIER',
+                'age':'ADULT_HEURISTIC','gender':['M','F','UNKNOWN'],
+                'cups':policy=='adult-open','secondary_divisions':policy=='adult-open',
+                'unknown_tiers':'INCLUDE_IF_NO_YOUTH_SIGNALS' if policy=='adult-open' else 'REVIEW_NOT_INCLUDED',
+                'youth_reserves':'EXCLUDED_WHEN_DETECTABLE',
                 'region_priority':REGION_PRIORITY,'bwin_coverage':'NOT_CHECKED'},
       'counts':{'input':len(ids),'eligible':len(included),'review':len(review),'excluded':len(excluded),
                 'eligible_competitions':len({(x['country'],x['league_id']) for x in included}),
                 'eligible_male':sum(x['gender']=='M' for x in included),
-                'eligible_female':sum(x['gender']=='F' for x in included)},
+                'eligible_female':sum(x['gender']=='F' for x in included),
+                'eligible_gender_unknown':sum(x['gender']=='UNKNOWN' for x in included)},
       'fixtures':included,'review':review,'excluded':excluded,
-      'notes':['Aprobación por catálogo ID+país, NO por suposición de nombre de liga.',
-               'REVIEW no significa segunda división; requiere clasificar explícitamente.',
-               'No presupone estadísticas disponibles, cuotas Bwin ni patrones.']}
+      'notes':['Adulto inferido por ausencia de indicadores juveniles; NO garantia de categoria.',
+               'No equivale a disponibilidad en Bwin ni calidad de datos.',
+               'Los casos ambiguos requieren revision humana o catalogo de categorias.']}
 
 
 def save_outputs(result:dict[str,Any],folder:Path):
@@ -170,7 +238,7 @@ def save_outputs(result:dict[str,Any],folder:Path):
     (folder/'league_filter_review.json').write_text(json.dumps({
        'schema_version':VERSION,'source_sha256':result['source_sha256'],
        'review':result['review'],'excluded':result['excluded']},indent=2,ensure_ascii=False)+'\n',encoding='utf-8')
-    lines=['# Primeras divisiones adultas — filtro', '',
+    lines=['# Competiciones adultas — filtro configurable', '',
      f"- Entrada: **{result['counts']['input']}**",
      f"- Elegibles: **{result['counts']['eligible']}**",
      f"- Revisar: **{result['counts']['review']}**",
@@ -190,14 +258,17 @@ def main(argv=None):
     p=argparse.ArgumentParser(description=__doc__)
     p.add_argument('--input',type=Path,required=True,help='fixtures.json generado por discover_fixtures.py')
     p.add_argument('--output-dir',type=Path,help='Por defecto misma carpeta que la entrada')
+    p.add_argument('--policy',choices=('adult-open','domestic-top-tier'),
+                   default=os.environ.get('PREMATCH_COMPETITION_SCOPE','adult-open'),
+                   help='adult-open admite ligas/copas internacionales; domestic-top-tier restaura filtro historico')
     a=p.parse_args(argv)
     try:
-        data_bytes=a.input.read_bytes();result=filter_document(json.loads(data_bytes),data_bytes)
+        data_bytes=a.input.read_bytes();result=filter_document(json.loads(data_bytes),data_bytes,policy=a.policy)
         folder=a.output_dir or a.input.parent
         save_outputs(result,folder)
     except (OSError,ValueError,KeyError,TypeError) as e:
         print(f'ERROR: {e}',file=sys.stderr);return 2
-    print(f"Filtro: {result['counts']['input']} -> {result['counts']['eligible']} primeras divisiones adultas (M/F)")
+    print(f"Filtro: {result['counts']['input']} -> {result['counts']['eligible']} competiciones candidatas adultas (M/F/UNKNOWN)")
     print(f"Revisión: {result['counts']['review']} | Excluidos: {result['counts']['excluded']}")
     print(f'Archivos: {folder/"fixtures_major.json"}, {folder/"fixtures_major.csv"}, {folder/"fixtures_major.md"}, {folder/"league_filter_review.json"}')
     return 0

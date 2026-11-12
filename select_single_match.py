@@ -29,6 +29,8 @@ TIME_OK = {'DISPLAY_TIME_CORROBORATED', 'ABSOLUTE_TIME_VERIFIED', 'COUNTDOWN_TIM
 
 
 def read_json(path):
+    from prematch_paths import control_file
+    path = control_file(path)
     data = json.loads(path.read_text(encoding='utf-8-sig'))
     if not isinstance(data, dict):
         raise ValueError(f'JSON debe ser objeto: {path}')
@@ -82,6 +84,34 @@ def event_time_ok(preflight):
     return False
 
 
+def temporal_identity_contract(preflight_match, discovery, discovery_sha, preflight_path):
+    """Bind the accepted Bwin clock evidence to the exact selected identity.
+
+    This is a transport contract, not a new source of truth.  Consumers must
+    still re-open and hash the preflight and discovery files before using it.
+    """
+    evidence=preflight_match.get('time_evidence') or {}
+    return {
+        'schema_version':'1.0-phase3-temporal-identity',
+        'status':'BWIN_API_KICKOFF_VERIFIED',
+        'fixture_id':int(preflight_match['fixture_id']),
+        'bwin_event_id':str(preflight_match['bwin_event_id']),
+        'bwin_url':preflight_match['bwin_url'],
+        'home':preflight_match['home'],'away':preflight_match['away'],
+        'timezone':discovery.get('user_time_reference'),
+        'evidence_status':evidence.get('status'),'source':evidence.get('source'),
+        'observed_at_utc':evidence.get('observed_at_utc'),
+        'bwin_kickoff_madrid':(evidence.get('bwin_visible_kickoff_madrid') or
+                                evidence.get('bwin_inferred_kickoff_madrid') or
+                                preflight_match.get('kickoff_madrid')),
+        'api_kickoff_madrid':evidence.get('api_kickoff_madrid'),
+        'difference_minutes':evidence.get('difference_minutes'),
+        'catalog_text':evidence.get('catalog_text'),
+        'discovery_sha256':discovery_sha,
+        'preflight_sha256':sha256(Path(preflight_path)),
+    }
+
+
 def scan_preflights(paths, folder):
     candidates=list(paths)
     if folder:
@@ -93,6 +123,8 @@ def scan_preflights(paths, folder):
 
 def audit_preflight_match(m,preflight,disc,preselect,discovery_sha,preselect_sha,now,age_minutes,min_candidate_odd=Decimal("1.20")):
     reasons=[]
+    if m.get('_snapshot_reference_error'):
+        reasons.extend(['SNAPSHOT_SHA_MISMATCH', m['_snapshot_reference_error']])
     fid=str(m.get('fixture_id'))
     if preflight.get('source_sha256')!=discovery_sha:reasons.append('DISCOVERY_SHA_MISMATCH')
     if preflight.get('source_preselection_sha256')!=preselect_sha:reasons.append('PRESELECTION_SHA_MISMATCH')
@@ -162,6 +194,16 @@ def prepare_rows(preselection,discovery,preflights,now,min_lead,max_snapshot_age
     reports={}
     for path,data in preflights:
         for m in data.get('matches') or []:
+            from prematch_paths import local_reference, reference_root
+            project = reference_root(preselection['_path'], path)
+            snap = m.get('snapshot') or {}
+            try:
+                snap['snapshot_path'] = str(local_reference(project, snap.get('snapshot_path'), snap.get('sha256')))
+                if data.get('source_discovery'):
+                    data = dict(data, source_discovery=str(local_reference(project, data['source_discovery'], data.get('source_sha256'))))
+            except (ValueError, OSError) as exc:
+                snap['snapshot_path'] = ''
+                m['_snapshot_reference_error'] = str(exc)
             fid=str(m.get('fixture_id'))
             reports.setdefault(fid,[]).append((path,data,m))
     pre_hash=sha256(preselection['_path'])
@@ -231,6 +273,11 @@ def prepare_rows(preselection,discovery,preflights,now,min_lead,max_snapshot_age
             'price_snapshot_age_minutes':round(market_age,2) if market_age is not None else None,
             'score':final_score,'status':status,'block_reasons':sorted(set(reasons)),
             'preflight_path':report_path,'preflight_status':price_status,
+            'odds_sha256':(chosen[6].get('snapshot') or {}).get('sha256') if chosen and not chosen[3] else None,
+            'odds_txt':(chosen[6].get('snapshot') or {}).get('snapshot_path') if chosen and not chosen[3] else None,
+            'preflight_sha256':sha256(Path(report_path)) if report_path else None,
+            'temporal_identity_evidence':(temporal_identity_contract(
+                chosen[6],discovery,disc_hash,report_path) if chosen and not chosen[3] else None),
             'details_checked':bool(s.get('details_checked'))})
     rows.sort(key=lambda x:(x['status']!='QUALIFIED_FOR_COMPARISON',-x['score'],-x['research_priority_score'],x['kickoff_madrid'],x['fixture_id']))
     qualified=[r for r in rows if r['status']=='QUALIFIED_FOR_COMPARISON']
@@ -275,6 +322,9 @@ def export(output_dir,status,winner,rows,meta,preselection,discovery,now,args):
             'market_families_ready_for_research':winner['market_families_ready'],
             'market_snapshot_age_minutes':winner['price_snapshot_age_minutes'],
             'selection_score_not_probability':winner['score'],
+            'odds_sha256':winner.get('odds_sha256'),'odds_txt':winner.get('odds_txt'),
+            'preflight_path':winner.get('preflight_path'),'preflight_sha256':winner.get('preflight_sha256'),
+            'temporal_identity_evidence':winner.get('temporal_identity_evidence'),
             'source_decision':str((output_dir/'selection_decision.json').resolve()),
             'warning':'Un solo partido para investigación; actualizar cuotas y confirmar XI. NO es un pick ni EV.'}
         selected_path.write_text(json.dumps(selection,ensure_ascii=False,indent=2)+'\n',encoding='utf-8')

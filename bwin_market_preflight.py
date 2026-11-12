@@ -361,18 +361,18 @@ def snapshot_odds(path,eid):
             'warnings':warnings,'status':status,
             '_parsed_selection_rows':rows}
 
-def run_scraper(root,out,eid,url,refresh=False):
+def run_scraper(root,out,eid,url,refresh=False,immutable=False):
     if refresh:
         # Capture in a new directory first. A failed scrape never replaces the
         # canonical snapshot; every previous byte remains recoverable by SHA.
         canonical=root/'outputs'/'matches'/eid/'inputs'/f'cuotas_bwin_{eid}.txt'
-        if (canonical.parent.parent/'manifest.json').exists():
+        if (canonical.parent.parent/'manifest.json').exists() and not immutable:
             return {'returncode':None,'error':'Evento preparado: usar prematch_single.py refresh-odds para actualizar manifest e invalidar derivados'}
         if canonical.exists():
             old=snapshot_odds(canonical,eid)
-            stage=out/'staged_capture'
+            stage=canonical.parent.parent/'staging'/utcnow().strftime('%Y%m%dT%H%M%S%fZ')/eid/'inputs'
             stage.mkdir(parents=True,exist_ok=False)
-            env=os.environ.copy();env.update(PREMATCH_BATCH_MODE='1',PREMATCH_EVENT_ID=eid,PREMATCH_EVENT_DATA_DIR=str(stage.resolve()))
+            env=os.environ.copy();env.update(PREMATCH_BATCH_MODE='1',PREMATCH_EVENT_ID=eid,PREMATCH_EVENT_DATA_DIR=str(stage.resolve()),PREMATCH_IMMUTABLE_CAPTURE='1')
             log=stage/'scraper.log'
             with log.open('w') as fh:
                 code=subprocess.run([sys.executable,'-u',str(root/'scraper_bwin.py'),'--url',url],cwd=root,env=env,stdout=fh,stderr=subprocess.STDOUT).returncode
@@ -385,6 +385,9 @@ def run_scraper(root,out,eid,url,refresh=False):
             capture=isodt(snap['capture_declared_madrid']);now=utcnow()
             if not capture or not 0<=(now-capture).total_seconds()<=120 or not old.get('capture_declared_madrid') or capture<=isodt(old['capture_declared_madrid']):
                 return {'returncode':None,'error':'Recaptura sin tiempo nuevo verificable; snapshot previo intacto'}
+            if immutable:
+                if hashlib.sha256(canonical.read_bytes()).hexdigest()!=old['sha256']:raise ValueError('ORIGINAL_CHANGED_DURING_CAPTURE')
+                return {'returncode':0,'fresh_snapshot_path':str(fresh),'original_snapshot_path':str(canonical),'original_sha256':old['sha256'],'canonical_unchanged':True,'log':str(log)}
             archive=canonical.parent.parent/'archives'/('odds_'+now.strftime('%Y%m%dT%H%M%S%fZ'))
             archive.mkdir(parents=True,exist_ok=False)
             previous=archive/canonical.name
@@ -425,9 +428,18 @@ def run_scraper(root,out,eid,url,refresh=False):
             if not declared.is_absolute():declared=root/declared
             if declared.resolve()!=path.resolve():info['error']='TXT del log no apunta a la carpeta propia del evento'
             elif not path.is_file():info['error']='TXT declarado no existe'
-            elif datetime.fromtimestamp(path.stat().st_mtime,timezone.utc)<started-timedelta(seconds=5):
-                info['error']='TXT no fue actualizado durante esta ejecución'
-            else:info['fresh_snapshot_path']=str(path)
+            else:
+                try:
+                    snapshot = snapshot_odds(path, eid)
+                    captured = datetime.fromisoformat(snapshot['capture_declared_madrid'])
+                    if not started-timedelta(seconds=5) <= captured <= utcnow()+timedelta(seconds=5):
+                        info['error']='Captura TXT fuera del intervalo de adquisición de esta ejecución'
+                    elif snapshot.get('source_url') != url:
+                        info['error']='URL del snapshot distinta de la adquisición solicitada'
+                    else:
+                        info['fresh_snapshot_path']=str(path)
+                except (ValueError,KeyError,OSError) as exc:
+                    info['error']='Captura nueva no verificable: '+str(exc)
     return info
 
 def write_outputs(folder,payload):
@@ -516,11 +528,13 @@ def main(argv=None):
     p.add_argument('--output-dir',type=Path,default=Path('outputs/discovery/market_preflight'))
     p.add_argument('--run-scraper',action='store_true',help='EJECUTAR scraper_bwin.py para encuentros validos; por defecto solo auditoria')
     p.add_argument('--refresh-existing',action='store_true',help='Con --run-scraper: recaptura primero en staging y archiva el TXT anterior por SHA')
+    p.add_argument('--immutable-capture',action='store_true',help='Recaptura versionada sin modificar el TXT ni manifest previos; requiere --refresh-existing')
     p.add_argument('--reuse-existing',action='store_true',help='Auditar TXT ya capturado, sin ejecutar scraper (retrospectivo)')
     p.add_argument('--audit-txt',type=Path,help='Auditar un TXT indicado sin navegar, basado en su captura declarada; exige exactamente un --fixture-id')
     p.add_argument('--min-lead-minutes',type=int,default=5)
     p.add_argument('--max-discovery-age-minutes',type=int,default=180)
     args=p.parse_args(argv)
+    if args.immutable_capture and not args.refresh_existing:p.error('--immutable-capture requiere --refresh-existing')
     if args.refresh_existing and not args.run_scraper:p.error('--refresh-existing requiere --run-scraper')
     if sum(bool(x) for x in (args.run_scraper,args.reuse_existing,args.audit_txt))>1:
         p.error('Usa solo uno: --run-scraper, --reuse-existing o --audit-txt')
@@ -558,7 +572,7 @@ def main(argv=None):
             results.append(checked);continue
         print(f"[{m.get('fixture_id')}] {m.get('home')}–{m.get('away')} | bwin={eid} | hora CORROBORADA",flush=True)
         if args.run_scraper:
-            checked['scraper']=run_scraper(root,out,eid,m['bwin_url'],refresh=args.refresh_existing)
+            checked['scraper']=run_scraper(root,out,eid,m['bwin_url'],refresh=args.refresh_existing,immutable=args.immutable_capture)
             found=(checked['scraper'] or {}).get('fresh_snapshot_path')
             if found:
                 try:
