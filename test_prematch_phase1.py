@@ -71,6 +71,15 @@ class BwinInputTests(unittest.TestCase):
         self.assertEqual({x['bwin_event_id'] for x in catalog},{'7000001','7000002'})
         self.assertEqual(info['pages_selected'][0]['label'],'liga x')
 
+    def test_nations_league_spanish_country_names_generate_candidates_from_observed_slugs(self):
+        rows=[event('7909680'),event('7909686')]
+        rows[0]['bwin_url']='https://www.bwin.es/es/sports/eventos/san-marino-bielorrusia-2:7909680'
+        rows[0]['text']='San Marino Bielorrusia Hoy / 20:45'
+        rows[1]['bwin_url']='https://www.bwin.es/es/sports/eventos/montenegro-letonia-2:7909686'
+        rows[1]['text']='UEFA Nations League Hoy / 20:45 Montenegro - Letonia'
+        self.assertEqual(bwin.match_catalog({**fixture(1528964,'San Marino','Belarus'),'country':'World'},rows)[0]['bwin_event_id'],'7909680')
+        self.assertEqual(bwin.match_catalog({**fixture(1545613,'Montenegro','Latvia'),'country':'World'},rows)[0]['bwin_event_id'],'7909686')
+
     def test_lightweight_fixtures_input_and_top_zero(self):
         with tempfile.TemporaryDirectory() as td:
             path = Path(td) / "fixtures.json"

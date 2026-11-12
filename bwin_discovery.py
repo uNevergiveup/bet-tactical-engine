@@ -55,6 +55,8 @@ NATIONAL_TEAM_TRANSLATIONS = {
     "england": ("inglaterra",),
     "croatia": ("croacia",),
     "cyprus": ("chipre",),
+    "belarus": ("bielorrusia",),
+    "latvia": ("letonia",),
 }
 INSTITUTIONAL_CANDIDATE_ALIASES = {
     "sl benfica w": ("benfica f",),
