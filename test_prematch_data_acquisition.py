@@ -10,6 +10,24 @@ import prematch_phase1 as phase
 
 
 class AcquisitionTests(unittest.TestCase):
+    def test_preflight_rebuilds_header_clock_instead_of_trusting_status(self):
+        from bwin_market_preflight import validate_match
+        from datetime import datetime,timezone
+        header={'prematch_header':True,'browser_timezone':'Europe/Madrid','date_label':'Hoy','time_label':'18:45',
+                'capture_started_at_utc':'2026-11-12T02:00:00Z','captured_at_utc':'2026-11-12T02:00:10Z'}
+        match={'fixture_id':1,'bwin_event_id':'1234567','bwin_url':'https://www.bwin.es/es/sports/eventos/a-b-2:1234567',
+               'kickoff_madrid':'2026-11-12T18:45:00+01:00','status':'IDENTITY_VERIFIED_AUTOMATICALLY',
+               'identity_status':'NAME_AND_ABSOLUTE_TIME_MATCH','inspection':{'title_teams_match':True,
+               'event_id_from_url':'1234567','event_start_machine_readable':'2026-11-12T18:45:00+01:00',
+               'observed_at_utc':'2026-11-12T02:00:10Z','time_evidence_type':'SCOPED_PREMATCH_HEADER',
+               'displayed_time_evidence':header}}
+        now=datetime(2026,11,12,2,1,tzinfo=timezone.utc)
+        good=validate_match(match,[],now,45,120)
+        self.assertEqual(good['status'],'READY_FOR_SCRAPER')
+        self.assertEqual(good['time_evidence']['source'],'INSPECTED_EVENT_PREMATCH_HEADER')
+        header['browser_timezone']='UTC'
+        self.assertEqual(validate_match(match,[],now,45,120)['status'],'BLOCKED')
+
     def test_scoped_prematch_clock_resolves_today_and_tomorrow(self):
         from bwin_discovery import displayed_header_kickoff
         evidence={'prematch_header':True,'browser_timezone':'Europe/Madrid','date_label':'Hoy','time_label':'18:45',

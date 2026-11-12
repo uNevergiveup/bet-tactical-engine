@@ -209,12 +209,18 @@ def validate_match(m, catalog, now, min_lead, max_age):
     # Reconstruct absolute evidence from the inspected event; never trust a label alone.
     machine_start = isodt(inspection.get('event_start_machine_readable'))
     machine_observed = isodt(inspection.get('observed_at_utc'))
+    machine_source = 'INSPECTED_EVENT_JSON_LD'
+    if inspection.get('time_evidence_type') == 'SCOPED_PREMATCH_HEADER':
+        from bwin_discovery import displayed_header_kickoff
+        rebuilt = displayed_header_kickoff(inspection.get('displayed_time_evidence') or {})
+        if rebuilt is None or rebuilt != machine_start:machine_start = None
+        machine_source = 'INSPECTED_EVENT_PREMATCH_HEADER'
     machine_verified = bool(m.get('identity_status')=='NAME_AND_ABSOLUTE_TIME_MATCH' and
                             machine_start and kickoff and machine_observed and
                             str(inspection.get('event_id_from_url')) == eid and
                             abs((machine_start-kickoff).total_seconds()) <= 180)
     if machine_verified and evidence['status'] == 'NO_DISPLAY_TIME_EVIDENCE':
-        evidence = {'status':'ABSOLUTE_TIME_VERIFIED','source':'INSPECTED_EVENT_JSON_LD',
+        evidence = {'status':'ABSOLUTE_TIME_VERIFIED','source':machine_source,
                     'observed_at_utc':machine_observed.isoformat(),
                     'difference_minutes':abs((machine_start-kickoff).total_seconds())/60}
         info['time_evidence'] = evidence
