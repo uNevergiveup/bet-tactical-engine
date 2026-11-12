@@ -421,22 +421,25 @@ def finish_one(root: Path, event: str, python: str, override_report: str | None 
     if label and label.group(1) != event:
         raise ValueError(f'Reporte {report.name} declara Event ID {label.group(1)} en vez de {event}')
     existing_meta = (state.get('inputs') or {}).get('report') or {}
-    unchanged = (report.resolve() == pinned.resolve() and existing_meta.get('sha256') == sha(report))
+    # Preserve canonical and inbox originals. A changed report receives a new
+    # immutable pin instead of replacing evidence from an earlier evaluation.
+    if pinned.is_file() and sha(pinned) != sha(report):
+        pinned = pinned.parent / 'report_versions' / sha(report) / pinned.name
+    if pinned.is_file() and sha(pinned) != sha(report):
+        raise ValueError('REPORT_VERSION_SHA_CONFLICT: preserve the existing evidence')
+    unchanged = (pinned.is_file() and existing_meta.get('sha256') == sha(report)
+                 and Path(existing_meta.get('path', '')).resolve() == pinned.resolve())
     if not unchanged:
         source_mtime = datetime.fromtimestamp(report.stat().st_mtime,timezone.utc).isoformat()
-        is_inbox = report.resolve() == incoming.resolve()
-        # Sólo mover el archivo de entrada que pertenece al proyecto.
-        # Un --report externo se conserva en su ubicación de origen.
+        # Both inbox and external reports remain at their original locations.
         pinned.parent.mkdir(parents=True, exist_ok=True)
-        if report.resolve() != pinned.resolve():
+        if report.resolve() != pinned.resolve() and not pinned.exists():
             temporary = pinned.with_name(pinned.name+f'.tmp-{os.getpid()}-{threading.get_ident()}')
             try:
                 shutil.copy2(report,temporary)
                 if sha(temporary) != sha(report):
                     raise ValueError('Falló la importación verificada del informe')
                 temporary.replace(pinned)
-                if is_inbox and sha(pinned) == sha(report):
-                    report.unlink()
             finally:
                 temporary.unlink(missing_ok=True)
         state['inputs']['report']={'path':str(pinned.resolve()),'sha256':sha(pinned),

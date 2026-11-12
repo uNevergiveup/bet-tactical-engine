@@ -428,9 +428,18 @@ def run_scraper(root,out,eid,url,refresh=False,immutable=False):
             if not declared.is_absolute():declared=root/declared
             if declared.resolve()!=path.resolve():info['error']='TXT del log no apunta a la carpeta propia del evento'
             elif not path.is_file():info['error']='TXT declarado no existe'
-            elif datetime.fromtimestamp(path.stat().st_mtime,timezone.utc)<started-timedelta(seconds=5):
-                info['error']='TXT no fue actualizado durante esta ejecución'
-            else:info['fresh_snapshot_path']=str(path)
+            else:
+                try:
+                    snapshot = snapshot_odds(path, eid)
+                    captured = datetime.fromisoformat(snapshot['capture_declared_madrid'])
+                    if not started-timedelta(seconds=5) <= captured <= utcnow()+timedelta(seconds=5):
+                        info['error']='Captura TXT fuera del intervalo de adquisición de esta ejecución'
+                    elif snapshot.get('source_url') != url:
+                        info['error']='URL del snapshot distinta de la adquisición solicitada'
+                    else:
+                        info['fresh_snapshot_path']=str(path)
+                except (ValueError,KeyError,OSError) as exc:
+                    info['error']='Captura nueva no verificable: '+str(exc)
     return info
 
 def write_outputs(folder,payload):

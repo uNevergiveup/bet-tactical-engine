@@ -1,6 +1,10 @@
 # Corrección funcional PREMATCH: registro de trabajo
 
-Estado: EN CURSO. No certifica READY ni autoriza adquisición real.
+Estado vigente: corrección funcional completada y verificada offline. **NO READY
+para lanzar directamente la ejecución real completa**: el siguiente paso operativo
+es descubrimiento controlado con autorización de red. No se ha adquirido dato real.
+Los estados EN CURSO de los bloques siguientes son el historial del trabajo;
+la auditoría de cierre al final establece el resultado vigente.
 Rama: `codex/prematch-functional-isolation`, desde `bf81f0fe`.
 Ventana objetivo: 2026-11-12 15:00 CET → 2026-11-13 03:00 CET.
 
@@ -174,3 +178,107 @@ revisión final tras refrescos sucesivos. Los tests actuales verifican las pieza
 pero todavía no acreditan ese recorrido completo con el validador y motor reales.
 Por ese límite, el objetivo sigue activo y la preparación sigue siendo sólo para
 descubrimiento controlado; NO READY para ejecución completa.
+
+## Cierre: ciclo completo y auditoría de requisitos
+
+Se ha completado el pendiente de integración con `test_prematch_final_cycle.py`.
+Las únicas sustituciones son el reloj y el transporte de procesos/adquisición:
+se invocan el validador y motor reales, sus parsers, cálculos y generadores de
+artefactos; no se simulan resultados de validación ni rankings. El evento y las
+fuentes son sintéticos y temporales; no se generan recomendaciones reales.
+
+El recorrido comprobado es:
+
+1. Single → multi.finish_one → validador real → motor real → binding → revisión NO BET.
+2. Nuevo XI local → delta → invalidación → rechazo del análisis anterior → finish
+   real → recálculo de la evidencia del jugador afectado y reutilización colectiva.
+3. Refresco de cuotas simulado en el transporte → captura 2,00 a 1,50 → invalidación
+   → finish real → precio y punto bruto de equilibrio 0,66667 reconstruidos → nueva
+   revisión. La caché de evidencia se reutiliza sin reutilizar el precio anterior.
+4. Snapshot posterior al kickoff → BLOCK del validador real, sin ejecución del motor.
+   Reloj posterior al kickoff → rechazo antes de iniciar ambas etapas.
+
+Hallazgos adicionales corregidos:
+
+- Finish eliminaba la copia de bandeja de entrada y podía sustituir el informe
+  canónico anterior. Ahora conserva el original y fija revisiones distintas bajo
+  `inputs/report_versions/<sha256>/`, sin sobrescribir versiones anteriores.
+- El último uso operativo de mtime en captura Bwin se sustituye por fecha declarada
+  del TXT, Event ID, URL y pertenencia al intervalo de adquisición. Una restauración
+  reciente con cabecera antigua se rechaza; un mtime antiguo con captura nueva
+  acreditada no se convierte por sí solo en veto.
+- IDs booleanos no se aceptan como IDs de equipo numéricos en un delta de XI.
+
+### Evidencia requisito por requisito
+
+| Requisito | Evidencia de cierre |
+|---|---|
+| Aislamiento de latest/ACTIVE_EVENT | Lectores operativos rechazan esos controles; regresiones de los tres enlaces y de jornada anterior. Los enlaces originales no se modifican. |
+| Estado nuevo 12/11 | Status real NO_DAILY_HANDOFF, sin preselección ni carpeta diaria; dry-run confirma 12/11 15:00 → 13/11 03:00 CET (14:00 → 02:00 UTC). |
+| Portabilidad e integridad | Resolver local con hash y límite resuelto; pruebas de traversal, symlinks externos, claves conflictivas, controles legacy y fuentes manipuladas; mapping y selección históricos pasan en copias locales. |
+| Temporalidad y caché | Generador/Fase 1 usan adquisición registrada; legacy sin timestamp no recibe frescura del filesystem. Regresión Bwin header/mtime y exclusión de snapshots futuros/postkickoff. Históricos permanecen intactos. |
+| Instrucciones | Copia exacta de release y SHA comprobado 524c7fd668c62a3a4811e0c70e69f8a79dd236f0c8ba44288465fc8fa72977f3; rutas de consumo y excepción Git verificadas. |
+| Dependencias de XI | Tabla por modelo en segundo bloque; delta de IDs/posición nominal/grid/formación/coach; integración single y motor con recálculo selectivo real. |
+| Cuotas y artefactos | Prueba integrada tras refresh-odds: nuevo precio, evidencia reutilizada, viejos bindings rechazados, archivos previos conservados y nueva revisión requerida. |
+| Sin reglas inventadas | Parámetros/umbrales comerciales permanecen iguales. La caché envuelve evidence_for; no añade p_model, EV, stake ni ajustes por titularidad. El resultado de prueba es NO BET. |
+| Pruebas y límites de red | Lanzador offline: 615 pruebas, 0 fallos, 0 errores, 10 omisiones explícitas. Focalizadas finales: 63 OK; ciclo real con cinco regresiones: OK. Red/adquisición real bloqueadas. |
+| Reversibilidad y conservación | Rama codex/prematch-functional-isolation, commits separados; git diff --check OK. Inventario final 48.093 archivos, 3.753.111.345 bytes y los mismos tres enlaces; guard de escritura sobre originales durante pruebas. |
+
+Comandos reproducibles de verificación:
+
+```bash
+.venv/bin/python -B tools/run_offline_tests.py
+.venv/bin/python -B -m unittest test_prematch_final_cycle
+.venv/bin/python -B prematch_daily.py --status --date 2026-11-12
+.venv/bin/python -B prematch_daily.py --date 2026-11-12 --dry-run
+.venv/bin/python -B -m pip check
+```
+
+Log final global: `/tmp/prematch-final-global.log`. Las diez omisiones figuran en
+el resumen JSON del lanzador: snapshots históricos opcionales ausentes y una prueba
+de falta de credencial omitida porque existe credencial configurada. No se descargan
+fixtures ni se consideran esas omisiones como integraciones históricas verificadas.
+
+### Archivos modificados
+
+- Rutas/estado: `prematch_paths.py`, `prematch_daily.py`, `prematch_runtime.py`,
+  `prematch_single.py`, `prematch_multi.py`, `prematch_release.py`,
+  `select_single_match.py`, `prematch_opportunity_scanner.py`,
+  `prematch_market_mapping_v1.py`, `generar_prompt_grok.py`, `generar_prompt_gemini.py`.
+- Cachés/adquisición: `prematch_cache_record.py`, `generate_context.py`,
+  `prematch_phase1.py`, `bwin_market_preflight.py`, `prematch_history_recovery_v2.py`,
+  `prematch_tactical_history.py`.
+- XI/evaluación: `prematch_context_delta.py`, `motor_probabilistico.py`.
+- Instrucciones/documentación: `.gitignore`, `instructions/analysis_instructions.txt`,
+  este informe.
+- Pruebas/fixtures: `prematch_test_fixtures.py`, `test_prematch_final_cycle.py`,
+  `test_prematch_functional_isolation.py`, `test_prematch_context_delta.py`,
+  `test_prematch_bwin_phase3.py`, `test_prematch_comparison_v2.py`,
+  `test_prematch_integral_analysis_v1046.py`, `test_prematch_tactical_intelligence_v1050.py`,
+  `test_prematch_phase1.py`, `test_prematch_pilot_aliases.py`,
+  `test_prematch_reuse_odds_contract.py`, `test_prematch_temporal_identity_contract.py`,
+  `tools/offline_test_guard.py`, `tools/run_offline_tests.py`.
+
+### Preparación real y límites pendientes
+
+No quedan fallos internos conocidos de los contratos corregidos en la suite
+ejecutada. El flujo completo ha pasado offline, pero no se ha comprobado conectividad,
+entitlement/cuota real API, disponibilidad Bwin ni cobertura actual de la jornada.
+Tampoco existen aún calendario conciliado, precios vigentes o XI de un evento nuevo.
+Una alineación API no se certifica automáticamente como anuncio oficial del club.
+Cuando una tesis depende de esa oficialidad, sigue requiriendo evidencia acreditada;
+el sistema no la inventa ni convierte datos de prueba en una confirmación.
+
+Por ello, **el siguiente paso real es únicamente descubrimiento controlado**, no
+iniciar directamente el pipeline completo ni declarar READY. Ejemplo de comando
+propuesto, NO ejecutado y que requiere autorización explícita de adquisición:
+
+```bash
+.venv/bin/python -B prematch_phase1.py \
+  --date 2026-11-12 --start 15:00 --end 03:00 \
+  --online --discover-bwin --discovery-only --max-api-calls 2 --bwin-headless
+```
+
+La fase de corrección autorizada termina sin consumir API, scraping real, análisis
+de apuestas ni modificación de los históricos originales. La prueba real posterior
+es una operación distinta, todavía no realizada ni autorizada por este informe.

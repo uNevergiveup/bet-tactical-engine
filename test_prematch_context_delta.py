@@ -100,6 +100,10 @@ class DeltaTests(unittest.TestCase):
         self.assertTrue(delta['changes'][0]['coach_changed'])
         self.assertEqual(delta['changes'][0]['roles_changed'], [1000])
 
+    def test_boolean_team_id_is_not_a_numeric_identity(self):
+        with self.assertRaisesRegex(ValueError, 'TEAM_IDENTITY'):
+            d.lineup_state([lineup(True, 1000)], [1, 20])
+
     def test_old_binding_cannot_be_reused_after_context_or_odds_refresh(self):
         (self.event / 'manifest.json').write_text(json.dumps(self.manifest))
         old = release.analysis_binding_path(self.ctx, self.manifest)

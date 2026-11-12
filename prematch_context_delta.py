@@ -22,7 +22,7 @@ def lineup_state(response, team_ids):
     states = {}
     for block in response:
         tid = (block.get('team') or {}).get('id')
-        if tid not in team_ids or tid in states:
+        if type(tid) is not int or tid not in team_ids or tid in states:
             raise ValueError('DELTA_LINEUP_TEAM_IDENTITY')
         players = {}
         for item in block.get('startXI', []):
@@ -93,6 +93,8 @@ def refresh_lineups(ctx, manifest, snapshot, digest, now):
     if identity['api_fixture_id'] != ctx['fixture_id'] or when(identity['kickoff_utc']) != ctx['kickoff']:
         raise ValueError('DELTA_CONTEXT_IDENTITY')
     team_ids = [identity[s]['api_team_id'] for s in ('home', 'away')]
+    if any(type(tid) is not int or tid <= 0 for tid in team_ids):
+        raise ValueError('DELTA_CONTEXT_TEAM_IDENTITY')
     old = original['context'].get('lineups') or {'response': []}
     after = payload.get('response')
     if not isinstance(after, list):
