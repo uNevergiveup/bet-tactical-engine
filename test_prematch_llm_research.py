@@ -86,5 +86,18 @@ class LLMResearchTests(unittest.TestCase):
         self.assertEqual(result['pattern_registry.json']['iterations_executed'],1)
         self.assertEqual(result['pattern_registry.json']['stop_reason'],'ITERATION_LIMIT')
 
+    def test_conjunctions_preserve_missing_values_and_reject_outcome_leakage(self):
+        from prematch_llm_research import condition_rows
+        rows=copy.deepcopy(self.rows)
+        for row in rows:row['metrics']['own.shots']=10
+        rows[0]['metrics']['own.shots']=None
+        condition={'all':[{'field':'venue','operator':'EQ','value':'HOME'},
+                          {'field':'own.shots','operator':'GT','value':5}]}
+        transformed,compiled=condition_rows(rows,condition,'own.corners')
+        self.assertIsNone(transformed[0]['conditions'][compiled['field']])
+        self.assertTrue(transformed[1]['conditions'][compiled['field']])
+        condition['all'][1]['field']='own.corners'
+        with self.assertRaises(ValueError):condition_rows(rows,condition,'own.corners')
+
 
 if __name__=='__main__':unittest.main()

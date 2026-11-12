@@ -9,6 +9,31 @@ from prematch_advanced_discovery_v2 import table, by_adjust, digest, dt, finite
 SEGMENT = ('entity_type','team_id','player_id','league_id','season','gender','team_kind','period')
 
 
+def condition_rows(rows, condition, outcome):
+    """Adapt a bounded conjunction to the existing contingency-table engine."""
+    clauses=condition.get('all') if isinstance(condition,dict) and 'all' in condition else [condition]
+    if not isinstance(clauses,list) or not 1 <= len(clauses) <= 3:
+        raise ValueError('ONE_TO_THREE_CONDITION_CLAUSES_REQUIRED')
+    fields={k for r in rows for k in r['metrics']}
+    context={k for r in rows for k in r['conditions']}
+    for clause in clauses:
+        if (not isinstance(clause,dict) or clause.get('operator') not in ('EQ','GT')
+            or 'value' not in clause or not isinstance(clause.get('field'),str) or clause.get('field')==outcome
+            or clause.get('field') not in (context if clause.get('operator')=='EQ' else fields)
+            or (clause['operator']=='GT' and not finite(clause['value']))):
+            raise ValueError('UNSUPPORTED_OR_TAUTOLOGICAL_VARIABLES')
+    output=[]
+    for original in rows:
+        values=[]
+        for clause in clauses:
+            actual=original['conditions' if clause['operator']=='EQ' else 'metrics'].get(clause['field'])
+            values.append(None if actual is None else actual==clause['value'] if clause['operator']=='EQ' else actual>clause['value'])
+        row={**original,'conditions':{**original['conditions'],
+             '__llm_conjunction':None if None in values else all(values)}}
+        output.append(row)
+    return output,{'field':'__llm_conjunction','operator':'EQ','value':True}
+
+
 def research_packet(observations, targets, cutoff, max_iterations=3):
     if not 1 <= max_iterations <= 10:
         raise ValueError('LLM_ITERATION_LIMIT_INVALID')
@@ -68,7 +93,7 @@ def validate_hypotheses(packet, sealed, proposals, min_group=3):
         if not proposal.get('mechanism') or not proposal.get('falsifier'):
             result['reason']='MECHANISM_AND_FALSIFIER_REQUIRED';continue
         segment=proposal.get('segment',{})
-        if set(segment)!=set(SEGMENT):
+        if not isinstance(segment,dict) or set(segment)!=set(SEGMENT):
             result['reason']='EXPLICIT_COMPLETE_SEGMENT_REQUIRED';continue
         train=[r for r in packet['training_observations'] if all(r.get(k)==v for k,v in segment.items())]
         holdout=[r for r in sealed['holdout'] if all(r.get(k)==v for k,v in segment.items())]
@@ -77,19 +102,22 @@ def validate_hypotheses(packet, sealed, proposals, min_group=3):
             result['reason']='EVIDENCE_OUTSIDE_TRAINING_SEGMENT';continue
         condition=proposal.get('condition',{});outcome=proposal.get('outcome');threshold=proposal.get('threshold')
         fields={k for r in train for k in r['metrics']}
-        context={k for r in train for k in r['conditions']}
-        if (condition.get('operator') not in ('EQ','GT') or 'value' not in condition
-            or condition.get('field') not in (context if condition.get('operator')=='EQ' else fields)
-            or outcome not in fields or not finite(threshold) or condition.get('field')==outcome):
+        if not isinstance(outcome,str) or outcome not in fields or not finite(threshold):
             result['reason']='UNSUPPORTED_OR_TAUTOLOGICAL_VARIABLES';continue
-        if condition['operator']=='GT' and not finite(condition['value']):
-            result['reason']='NUMERIC_CONDITION_REQUIRED';continue
+        try:
+            condition_rows(train,condition,outcome)  # Variables must exist in training.
+            transformed,compiled=condition_rows(train+holdout,condition,outcome)
+        except ValueError as error:
+            result['reason']=str(error);continue
         if len(train)<2*min_group or len(holdout)<2*min_group:
             result.update(status='PENDING_INSUFFICIENT_SAMPLE',reason='TRAIN_AND_HOLDOUT_REQUIRE_BOTH_GROUPS')
         else:
             result.update(status='EXPLORATORY',reason='STATISTICAL_TEST_NOT_YET_SUPPORTED')
-        result['train']=table(train,condition,outcome,threshold)
-        result['holdout']=table(holdout,condition,outcome,threshold)
+        result['train']=table(transformed[:len(train)],compiled,outcome,threshold)
+        result['holdout']=table(transformed[len(train):],compiled,outcome,threshold)
+        result['limitations']=['Association is not causation or a calibrated prediction',
+            'Same-match metric conditions cannot be treated as known prematch triggers',
+            'Coach, role and opponent comparability require separately verified evidence']
     tested=[r for r in results if 'train' in r]
     for result,q,qh in zip(tested,by_adjust([r['train']['p_value'] for r in tested]),
                           by_adjust([r['holdout']['p_value'] for r in tested])):
@@ -117,7 +145,10 @@ def write_pending_runtime(output, packet, base_ranking):
 
 
 def hypothesis_signature(proposal):
-    return digest({k:proposal.get(k) for k in ('segment','condition','outcome','threshold')})
+    values={k:copy.deepcopy(proposal.get(k)) for k in ('segment','condition','outcome','threshold')}
+    if isinstance(values['condition'],dict) and isinstance(values['condition'].get('all'),list):
+        values['condition']['all']=sorted(values['condition']['all'],key=digest)
+    return digest(values)
 
 
 def run_iterative_research(packet, sealed, base_ranking, researcher, runtime_identity):
@@ -157,14 +188,13 @@ def run_iterative_research(packet, sealed, base_ranking, researcher, runtime_ide
             segment=proposal.get('segment',{})
             if set(segment)!=set(SEGMENT):continue
             train=[r for r in packet['training_observations'] if all(r.get(k)==v for k,v in segment.items())]
-            condition=proposal.get('condition',{})
-            if (condition.get('operator') not in ('EQ','GT') or 'value' not in condition
-                or not condition.get('field') or condition.get('field')==proposal.get('outcome')
-                or not finite(proposal.get('threshold')) or not proposal.get('evidence_fixture_ids')
-                or not set(proposal['evidence_fixture_ids']) <= {r['fixture_id'] for r in train}
-                or (condition['operator']=='GT' and not finite(condition['value']))):continue
+            if (not finite(proposal.get('threshold')) or not proposal.get('evidence_fixture_ids')
+                or not set(proposal['evidence_fixture_ids']) <= {r['fixture_id'] for r in train}):continue
+            try:
+                transformed,condition=condition_rows(train,proposal.get('condition',{}),proposal.get('outcome'))
+            except ValueError:continue
             # This gate sees only training sample counts, never holdout outcomes.
-            stats=table(train,condition,proposal.get('outcome'),proposal['threshold'])
+            stats=table(transformed,condition,proposal.get('outcome'),proposal['threshold'])
             a,b,c,d=stats['counts']
             if min(a+b,c+d)>=3:testable+=1
         iterations.append({'iteration':number,'request_sha256':digest(request),
