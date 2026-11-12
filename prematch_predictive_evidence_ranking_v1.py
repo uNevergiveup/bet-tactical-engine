@@ -142,7 +142,9 @@ def build(source, out, *, day=None, start='15:00', end='03:00', preselection=Non
     if finish<=begin: finish+=timedelta(days=1)
     if any(datetime.fromisoformat(p['kickoff_madrid'])<=cutoff for p in pats):
         raise ValueError('TARGET_NOT_FUTURE_AT_FROZEN_CUTOFF')
-    pats=[p for p in pats if begin<=datetime.fromisoformat(p['kickoff_madrid'])<finish]
+    inclusive_end=bool(preselection and json.loads(Path(preselection).read_text(encoding='utf-8-sig')).get('window',{}).get('inclusive_end'))
+    pats=[p for p in pats if begin<=datetime.fromisoformat(p['kickoff_madrid']) and
+          (datetime.fromisoformat(p['kickoff_madrid'])<=finish if inclusive_end else datetime.fromisoformat(p['kickoff_madrid'])<finish)]
     tag=date.strftime('%Y%m%d')
     for p in pats: by[str(p.get('fixture_id'))].append(p)
     general=[aggregate(fid,rows) for fid,rows in by.items()]

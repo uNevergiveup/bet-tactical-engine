@@ -78,7 +78,7 @@ def cache_identity(cache,row,cutoff,retrospective):
     f=doc.get('fixture',{});t=doc.get('teams',{});l=doc.get('league',{})
     h=t.get('home',{}).get('id');a=t.get('away',{}).get('id')
     expected=(row['team_id'],row['opponent_id']) if row['venue']=='HOME' else (row['opponent_id'],row['team_id'])
-    identities={(x.get('teams',{}).get('home',{}).get('id'),x.get('teams',{}).get('away',{}).get('id'),x.get('league',{}).get('id'),x.get('league',{}).get('season'),x.get('fixture',{}).get('date')) for x,_ in cache.candidates('fixtures',row['fixture_id'])}
+    identities={(x.get('teams',{}).get('home',{}).get('id'),x.get('teams',{}).get('away',{}).get('id'),x.get('league',{}).get('id'),x.get('league',{}).get('season'),x.get('fixture',{}).get('date')) for x,source in cache.candidates('fixtures',row['fixture_id']) if allowed_ref(source,cutoff,retrospective)}
     if len(identities)!=1 or (h,a)!=expected or f.get('id')!=row['fixture_id'] or f.get('status',{}).get('short')!='FT' or dt(f.get('date'))!=dt(row['kickoff_utc']) or l.get('id')!=row['league_id'] or l.get('season')!=row['season']:
         return None,None
     return doc,ref

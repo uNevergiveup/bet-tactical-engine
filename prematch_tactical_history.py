@@ -164,6 +164,7 @@ def phase1_preselection(fixtures_path, cache_root, cutoff, history=20):
         matches.append(row)
     return {'schema_version': '1.3-preselection', 'bridge_version':'1.1-tactical-cache',
             'generated_at_utc': cutoff.isoformat(),
+            'window':doc.get('window',{}),
             'source_filter_sha256': t.sha(fixtures_path), 'source': str(fixtures_path.resolve()),
             'matches': matches, 'cache_sources': list(refs.values()), 'api_calls': 0,
             'audit': {'rejected': audit, 'cache_rejections': cache.rejected},

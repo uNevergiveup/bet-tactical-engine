@@ -4,7 +4,7 @@ import copy
 import json
 from pathlib import Path
 
-from prematch_advanced_discovery_v2 import table, by_adjust, digest, dt, finite
+from prematch_advanced_discovery_v2 import table, by_adjust, digest, dt, finite, discover
 
 SEGMENT = ('entity_type','team_id','player_id','league_id','season','gender','team_kind','period')
 
@@ -66,11 +66,15 @@ def research_packet(observations, targets, cutoff, max_iterations=3):
         a = [r for r in rows if dt(r['kickoff_utc']) < boundary]
         b = [r for r in rows if dt(r['kickoff_utc']) >= boundary]
         training.extend(a); holdout.extend(b)
+    usable_targets=[t for t in targets if all(k in t for k in ('home_id','away_id','gender'))]
+    initial_patterns,initial_budget=discover(training,usable_targets,max_tests=16)
     public = {'schema_version':'1.0-llm-training-packet','cutoff_utc':cutoff.isoformat(),
               'targets':targets,'training_observations':training,'max_iterations':max_iterations,
+              'initial_python_patterns_training_only':initial_patterns,
+              'initial_python_pattern_budget':initial_budget,
               'holdout_policy':'SEALED_GLOBAL_CHRONOLOGICAL_30_PERCENT_UNIQUE_FIXTURES',
               'holdout_boundary_utc':boundary.isoformat(),
-              'instructions':'Propose falsifiable associations; cite training fixture IDs; never claim validation or betting value.'}
+              'instructions':'Use only this training view. Do not open original batch cache files: they may also contain sealed fixtures. Propose falsifiable associations; cite training fixture IDs and provenance hashes; never claim validation or betting value.'}
     sealed = {'training_sha256':digest(public),'holdout':holdout,'holdout_sha256':digest(holdout),
               'all_observations_sha256':digest(observations)}
     return public,sealed
@@ -227,7 +231,10 @@ def run_iterative_research(packet, sealed, base_ranking, researcher, runtime_ide
         teams={t for t in (target.get('home_id'),target.get('away_id')) if t is not None}
         related=[r for r in validation['results'] if r['hypothesis'].get('segment',{}).get('team_id') in teams]
         item['llm_evidence']=[{'hypothesis_id':r['hypothesis'].get('hypothesis_id'),
-            'status':r['status'],'reason':r['reason']} for r in related]
+            'status':r['status'],'reason':r['reason'],'historical_segment':r['hypothesis'].get('segment'),
+            'upcoming_applicability':('SAME_COMPETITION_SEASON_PENDING_TARGET_CONTEXT' if
+                all(target.get(k)==r['hypothesis']['segment'].get(k) for k in ('league_id','season','gender')) else
+                'OTHER_OR_UNVERIFIED_COMPETITION_SEASON_NOT_TRANSFERABLE')} for r in related]
         item['llm_ranking_policy']='EVIDENCE_ANNOTATION_ONLY_BASE_ORDER_PRESERVED'
         item['value_validated']=False;item['actionable_bet']=False;enriched.append(item)
     common={'runtime_identity':runtime_identity,'training_packet_sha256':digest(packet),
@@ -265,7 +272,12 @@ def main(argv=None):
     parser.add_argument('--max-iterations',type=int,default=3)
     parser.add_argument('--runtime-command-json',help='JSON argv array; no shell; reads request JSON on stdin')
     parser.add_argument('--runtime-timeout',type=int,default=180)
+    parser.add_argument('--confirm-external',action='store_true')
     args=parser.parse_args(argv)
+    if args.runtime_command_json:
+        from prematch_execution_control import require_external_confirmation
+        try:require_external_confirmation(args.confirm_external)
+        except ValueError as error:parser.error(str(error))
     if args.runtime_timeout < 1:parser.error('runtime timeout must be positive')
     data=json.loads(args.observations.read_text());ranking=json.loads(args.base_ranking.read_text())
     cutoff=dt(args.cutoff)
@@ -307,6 +319,9 @@ def main(argv=None):
                       'iterations':artifacts['pattern_registry.json']['iterations_executed'],'actionable_bet':False}))
     return 0
 
+
+from prematch_execution_control import confirmed_cli
+main = confirmed_cli(main)
 
 if __name__=='__main__':
     raise SystemExit(main())

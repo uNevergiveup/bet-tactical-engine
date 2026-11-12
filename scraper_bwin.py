@@ -563,9 +563,13 @@ def main(argv=None):
     parser.add_argument('--intentos', type=int, default=MAX_INTENTOS_SCRAPER)
     parser.add_argument('--pausar', action='store_true')
     parser.add_argument('--sin-pestanas', action='store_true')
+    parser.add_argument('--confirm-external',action='store_true')
     parser.add_argument('--browser-executable', default=os.getenv('BWIN_BROWSER_EXECUTABLE'),
                         help='Chrome/Chromium instalado; también BWIN_BROWSER_EXECUTABLE')
     args = parser.parse_args(argv)
+    from prematch_execution_control import require_external_confirmation
+    try:require_external_confirmation(args.confirm_external)
+    except ValueError as error:parser.error(str(error))
     if args.intentos < 1:
         parser.error('--intentos debe ser positivo')
     if args.browser_executable and not Path(args.browser_executable).is_file():
@@ -665,6 +669,9 @@ def main(argv=None):
     print('No se generó un TXT nuevo: revisar los diagnósticos.', flush=True)
     return 1
 
+
+from prematch_execution_control import confirmed_cli
+main = confirmed_cli(main)
 
 if __name__ == '__main__':
     raise SystemExit(main())

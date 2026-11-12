@@ -10,6 +10,35 @@ import prematch_phase1 as phase
 
 
 class AcquisitionTests(unittest.TestCase):
+    def test_interruption_keeps_a_durable_attempt_record_without_credentials(self):
+        with tempfile.TemporaryDirectory() as td:
+            root=Path(td);journal=root/'requests.jsonl'
+            def interrupted(*args):raise KeyboardInterrupt()
+            client=phase.Phase1ApiClient(root/'cache',offline=False,max_new_calls=1,
+                key='secret-test-key',transport=interrupted,journal_path=journal)
+            with self.assertRaises(KeyboardInterrupt):client.get('teams',id=1)
+            rows=[json.loads(row) for row in journal.read_text().splitlines()]
+            self.assertEqual(rows[0]['status'],'HTTP_ATTEMPT_RESERVED')
+            self.assertEqual(rows[0]['http_attempt_number'],1)
+            self.assertNotIn('secret-test-key',journal.read_text())
+
+    def test_expired_cache_is_versioned_and_previous_bytes_remain_reproducible(self):
+        from datetime import datetime,timedelta,timezone
+        now=[datetime(2026,11,12,tzinfo=timezone.utc)]
+        payloads=iter([{'response':[{'value':1}],'errors':[]},{'response':[{'value':2}],'errors':[]}])
+        with tempfile.TemporaryDirectory() as td:
+            root=Path(td)
+            client=phase.Phase1ApiClient(root,offline=False,max_new_calls=2,key='test',clock=lambda:now[0],
+                transport=lambda *args:(200,{},next(payloads)),min_interval_seconds=0)
+            first=client.get('teams',id=1);original=first.cache_path.read_bytes()
+            now[0]+=timedelta(seconds=phase.TTL_SECONDS.get('teams',86400)+1)
+            second=client.get('teams',id=1)
+            self.assertNotEqual(first.cache_path,second.cache_path)
+            self.assertEqual(first.cache_path.read_bytes(),original)
+            reader=phase.Phase1ApiClient(root,offline=True,clock=lambda:now[0])
+            latest=reader.get('teams',id=1)
+            self.assertEqual(latest.response,[{'value':2}]);self.assertEqual(reader.new_calls,0)
+
     def test_batch_embedded_detail_avoids_four_repeated_http_requests(self):
         from datetime import datetime,timezone
         raw={'fixture':{'id':10,'date':'2026-11-01T12:00:00Z','status':{'short':'FT'}},
@@ -115,7 +144,7 @@ class AcquisitionTests(unittest.TestCase):
                  patch.object(phase,'canonical_fixtures',return_value={'fixtures':[]}),\
                  patch.object(phase,'run_bwin_once',side_effect=phase.Phase1Error('browser failed')):
                 status=phase.main(['--root',str(root),'--date','2026-11-12','--fixtures-input',str(source),
-                    '--output-dir',str(out),'--online','--max-api-calls','2','--discover-bwin','--discovery-only'])
+                    '--output-dir',str(out),'--online','--confirm-external','--max-api-calls','2','--discover-bwin','--discovery-only'])
             self.assertEqual(status,2)
             report=json.loads((out/'api_request_ledger_error.json').read_text())
             self.assertEqual(report['api_usage']['new_http_calls'],2)

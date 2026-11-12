@@ -846,7 +846,12 @@ def main(argv=None):
                    help='En --mode adaptive, número de encuentros con estadística detallada (plan equilibrado V1.3)')
     p.add_argument('--rescore-json',type=Path,
                    help='Recalcular un preselection V1.1/V1.2 sin consumir API')
+    p.add_argument('--confirm-external',action='store_true')
     args=p.parse_args(argv)
+    if not args.rescore_json:
+        from prematch_execution_control import require_external_confirmation
+        try:require_external_confirmation(args.confirm_external)
+        except ValueError as error:p.error(str(error))
     if args.fixture_id is not None and args.fixture_ids_file is not None:
         p.error('Usa --fixture-id o --fixture-ids-file, no ambos')
     if args.merge_report and not args.fixture_ids_file and not args.fixture_id:
@@ -886,5 +891,8 @@ def main(argv=None):
         return 0 if report['counts']['api_errors']==0 else 3
     except (OSError,ValueError,KeyError,ImportError,PreselectionError) as e:
         print(f'ERROR: {e}',file=sys.stderr);return 2
+
+from prematch_execution_control import confirmed_cli
+main = confirmed_cli(main)
 
 if __name__=='__main__':raise SystemExit(main())

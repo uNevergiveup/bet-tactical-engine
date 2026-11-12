@@ -605,6 +605,10 @@ def discovery_status(root, day, window=None):
 
 
 def main(argv=None):
+    arguments=list(sys.argv[1:] if argv is None else argv)
+    if arguments and arguments[0] in ('prepare','dry-run','run'):
+        from prematch_execution_control import main as controlled_main
+        return controlled_main(arguments)
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--start',type=trial.parse_clock)
     mode = parser.add_mutually_exclusive_group()
@@ -619,6 +623,7 @@ def main(argv=None):
     parser.add_argument('--output-dir', type=Path)
     parser.add_argument('--asof')
     parser.add_argument('--online', action='store_true')
+    parser.add_argument('--confirm-external',action='store_true')
     parser.add_argument('--max-api-calls', type=int, default=0)
     parser.add_argument('--preflight', type=Path)
     parser.add_argument('--reconcile-schedule',action='store_true',help='Revalida calendario API actual en lotes; requiere --rank --online y presupuesto; no repite históricos')
@@ -659,6 +664,15 @@ def main(argv=None):
     parser.add_argument('--min-lead', type=int, default=45)
     parser.add_argument('--max-odds-age', type=int, default=120)
     args = parser.parse_args(argv)
+    if args.dry_run and any((args.rank,args.prepare_fixture,args.sync_bwin,args.reconcile_schedule,
+                            args.tactical_research,args.market_mapping_only,args.online)):
+        print(json.dumps({'status':'DRY_RUN_NO_EXTERNAL_EXECUTION','date':args.date,
+                          'online_requested':args.online,'external_calls':0,'stages_executed':0},indent=2))
+        return 0
+    if not args.dry_run and (args.online or args.sync_bwin or args.prepare_fixture or not any((args.status,args.tactical_research,args.market_mapping_only,args.rank,args.review))):
+        from prematch_execution_control import require_external_confirmation
+        try:require_external_confirmation(args.confirm_external)
+        except ValueError as error:parser.error(str(error))
     if args.status:
         if not args.date:
             parser.error('--status requiere --date YYYY-MM-DD')
@@ -786,6 +800,9 @@ def main(argv=None):
             from prematch_daily_csv import export_daily
             export_daily(folder/'prospective_trial')
 
+
+from prematch_execution_control import confirmed_cli
+main = confirmed_cli(main)
 
 if __name__ == '__main__':
     raise SystemExit(main())

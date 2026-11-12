@@ -82,4 +82,4 @@ class DailyResumeRouteTests(unittest.TestCase):
   import prematch_daily as daily
   from unittest.mock import patch
   with patch.object(daily,'operational_research',return_value={'status':'TEST'}) as op,patch.object(daily,'reusable_preparation',side_effect=AssertionError('Must not rebuild history')):
-   self.assertEqual(daily.main(['--sync-bwin','--date','2026-11-11']),0);op.assert_called_once()
+   self.assertEqual(daily.main(['--sync-bwin','--confirm-external','--date','2026-11-11']),0);op.assert_called_once()

@@ -136,6 +136,24 @@ def atomic_json(path: Path, value: Any) -> str:
     return sha_bytes(blob)
 
 
+def immutable_cache_json(path: Path, document: dict) -> Path:
+    """Publish a new cache version atomically; never replace an acquired snapshot."""
+    import tempfile
+    import uuid
+    path.parent.mkdir(parents=True,exist_ok=True)
+    stamp=parse_dt(document['fetched_at_utc']).astimezone(UTC).strftime('%Y%m%dT%H%M%S%fZ')
+    blob=(json.dumps(document,ensure_ascii=False,indent=2,sort_keys=True)+'\n').encode()
+    with tempfile.NamedTemporaryFile(dir=path.parent,prefix='.'+path.stem,suffix='.tmp',delete=False) as handle:
+        temporary=Path(handle.name);handle.write(blob);handle.flush();os.fsync(handle.fileno())
+    candidate=path
+    try:
+        while True:
+            try:os.link(temporary,candidate);return candidate
+            except FileExistsError:
+                candidate=path.with_name(path.stem+'__'+stamp+'__'+uuid.uuid4().hex[:12]+'.json')
+    finally:temporary.unlink(missing_ok=True)
+
+
 def parse_clock(value: str) -> clock_time:
     if not re.fullmatch(r"(?:[01]\d|2[0-3]):[0-5]\d", value):
         raise argparse.ArgumentTypeError("Hora requerida HH:MM")
@@ -178,11 +196,12 @@ class Phase1ApiClient:
                  timeout: int = 20, transport: Transport | None = None,
                  clock: Callable[[], datetime] = now_utc,
                  sleeper: Callable[[float], None] = time.sleep,
-                 min_interval_seconds: float = 1.0):
+                 min_interval_seconds: float = 1.0, journal_path: Path | None = None):
         if min_interval_seconds < 0:
             raise ValueError('API_MIN_INTERVAL_INVALID')
         self.min_interval_seconds = min_interval_seconds
         self.next_request_at = 0.0
+        self.journal_path = Path(journal_path) if journal_path else None
         if max_new_calls < 0:
             raise ValueError("max_new_calls debe ser >=0")
         if not offline and max_new_calls < 1:
@@ -211,8 +230,17 @@ class Phase1ApiClient:
         token, _ = cache_token(endpoint, params)
         return self.cache_dir / endpoint.replace("/", "_") / f"{token}.json"
 
+    def journal(self, event):
+        if self.journal_path is None:return
+        self.journal_path.parent.mkdir(parents=True,exist_ok=True)
+        with self.journal_path.open('a') as handle:
+            handle.write(json.dumps({'at_utc':self.clock().isoformat(),'http_attempt_number':self.new_calls,**event})+'\n')
+            handle.flush();os.fsync(handle.fileno())
+
     def _http_transport(self, endpoint: str, params: dict[str, str], headers: dict[str, str],
                         timeout: int) -> tuple[int, dict[str, str], dict[str, Any]]:
+        from prematch_execution_control import require_external_confirmation
+        require_external_confirmation()
         url = f"{self.base_url}/{endpoint}?{urlencode(list(params.items()))}"
         request = Request(url, headers=headers)
         try:
@@ -228,6 +256,17 @@ class Phase1ApiClient:
 
     def _read_cache(self, endpoint: str, params: dict[str, str]) -> ApiResult | None:
         path = self.path_for(endpoint, params)
+        versions=list(path.parent.glob(path.stem+'__*.json'))
+        if path.is_file():versions.append(path)
+        def acquired(candidate):
+            try:return parse_dt(json.loads(candidate.read_text()).get('fetched_at_utc')) or datetime.min.replace(tzinfo=UTC)
+            except (OSError,ValueError,TypeError,AttributeError):return datetime.min.replace(tzinfo=UTC)
+        for candidate in sorted(versions,key=lambda p:(acquired(p),str(p)),reverse=True):
+            result=self._read_cache_file(endpoint,params,candidate)
+            if result is not None:return result
+        return None
+
+    def _read_cache_file(self, endpoint, params, path):
         if not path.is_file():
             return None
         try:
@@ -358,8 +397,11 @@ class Phase1ApiClient:
             self.next_request_at = time.monotonic() + self.min_interval_seconds
             self.new_calls += 1
             self.http_calls_by_endpoint[endpoint] += 1
+            self.journal({'status':'HTTP_ATTEMPT_RESERVED','endpoint':endpoint,'parameters':ordered})
             try:
                 status, response_headers, payload = self.transport(endpoint, ordered, headers, self.timeout)
+                self.journal({'status':'HTTP_RESPONSE','endpoint':endpoint,'http_status':status,
+                              'provider_errors_present':bool(payload.get('errors')) if isinstance(payload,dict) else True})
                 body_rate_limit = isinstance(payload, dict) and isinstance(payload.get('errors'), dict) and bool(payload['errors'].get('rateLimit'))
                 if status == 429 or status >= 500 or body_rate_limit:
                     last_error = f"HTTP_{status}"
@@ -401,11 +443,12 @@ class Phase1ApiClient:
                             "payload_sha256": sha_bytes(canonical_json(payload)),
                             "raw_payload": payload, "response": response}
                 path = self.path_for(endpoint, ordered)
-                atomic_json(path, document)
+                path = immutable_cache_json(path, document)
                 meta = {"path": str(path.resolve()), "sha256": sha_file(path), "endpoint": endpoint,
                         "params": ordered, "fetched_at_utc": acquired.isoformat(),
                         "completeness": completeness, "source": "api"}
                 self.used_cache_files[str(path.resolve())] = meta
+                self.journal({'status':'SNAPSHOT_COMMITTED','endpoint':endpoint,'cache_path':meta['path'],'sha256':meta['sha256']})
                 self.ledger.append({"endpoint": endpoint, "parameters": ordered,
                                     "status": "API_FETCH", "attempt": attempt,
                                     "http_status": status, "cache_path": str(path.resolve()),
@@ -1355,11 +1398,13 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--fixtures-input", type=Path, help="fixtures.json ligero ya adquirido")
     parser.add_argument("--bwin-input", type=Path, action="append", default=[], help="bwin_discovery.json; repetible")
     parser.add_argument("--output-dir", type=Path)
+    parser.add_argument('--cache-root',type=Path,help='Caché compartida; los refrescos crean versiones sin sobrescribir snapshots')
     network = parser.add_mutually_exclusive_group()
     network.add_argument("--online", action="store_true", help="Autoriza API y catálogo Bwin público")
     network.add_argument("--offline", action="store_true", help="Fuerza caché/snapshots solamente (predeterminado)")
     parser.add_argument("--discover-bwin", action="store_true", help="Con --online: ejecutar una sola exploración Bwin compartida")
     parser.add_argument("--max-api-calls", type=int, default=0, help="Límite duro de solicitudes HTTP API nuevas")
+    parser.add_argument('--confirm-external',action='store_true',help='Confirmar expresamente consumo de servicios externos')
     parser.add_argument("--max-matches", type=int, default=0, help="Máximo de fixtures API verificables a profundizar; 0=todas")
     parser.add_argument("--fixture-id", type=int, action="append", default=[],
                         help="Fixture API-Football exacto para el piloto; repetible (máximo 3 recomendado)")
@@ -1383,6 +1428,10 @@ def main(argv: list[str] | None = None) -> int:
         parser.error("--online exige --max-api-calls >0")
     if args.discover_bwin and not args.online:
         parser.error("--discover-bwin exige --online")
+    if args.online:
+        from prematch_execution_control import require_external_confirmation
+        try:require_external_confirmation(args.confirm_external)
+        except ValueError as error:parser.error(str(error))
     root = args.root.expanduser().resolve()
     day = args.date or active_window_day(datetime.now(MADRID), args.start, args.end)
     begin, finish = window_bounds(day, args.start, args.end)
@@ -1394,11 +1443,12 @@ def main(argv: list[str] | None = None) -> int:
     progress = json.loads(progress_path.read_text(encoding="utf-8")) if args.resume and progress_path.is_file() else {
         "schema": SCHEMA, "window": {"start_madrid": begin.isoformat(), "end_madrid": finish.isoformat()},
         "started_at_utc": now_utc().isoformat(), "stages": {}}
-    cache_dir = root / "outputs" / ".api_football_history_cache"
+    cache_dir = args.cache_root.expanduser().resolve() if args.cache_root else root / "outputs" / ".api_football_history_cache"
     try:
         from config.constants import FOOTBALL_BASE_URL, REQUEST_TIMEOUT
         client = Phase1ApiClient(cache_dir, offline=not args.online, max_new_calls=args.max_api_calls,
-                                 base_url=FOOTBALL_BASE_URL, timeout=REQUEST_TIMEOUT)
+                                 base_url=FOOTBALL_BASE_URL, timeout=REQUEST_TIMEOUT,
+                                 journal_path=run_dir/'api_requests.jsonl')
         if args.longitudinal_preselection:
             if len(args.fixture_id) != 1 or not args.asof or args.max_api_calls > 25:
                 raise Phase1Error("LONGITUDINAL_REQUIRES_ONE_FIXTURE_ASOF_AND_MAX_25_CALLS")
@@ -1500,6 +1550,9 @@ def main(argv: list[str] | None = None) -> int:
         print(f"FASE_1_ERROR: {exc}", file=sys.stderr)
         return 2
 
+
+from prematch_execution_control import confirmed_cli
+main = confirmed_cli(main)
 
 if __name__ == "__main__":
     raise SystemExit(main())

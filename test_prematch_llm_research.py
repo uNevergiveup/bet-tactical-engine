@@ -84,11 +84,14 @@ class LLMResearchTests(unittest.TestCase):
         with self.assertRaises(ValueError):run_iterative_research(self.packet,self.sealed,[],lambda r: {},'TEST')
 
     def test_iteration_limit_is_enforced(self):
-        packet,sealed=research_packet(self.rows,self.targets,self.cut,max_iterations=1)
+        targets=[dict(self.targets[0],home_id=1,away_id=2,league_id=99,season=2025,gender='M')]
+        packet,sealed=research_packet(self.rows,targets,self.cut,max_iterations=1)
         response={'hypotheses':[self.h],'runtime_receipt':{'test_adapter':True},'continue_research':True}
         result=run_iterative_research(packet,sealed,[{'fixture_id':99}],lambda r: response,'UNIT_TEST_ONLY')
         self.assertEqual(result['pattern_registry.json']['iterations_executed'],1)
         self.assertEqual(result['pattern_registry.json']['stop_reason'],'ITERATION_LIMIT')
+        self.assertEqual(result['ranking_enriched.json']['ranking'][0]['llm_evidence'][0]['upcoming_applicability'],
+                         'OTHER_OR_UNVERIFIED_COMPETITION_SEASON_NOT_TRANSFERABLE')
 
     def test_conjunctions_preserve_missing_values_and_reject_outcome_leakage(self):
         from prematch_llm_research import condition_rows

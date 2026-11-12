@@ -67,7 +67,7 @@ class V2IntegrationTests(unittest.TestCase):
                  patch.object(daily, 'scan', side_effect=lambda *a: (order.append('scan') or {'status':'NO_VALID_CANDIDATE'})), \
                  patch.object(daily, 'run_optional_market_mapping', side_effect=lambda *a: order.append('mapping')), \
                  patch('prematch_daily_csv.export_daily', return_value=[]):
-                self.assertEqual(daily.main(['--root',td,'--date','2026-11-09']), 0)
+                self.assertEqual(daily.main(['--root',td,'--date','2026-11-09','--confirm-external']), 0)
             self.assertEqual(order, ['predictor','scan','mapping'])
 
     def test_cached_predictor_sha_is_required(self):

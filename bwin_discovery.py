@@ -832,6 +832,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--top", type=int, default=1, help="Sin fixture-id: top N futuros; 0=todos, sin ranking estadístico")
     parser.add_argument("--output-dir", type=Path, default=Path("outputs/bwin_discovery/test"))
     parser.add_argument("--headless", action="store_true", help="Usar Chromium sin ventana visible")
+    parser.add_argument('--confirm-external',action='store_true')
     parser.add_argument("--browser-executable", help="Ruta a Chrome/Chromium instalada (opcional)")
     parser.add_argument("--catalog-page", action="append", default=[], help="Ruta/URL de listado a recorrer; repetible")
     parser.add_argument("--max-scrolls", type=int, default=12)
@@ -842,6 +843,9 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--include-past-for-debug", action="store_true", help="No omitir encuentros ya iniciados (solo depuración; nunca PREMATCH)")
     parser.add_argument("--base-url", default=BASE)
     args = parser.parse_args(argv)
+    from prematch_execution_control import require_external_confirmation
+    try:require_external_confirmation(args.confirm_external)
+    except ValueError as error:parser.error(str(error))
     if args.top < 0:
         parser.error('--top debe ser >=0; 0 significa todos los fixtures')
     now = datetime.now(timezone.utc).astimezone(TZ)
@@ -911,6 +915,9 @@ def main(argv: list[str] | None = None) -> int:
         print("AVISO: catálogo vacío; no equivale a ausencia de mercados. Revisa pages[].error en JSON.", file=sys.stderr)
         return 4
     return 0
+
+from prematch_execution_control import confirmed_cli
+main = confirmed_cli(main)
 
 if __name__ == "__main__":
     raise SystemExit(main())

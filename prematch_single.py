@@ -721,6 +721,7 @@ def cmd_status(ctx,args):
 def main(argv=None):
     p=argparse.ArgumentParser(description=__doc__)
     p.add_argument('--root',type=Path,default=Path.cwd())
+    p.add_argument('--confirm-external',action='store_true')
     p.add_argument('--selected',type=Path,required=True,help='selected_match.json definitivo del selector')
     p.add_argument('--decision',type=Path,help='selection_decision.json (si no, junto al selected_match.json)')
     p.add_argument('--multi',type=Path,default=Path('prematch_multi.py'),help='Pipeline anterior, sin modificar')
@@ -753,6 +754,10 @@ def main(argv=None):
     ff.add_argument('--report',type=Path,help='Reporte cualitativo del seleccionado')
     ff.add_argument('--historical',action='store_true',help='Solo auditoría posterior al inicio: nunca Codex accionable')
     args=p.parse_args(argv)
+    if args.action in ('prepare','refresh-odds','retry-context','retry-scraper'):
+        from prematch_execution_control import require_external_confirmation
+        try:require_external_confirmation(args.confirm_external)
+        except ValueError as error:p.error(str(error))
     if (args.max_selection_age_minutes<0 or args.max_odds_age_minutes<1 or
             args.min_lead_minutes<45 or args.min_refresh_lead_minutes<5 or
             args.min_finish_lead_minutes<FINISH_MIN_LEAD_MINUTES):
@@ -778,6 +783,9 @@ def main(argv=None):
         return 2
     return 2
 
+
+from prematch_execution_control import confirmed_cli
+main = confirmed_cli(main)
 
 if __name__=='__main__':
     sys.exit(main())

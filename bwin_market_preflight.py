@@ -533,6 +533,7 @@ def main(argv=None):
     p.add_argument('--root',type=Path,default=Path.cwd())
     p.add_argument('--output-dir',type=Path,default=Path('outputs/discovery/market_preflight'))
     p.add_argument('--run-scraper',action='store_true',help='EJECUTAR scraper_bwin.py para encuentros validos; por defecto solo auditoria')
+    p.add_argument('--confirm-external',action='store_true')
     p.add_argument('--refresh-existing',action='store_true',help='Con --run-scraper: recaptura primero en staging y archiva el TXT anterior por SHA')
     p.add_argument('--immutable-capture',action='store_true',help='Recaptura versionada sin modificar el TXT ni manifest previos; requiere --refresh-existing')
     p.add_argument('--reuse-existing',action='store_true',help='Auditar TXT ya capturado, sin ejecutar scraper (retrospectivo)')
@@ -540,6 +541,10 @@ def main(argv=None):
     p.add_argument('--min-lead-minutes',type=int,default=5)
     p.add_argument('--max-discovery-age-minutes',type=int,default=180)
     args=p.parse_args(argv)
+    if args.run_scraper:
+        from prematch_execution_control import require_external_confirmation
+        try:require_external_confirmation(args.confirm_external)
+        except ValueError as error:p.error(str(error))
     if args.immutable_capture and not args.refresh_existing:p.error('--immutable-capture requiere --refresh-existing')
     if args.refresh_existing and not args.run_scraper:p.error('--refresh-existing requiere --run-scraper')
     if sum(bool(x) for x in (args.run_scraper,args.reuse_existing,args.audit_txt))>1:
@@ -622,5 +627,8 @@ def main(argv=None):
     print(f"Selecciones: {out/'market_selection_review.csv'} | investigables: {out/'market_research_shortlist.csv'}")
     success_statuses={'READY_NOT_EXECUTED','MARKET_TRIPLES_EXTRACTED','HISTORICAL_MARKET_TRIPLES_EXTRACTED'}
     return 0 if results and all(x['status'] in success_statuses for x in results) else 2
+
+from prematch_execution_control import confirmed_cli
+main = confirmed_cli(main)
 
 if __name__=='__main__':raise SystemExit(main())

@@ -91,6 +91,19 @@ class AdvancedDiscoveryTests(unittest.TestCase):
             self.assertEqual(ref['embedded_field'],'events')
             self.assertEqual(ref['sha256'],engine.hashlib.sha256(path.read_bytes()).hexdigest())
 
+    def test_later_identity_version_cannot_change_an_earlier_frozen_cutoff(self):
+        with tempfile.TemporaryDirectory() as td:
+            root=Path(td);target=fixtures.target();fixtures.setup_history(root,target)
+            path=next((root/'fixtures').glob('*.json'));raw=json.loads(path.read_text())['response'][0]
+            raw['score']={'fulltime':{'home':0,'away':2},'halftime':{'home':0,'away':1}}
+            fixtures.write_cache(root,'fixtures','id=10',[raw],fetched='2026-11-06T12:00:00Z')
+            later=copy.deepcopy(raw);later['league']['id']=1234
+            fixtures.write_cache(root,'fixtures','id=10',[later],fetched='2026-11-07T12:00:00Z',suffix='later')
+            pre={'generated_at_utc':fixtures.CUT.isoformat(),'matches':[target]}
+            rows,_,_=engine.normalize(pre,{'fetched_at_utc':fixtures.CUT.isoformat()},engine.EnrichedCache(root))
+            team=next(r for r in rows if r['entity_type']=='TEAM')
+            self.assertEqual(team['metrics']['own.goals_h1'],1)
+
     def test_real_half_query_remains_separate_from_ft_and_coach_is_historical(self):
         with tempfile.TemporaryDirectory() as td:
             root=Path(td);target=fixtures.target();fixtures.setup_history(root,target)

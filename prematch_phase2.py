@@ -237,9 +237,11 @@ def collect_player_observations(preselection_match: dict, cache_root: Path, asof
         venue = "HOME" if tid == home else "AWAY" if tid == away else None
         opponent = away if venue == "HOME" else home
         reason = None
+        identity_candidates=cache.candidates('fixtures',fid)
+        before_cutoff=[(f,ref) for f,ref in identity_candidates if (at:=_dt(ref.get('fetched_at_utc'))) and at<=cutoff]
         identities = {(str((f.get("teams") or {}).get("home", {}).get("id")), str((f.get("teams") or {}).get("away", {}).get("id")),
                        str((f.get("league") or {}).get("id")), str((f.get("league") or {}).get("season")),
-                       str(_dt((f.get("fixture") or {}).get("date")))) for f, _ in cache.candidates("fixtures", fid)}
+                       str(_dt((f.get("fixture") or {}).get("date")))) for f, _ in (before_cutoff or identity_candidates)}
         if len(identities) > 1: reason = "FIXTURE_IDENTITY_NOT_UNIQUE"
         if (home is None or away is None or home == away or not venue or fixture.get("id") != fid or
                 opponent != row.get("opponent_id") or venue != row.get("venue") or
@@ -479,6 +481,63 @@ def build_player_patterns(match: dict, observations, coverage, min_matches=3, mi
             "actionable_bet": False}
 
 
+def build_player_duels(match, observations, min_matches=3, min_minutes=180):
+    """Fouls drawn versus committed: research questions, never inferred direct duels."""
+    if min_matches<3 or min_minutes<=0:raise ValueError('DUEL_MINIMUM_EXPOSURE_CANNOT_BE_RELAXED')
+    teams={match['home_id'],match['away_id']};groups=defaultdict(list);seen=set();excluded=Counter()
+    for row in observations:
+        identity=(row['team_id'],row['player_id'],row['fixture_id'])
+        if identity in seen:raise ValueError('DUEL_DUPLICATE_PLAYER_FIXTURE')
+        seen.add(identity)
+        if row['team_id'] not in teams:raise ValueError('DUEL_TEAM_OUTSIDE_TARGET')
+        reason=None
+        if row.get('fixture_status')!='FT':reason='REGULATION_TIME_UNVERIFIED'
+        elif row.get('season')!=match.get('season'):reason='OTHER_SEASON_NOT_POOLED'
+        elif not row.get('position'):reason='NOMINAL_POSITION_UNVERIFIED'
+        elif not row.get('performance_eligible') or not _num(row.get('minutes')) or not 0<row['minutes']<=120:reason='EXPOSURE_UNVERIFIED'
+        if reason:excluded[reason]+=1;continue
+        groups[(row['team_id'],row['player_id'],row['league_id'],row['season'],row['position'])].append(row)
+    profiles=[]
+    for key,rows in sorted(groups.items()):
+        profile={'profile_id':hashlib.sha256(json.dumps(key).encode()).hexdigest(),
+                 'team_id':key[0],'player_id':key[1],'league_id':key[2],'season':key[3],'nominal_position':key[4],
+                 'player_name':rows[0].get('player_name'),'metrics':{},
+                 'historical_coach_ids':sorted({r['coach_id'] for r in rows if r.get('coach_id')}),
+                 'historical_formations':sorted({r['formation'] for r in rows if r.get('formation')}),
+                 'source_refs':list({r['sha256']:r for row in rows for r in row.get('provenance',[])}.values())}
+        for metric in ('fouls_drawn','fouls_committed'):
+            valid=[r for r in rows if _num(r['metrics'].get(metric)) is not None and r['metrics'][metric]>=0
+                   and metric not in r.get('metric_issues',{})]
+            minutes=sum(r['minutes'] for r in valid);total=sum(r['metrics'][metric] for r in valid)
+            profile['metrics'][metric]={'n':len(valid),'missing_n':len(rows)-len(valid),
+                'minutes':minutes,'observed_total':total if valid else None,'per90':90*total/minutes if minutes else None,
+                'fixture_ids':sorted(r['fixture_id'] for r in valid),
+                'exposure_sufficient':len(valid)>=min_matches and minutes>=min_minutes}
+        profiles.append(profile)
+    affiliations=defaultdict(set)
+    for profile in profiles:affiliations[profile['player_id']].add(profile['team_id'])
+    ambiguous={pid for pid,clubs in affiliations.items() if len(clubs)>1}
+    pairs=[]
+    for drawing in profiles:
+        for committing in profiles:
+            if drawing['team_id']==committing['team_id']:continue
+            if drawing['player_id'] in ambiguous or committing['player_id'] in ambiguous:continue
+            a=drawing['metrics']['fouls_drawn'];b=committing['metrics']['fouls_committed']
+            sufficient=a['exposure_sufficient'] and b['exposure_sufficient']
+            pairs.append({'drawing_profile_id':drawing['profile_id'],'committing_profile_id':committing['profile_id'],
+                'status':'EXPLORATORY_WAITING_TARGET_XI_AND_ROLE' if sufficient else 'INSUFFICIENT_EXPOSURE',
+                'historical_coappearance_fixture_ids':sorted(set(a['fixture_ids'])&set(b['fixture_ids'])),
+                'direct_foul_interaction_observed':False,'same_competition':drawing['league_id']==committing['league_id'],
+                'explanation':f"Investigar faltas provocadas de {drawing['player_name'] or drawing['player_id']} frente a faltas cometidas de {committing['player_name'] or committing['player_id']}. Las series históricas no prueban que vayan a enfrentarse directamente.",
+                'requires':['XI del encuentro objetivo','Rol y emparejamiento táctico acreditados',
+                            'Comparabilidad de competiciones y rivales','Mercado literal Bwin y cuota vigente'],
+                'statistical_validation':'NOT_VALIDATED','value_validated':False,'actionable_bet':False})
+    return {'fixture_id':match['fixture_id'],'schema_version':'1.0-player-duel-research',
+            'profiles':profiles,'hypotheses':pairs,'excluded_observations':dict(excluded),
+            'current_affiliation_requires_review_player_ids':sorted(ambiguous),
+            'current_lineup_confirmed':False,'actionable_bet':False}
+
+
 def asof_iso(value):
     parsed = _dt(value)
     return parsed.astimezone(MADRID).isoformat() if parsed else value
@@ -604,6 +663,9 @@ def run(preselection: Path, output_dir: Path, fixture_ids=None, asof=None,
                           "coverage_status": "NOT_REQUESTED", "thresholds": {"min_matches": player_min_matches, "min_minutes": player_min_minutes},
                           "limitations": ["No se proporcionó cache_root de Fase 1."], "actionable_bet": False}
         discovery.dump(out / f"player_patterns_{fid}.json", player_doc)
+        duel_doc=build_player_duels(m,player_doc.get('observations',[]),player_min_matches,player_min_minutes)
+        discovery.dump(out / f"player_duels_{fid}.json",duel_doc)
+        doc['player_duels_file']=str((out/f'player_duels_{fid}.json').resolve())
         doc["player_patterns_file"] = str((out / f"player_patterns_{fid}.json").resolve())
         doc["player_summary"] = {"patterns": len(player_doc["patterns"]), "observations": len(player_doc["observations"]), "coverage_status": player_doc["coverage_status"]}
         doc["unsupported_dimensions"] = {**doc["unsupported_dimensions"], "players": {

@@ -410,6 +410,48 @@ def report(result):
     return '\n'.join(lines) + '\n'
 
 
+def explain_research(preselection, ranking, mapping, llm_status):
+    """Explain the existing explicit matchup rows without inventing market evidence."""
+    mapped={row['pattern_id']:row for row in mapping['mappings']}
+    fixtures=[]
+    labels={'goals':'goles','corners':'córners','shots':'remates','on_target':'remates a puerta',
+            'fouls':'faltas','yellow':'tarjetas amarillas','xg':'goles esperados'}
+    for rank in ranking:
+        entries=[]
+        for pattern in rank.get('_rows',[]):
+            if pattern.get('segment')!='CURRENT_VENUE_VS_RIVAL_MATCHING_VENUE' or pattern.get('metric')=='offsides':continue
+            link=mapped.get(pattern['pattern_id'],{});market_links=link.get('market_links',[])
+            own=pattern['own_statistics'];rival=pattern['opponent_conceded_statistics']
+            supported=pattern_status(pattern)=='DESCRIPTIVE_SUPPORTED'
+            state=('MODELO_NO_DISPONIBLE' if link.get('mapping_status')=='UNSUPPORTED_MARKET' else
+                   'MERCADO_INVESTIGABLE' if link.get('mapping_status')=='MARKET_MATCHED' else
+                   'PATRON_DETECTADO' if supported else 'INSUFICIENTE')
+            entries.append({'pattern_id':pattern['pattern_id'],'status':state,
+                'mercado_investigado':list(dict.fromkeys(r['market'] for r in market_links)) or
+                    ['Familia estadística '+labels.get(pattern['metric'],pattern['metric'])+'; mercado literal pendiente'],
+                'por_que_interesa':pattern['definition'],
+                'comportamiento_equipo':{'team':pattern.get('team'),'mean':own.get('mean'),'n':own['n']},
+                'concesion_rival':{'team':pattern.get('opponent'),'mean':rival.get('mean'),'n':rival['n']},
+                'jugadores':'Consultar player_duels del fixture. XI objetivo y rol táctico pendientes de acreditación.',
+                'factores_favorables':['Evidencia descriptiva suficiente según el motor existente'] if supported else [],
+                'contradicciones':pattern.get('counterevidence',[]),
+                'que_podria_fallar':['La muestra puede no representar el rival o el régimen actual',
+                                    'La asociación no demuestra una probabilidad futura'],
+                'falta_confirmar':pattern.get('validation_reasons',[])+['XI y entrenador actuales cuando afecten la tesis',
+                    'Vigencia del precio y regla literal de liquidación','Validación probabilística antes de declarar valor'],
+                'comparacion_con_otros_mercados':{'coverage':pattern.get('coverage_effective_pct'),
+                    'reason':'Prioridad comparada por cobertura y robustez; la cantidad de cuotas no demuestra calidad deportiva'},
+                'mercados_capturados':market_links,'evaluacion_valor':'NO_DEMOSTRADO','value_validated':False,
+                'llm_status':llm_status,'actionable_bet':False})
+        fixtures.append({'fixture_id':int(rank['fixture_id']),'partido':rank['partido'],'rank':rank['rank'],
+            'prioridad':rank['motivos_ranking'],'limitaciones':rank['limitaciones'],'familias':entries})
+    expected={m['fixture_id'] for m in preselection['matches']}
+    if {r['fixture_id'] for r in fixtures}!=expected:raise MappingError('EXPLANATIONS_MUST_RETAIN_ALL_FIXTURES')
+    return {'schema_version':'1.0-explainable-research','fixtures':fixtures,'llm_status':llm_status,
+            'offsides_policy':'STATISTICAL_RETENTION_ONLY_EXCLUDED_FROM_COMMERCIAL_EXPLANATIONS',
+            'value_validated':False,'actionable_bet':False}
+
+
 def classify_signal_market(signals, metric, side, period, line):
     """Structural evidence only; no probability, direction forecast or joint model."""
     if metric=='offsides':return 'DESCRIPTIVE_ONLY',[],['OFFSIDES_EXPERIMENTAL_NOT_COMMERCIAL']

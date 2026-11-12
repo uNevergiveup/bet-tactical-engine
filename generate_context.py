@@ -4682,6 +4682,10 @@ def verify_initial_pair_fixture(match: BwinMatch, home: APITeam, away: APITeam,
 
 
 def main() -> int:
+    from prematch_execution_control import require_external_confirmation
+    try:require_external_confirmation('--confirm-external' in sys.argv[1:])
+    except ValueError as error:
+        LOG.error(str(error));return 2
     context_output_dir().mkdir(parents=True, exist_ok=True)
     CACHE_DIR.mkdir(parents=True, exist_ok=True)
     print("\n" + "=" * 100 + f"\nAPI-FOOTBALL PRO - GENERADOR DE CONTEXTO {VERSION}\n" + "=" * 100 + "\n")

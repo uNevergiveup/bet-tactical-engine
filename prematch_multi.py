@@ -752,6 +752,7 @@ def retry_scraper_one(root: Path, event: str, python: str) -> bool:
 def main(argv: list[str] | None = None) -> int:
     parser=argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--root',type=Path,default=Path(__file__).resolve().parent)
+    parser.add_argument('--confirm-external',action='store_true')
     sub=parser.add_subparsers(dest='action',required=True)
     p=sub.add_parser('prepare',help='Scraper + API de 1–3 eventos concurrentes')
     p.add_argument('--url', action='append',required=True,help='Repite --url para cada partido')
@@ -781,6 +782,10 @@ def main(argv: list[str] | None = None) -> int:
     s.add_argument('--date',help='YYYY-MM-DD, hoy o mañana. Lee outputs/discovery de prematch_daily; no exige manifest')
     s.add_argument('--window',choices=['normal','ampliada'])
     args=parser.parse_args(argv)
+    if args.action in ('prepare','retry-scraper','retry-context'):
+        from prematch_execution_control import require_external_confirmation
+        try:require_external_confirmation(args.confirm_external)
+        except ValueError as error:parser.error(str(error))
     root=args.root.expanduser().resolve()
     if args.action != 'status' and not (root/'config'/'constants.py').is_file():
         parser.error(f'No existe config/constants.py en {root}; ejecuta/copia el lanzador en la raíz scraper')
@@ -888,6 +893,9 @@ def main(argv: list[str] | None = None) -> int:
             say(f'{event}: ERROR {exc}')
     return 0
 
+
+from prematch_execution_control import confirmed_cli
+main = confirmed_cli(main)
 
 if __name__=='__main__':
     raise SystemExit(main())
