@@ -121,6 +121,8 @@ class PlayerCache:
                             index[key].append((row, ref))
                     elif set(params) == {"fixture"}:
                         index[params["fixture"]].append((response, ref))
+                    elif endpoint=='fixtures/statistics' and set(params)=={'fixture','half'} and params['half']=='true':
+                        index[('HALVES',params['fixture'])].append((response,ref))
                 except (OSError, ValueError, TypeError, AttributeError) as exc:
                     self.rejected.append({"path": str(path.resolve()), "reason": str(exc)})
             self.index[endpoint] = index
@@ -141,6 +143,13 @@ class PlayerCache:
             when = _dt(item[1].get("fetched_at_utc"))
             return (0 if when and when <= cutoff else 1, -when.timestamp() if when and when <= cutoff else when.timestamp() if when else float("inf"), item[1]["sha256"])
         return min(candidates, key=order)
+
+    def get_half_statistics(self, fid, cutoff):
+        """Read only a verified half=true query; never infer halves from FT."""
+        self.candidates('fixtures/statistics',fid)
+        candidates=[(rows,ref) for rows,ref in self.index['fixtures/statistics'].get(('HALVES',str(fid)),[])
+                    if (seen:=_dt(ref.get('fetched_at_utc'))) is not None and seen<=cutoff]
+        return max(candidates,key=lambda item:(_dt(item[1]['fetched_at_utc']),item[1]['sha256'])) if candidates else (None,None)
 
 
 def _completion(fixture, ref, cutoff):
@@ -240,11 +249,21 @@ def collect_player_observations(preselection_match: dict, cache_root: Path, asof
         if not completion and not reason: reason = "COMPLETION_BEFORE_CUTOFF_UNPROVEN"
         if reason:
             audit["rejected_history"].append({"fixture_id": fid, "team_id": tid, "reason": reason}); continue
+        result_available=_dt(fixture.get('ended_at_utc'))
+        availability_policy='EXPLICIT_END' if result_available else 'FINAL_SNAPSHOT_OR_CONSERVATIVE_BUFFER'
+        if result_available is None:
+            buffer=_dt(fixture['date'])+timedelta(hours=3 if (fixture.get('status') or {}).get('short')=='FT' else 4)
+            seen=_dt(fixture_ref.get('fetched_at_utc'))
+            result_available=min(buffer,seen) if seen and seen>_dt(fixture['date']) else buffer
         response, player_ref = cache.get("fixtures/players", fid, cutoff)
         if response is None:
             coverage[str(fid)] = "NOT_REQUESTED"; continue
         lineup_response, lineup_ref = cache.get("fixtures/lineups", fid, cutoff)
         roles, lineup_status = _lineup(lineup_response, tid)
+        lineup_blocks=[b for b in lineup_response or [] if (b.get('team') or {}).get('id')==tid]
+        lineup_block=lineup_blocks[0] if len(lineup_blocks)==1 else {}
+        historical_coach=(lineup_block.get('coach') or {}).get('id')
+        if type(historical_coach) is not int or historical_coach<=0:historical_coach=None
         events, events_ref = cache.get("fixtures/events", fid, cutoff)
         blocks = [b for b in response if str((b.get("team") or {}).get("id")) == str(tid)]
         check = {"fixture_id": fid, "team_id": tid, "venue": venue, "target_side": row["target_side"],
@@ -299,11 +318,14 @@ def collect_player_observations(preselection_match: dict, cache_root: Path, asof
             rec = {"player_id": pid, "player_name": (entry.get("player") or {}).get("name"), "team_id": tid,
                    "team": (blocks[0].get("team") or {}).get("name"), "fixture_id": fid, "opponent_id": opponent,
                    "kickoff_utc": _dt(fixture["date"]).isoformat(), "venue": venue,
+                   "fixture_status":(fixture.get('status') or {}).get('short'),
+                   "available_at_utc":result_available.isoformat(),"availability_policy":availability_policy,
                    "side": row["target_side"], "target_side": row["target_side"], "league_id": league["id"], "season": league["season"],
                    "minutes": minutes, "raw_minutes": games.get("minutes"), "starter": True if role == "STARTER" and participation != "UNKNOWN" else False if role == "BENCH" else None,
                    "substitute": True if role == "BENCH" else False if role == "STARTER" else None,
                    "lineup_role": role, "lineup_status": lineup_status, "appeared": appeared,
                    "participation_status": participation, "position": games.get("position"),
+                   "formation":lineup_block.get('formation'),"coach_id":historical_coach,
                    "source": "fixtures/players", "source_cache_query": player_ref["query"], "provenance": refs,
                    "availability_status": _availability(refs, cutoff), "completion_evidence": completion,
                    "metrics": metrics, "raw_statistics": stats_list, "raw_substitute": games.get("substitute"),

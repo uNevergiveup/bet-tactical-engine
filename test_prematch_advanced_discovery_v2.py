@@ -91,6 +91,38 @@ class AdvancedDiscoveryTests(unittest.TestCase):
             self.assertEqual(ref['embedded_field'],'events')
             self.assertEqual(ref['sha256'],engine.hashlib.sha256(path.read_bytes()).hexdigest())
 
+    def test_real_half_query_remains_separate_from_ft_and_coach_is_historical(self):
+        with tempfile.TemporaryDirectory() as td:
+            root=Path(td);target=fixtures.target();fixtures.setup_history(root,target)
+            when='2026-11-06T12:00:00Z'
+            fixture_doc=json.loads(next((root/'fixtures').glob('*.json')).read_text())
+            fixtures.write_cache(root,'fixtures','id=10',fixture_doc['response'],fetched=when)
+            halves=[{'team':{'id':tid},'statistics':[{'type':'Corner Kicks','value':99}],
+                     'statistics_1h':[{'type':'Corner Kicks','value':value}],
+                     'statistics_2h':[{'type':'Corner Kicks','value':None}]} for tid,value in ((1,0),(3,2))]
+            fixtures.write_cache(root,'fixtures/statistics','fixture=10&half=true',halves,fetched=when)
+            lineup=[{'team':{'id':1},'formation':'4-3-3','coach':{'id':77},'startXI':[]}]
+            fixtures.write_cache(root,'fixtures/lineups','fixture=10',lineup,fetched=when,suffix='coach')
+            pre={'generated_at_utc':fixtures.CUT.isoformat(),'matches':[target]}
+            cache=engine.EnrichedCache(root)
+            observations,_,_=engine.normalize(pre,{'path':'synthetic','sha256':'synthetic','fetched_at_utc':fixtures.CUT.isoformat()},cache)
+            team=next(r for r in observations if r['entity_type']=='TEAM')
+            self.assertEqual(team['metrics']['own.corners_h1'],0)
+            self.assertEqual(team['metrics']['conceded.corners_h1'],2)
+            self.assertIsNone(team['metrics']['own.corners_h2'])
+            self.assertNotEqual(team['metrics'].get('own.corners'),99)
+            self.assertEqual(team['conditions']['coach_id'],77)
+            self.assertTrue(any('half=true' in str(r.get('query')) for r in team['provenance']))
+
+    def test_half_corners_are_never_relabelled_as_goals(self):
+        rows=observations(100)
+        for row in rows:
+            row['metrics']['own.corners_h1']=row['metrics'].pop('own.new_beta')
+        patterns,_=engine.discover(rows,[])
+        corners=[p for p in patterns if p['variables']['outcome']=='own.corners_h1']
+        self.assertTrue(corners)
+        self.assertTrue(all(p['period']=='FIRST_HALF' and p['commercial_adapter']['metric']=='corners' for p in corners))
+
     def test_dedup_missing_zero_and_temporal_identity_filters(self):
         target=fixtures.target();row=fixtures.history()
         row.update(own={'goals':0,'shots':None},conceded={'goals':1})
@@ -115,6 +147,18 @@ class AdvancedDiscoveryTests(unittest.TestCase):
             self.assertEqual((actual['player_id'],actual['team_id']),(7,1))
             self.assertEqual(actual['acquisition_status'],'RETROSPECTIVE_RECONSTRUCTION')
             self.assertEqual(actual['per90']['player.shots'],2)
+            self.assertLess(engine.dt(actual['available_at_utc']),fixtures.CUT)
+
+    def test_extra_time_player_totals_not_pooled_with_regulation_time(self):
+        with tempfile.TemporaryDirectory() as td:
+            root=Path(td);target=fixtures.target();row=fixtures.history();row['status']='AET'
+            fixtures.setup_history(root,target,row=row)
+            path=next((root/'fixtures').glob('*.json'));doc=json.loads(path.read_text())
+            doc['response'][0]['fixture']['status']['short']='AET';path.write_text(json.dumps(doc))
+            pre={'generated_at_utc':fixtures.CUT.isoformat(),'matches':[target]}
+            observations,_,audit=engine.normalize(pre,{},engine.EnrichedCache(root),True)
+            self.assertFalse(any(r['entity_type']=='PLAYER' for r in observations))
+            self.assertTrue(any(r['reason']=='PLAYER_NON_REGULATION_TIME_NOT_POOLED_WITH_FT' for r in audit['rejected']))
 
     def test_completed_opponent_reference_is_prior_to_each_game(self):
         target=fixtures.target();rows=[]

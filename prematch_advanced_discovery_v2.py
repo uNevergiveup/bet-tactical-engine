@@ -24,7 +24,9 @@ VERSION='2.1-methodological-review'
 STAT_FIELDS={'Total Shots':'shots','Shots on Goal':'on_target','Blocked Shots':'blocked_shots',
              'Corner Kicks':'corners','Fouls':'fouls','Yellow Cards':'yellow','Red Cards':'red',
              'Ball Possession':'possession_pct','Total passes':'passes','Passes accurate':'passes_accurate',
-             'Passes %':'passes_accuracy_pct','expected_goals':'xg'}
+             'Passes %':'passes_accuracy_pct','expected_goals':'xg',
+             'Shots insidebox':'shots_inside_box','Shots outsidebox':'shots_outside_box',
+             'Shots off Goal':'shots_off_target','Goalkeeper Saves':'goalkeeper_saves','Offsides':'offsides'}
 
 def digest(obj):
     return hashlib.sha256(json.dumps(obj,sort_keys=True,separators=(',',':'),ensure_ascii=False).encode()).hexdigest()
@@ -132,11 +134,14 @@ def normalize(pre,source_ref,cache=None,retrospective=False):
             obs,_=players.collect_player_observations(target,cache.root,cut,audit,cache)
             cache_audits.append(audit)
             for p in obs:
+                if p.get('fixture_status')!='FT':
+                    rejected.append({'fixture_id':p['fixture_id'],'reason':'PLAYER_NON_REGULATION_TIME_NOT_POOLED_WITH_FT'})
+                    continue
                 if not p['performance_eligible'] or not all(allowed_ref(ref,cut,retrospective) for ref in p['provenance']):continue
                 key=(p['fixture_id'],p['team_id'],p['player_id'])
-                rec={k:p.get(k) for k in ('fixture_id','team_id','player_id','player_name','opponent_id','kickoff_utc','league_id','season','venue','minutes','starter','position','provenance')}
+                rec={k:p.get(k) for k in ('fixture_id','team_id','player_id','player_name','opponent_id','kickoff_utc','available_at_utc','availability_policy','league_id','season','venue','minutes','starter','position','formation','coach_id','provenance')}
                 rec.update(entity_type='PLAYER',gender=target.get('gender','UNKNOWN'),team_kind=target.get('team_kind','UNKNOWN'),period='FULL_TIME',
-                           conditions={k:p.get(k) for k in ('venue','starter','position')},
+                           conditions={k:p.get(k) for k in ('venue','starter','position','formation','coach_id')},
                            metrics={f'player.{k}':v if k not in p['metric_issues'] else None for k,v in p['metrics'].items()},
                            acquisition_status=p['availability_status'],target_fixture_ids=[target['fixture_id']])
                 # Per90 uses only observed positive minutes; retain totals too.
@@ -173,10 +178,30 @@ def normalize(pre,source_ref,cache=None,retrospective=False):
                                 if name and f'own.{name}' not in rec['metrics']:rec['metrics'][f'own.{name}']=numeric(item.get('value'))
                     elif endpoint=='fixtures/lineups':
                         blocks=[b for b in response if b.get('team',{}).get('id')==rec['team_id']]
-                        if len(blocks)==1:rec['conditions']['formation']=blocks[0].get('formation')
+                        if len(blocks)==1:
+                            rec['conditions']['formation']=blocks[0].get('formation')
+                            coach=(blocks[0].get('coach') or {}).get('id')
+                            rec['conditions']['coach_id']=coach if valid_id(coach) else None
                     else:
                         rec['events']=[e for e in response if e.get('team',{}).get('id') in (rec['team_id'],rec['opponent_id'])]
                 # Official score periods only; never apportion FT shots by minute.
+                halves,half_ref=cache.get_half_statistics(rec['fixture_id'],cut)
+                rec['period_statistics_status']='NOT_ACQUIRED_BY_CUTOFF'
+                if halves is not None and allowed_ref(half_ref,cut,retrospective):
+                    expected={rec['team_id'],rec['opponent_id']}
+                    ids=[(b.get('team') or {}).get('id') for b in halves]
+                    if len(ids)==2 and set(ids)==expected:
+                        rec['provenance'].append(half_ref)
+                        rec['period_statistics_status']='PERIOD_FIELDS_OBSERVED_MISSING_VALUES_RETAINED'
+                        for block,tid in (('own',rec['team_id']),('conceded',rec['opponent_id'])):
+                            values=next(b for b in halves if b['team']['id']==tid)
+                            for suffix,field in (('h1','statistics_1h'),('h2','statistics_2h')):
+                                for item in values.get(field,[]) or []:
+                                    metric=STAT_FIELDS.get(item.get('type'))
+                                    if metric:rec['metrics'][f'{block}.{metric}_{suffix}']=numeric(item.get('value'))
+                    else:
+                        rec['period_statistics_status']='PERIOD_TEAM_IDENTITY_INVALID'
+                        rejected.append({'fixture_id':rec['fixture_id'],'reason':'HALF_STATISTICS_TEAM_IDENTITY'})
                 score=doc.get('score',{});ft=score.get('fulltime',{});half=score.get('halftime',{})
                 label='home' if rec['venue']=='HOME' else 'away'
                 if finite(ft.get(label)) and finite(half.get(label)) and 0<=half[label]<=ft[label]:
@@ -218,7 +243,7 @@ def methodological_review(pattern,observations,min_group=3):
     p['period']=metric_period(outcome)
     p['condition_period']=metric_period(condition['field']) if condition['operator']=='GT' else 'CONTEXT'
     p['commercial_adapter']['period']=p['period']
-    if outcome.endswith(('_h1','_h2')):p['commercial_adapter']['metric']='goals'
+    if outcome.endswith(('_h1','_h2')):p['commercial_adapter']['metric']=outcome.split('.',1)[-1][:-3]
     a,b,c,d=p['holdout']['counts'];effect=p['holdout']['risk_difference'];train=p['train']['risk_difference']
     direction='OPPOSITE' if effect is not None and train is not None and effect*train<0 else 'CONSISTENT' if effect and train and effect*train>0 else 'NO_DIRECTIONAL_EFFECT'
     status=('NO_VALID_OBSERVATIONS' if not a+b+c+d else 'NO_COMPARABLE_REFERENCE_GROUP' if not (a+b and c+d) else
