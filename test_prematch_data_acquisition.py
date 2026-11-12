@@ -9,6 +9,19 @@ import prematch_phase1 as phase
 
 
 class AcquisitionTests(unittest.TestCase):
+    def test_all_competitions_data_gate_does_not_relax_commercial_gate(self):
+        fixture={'fixture_id':99,'home_id':1,'away_id':2,'home':'Youth A','away':'Youth B',
+                 'league_id':3,'season':2099,'kickoff_utc':'2099-11-12T18:00:00Z',
+                 'category_status':'EXCLUDED','gender':'UNKNOWN','status':'NS'}
+        self.assertNotEqual(phase.api_fixture_verification(fixture)[0],'API_FIXTURE_VERIFIED')
+        rows=phase.all_data_candidates({'fixtures':[fixture]})
+        self.assertEqual(len(rows),1)
+        self.assertEqual(rows[0]['category_status'],'EXCLUDED')
+        self.assertEqual(rows[0]['gender'],'UNKNOWN')
+        self.assertEqual(rows[0]['bwin_binding_status'],'UNVERIFIED')
+        fixture['status']='LIVE'
+        self.assertEqual(phase.all_data_candidates({'fixtures':[fixture]}),[])
+
     def test_bwin_failure_retains_api_accounting(self):
         with tempfile.TemporaryDirectory() as td:
             root=Path(td);source=root/'source.json';source.write_text('{}')

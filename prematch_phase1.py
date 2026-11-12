@@ -612,9 +612,9 @@ def merge_bwin_snapshots(paths: list[Path]) -> dict[str, Any]:
             }}
 
 
-def api_fixture_verification(fixture: dict[str, Any], *, now: datetime | None = None) -> tuple[str, str]:
+def api_fixture_verification(fixture: dict[str, Any], *, now: datetime | None = None, data_only: bool = False) -> tuple[str, str]:
     """Validate the API fixture independently of any bookmaker observation."""
-    if fixture.get("category_status") != "ELIGIBLE":
+    if not data_only and fixture.get("category_status") != "ELIGIBLE":
         return "API_FIXTURE_PENDING_CATEGORY", "CATEGORY_NOT_ELIGIBLE_FOR_AUTOMATIC_DEEP_ACQUISITION"
     if not all(isinstance(fixture.get(key), int) and not isinstance(fixture.get(key), bool) and fixture.get(key) > 0
                for key in ("fixture_id", "home_id", "away_id", "league_id", "season")):
@@ -622,7 +622,7 @@ def api_fixture_verification(fixture: dict[str, Any], *, now: datetime | None = 
     if fixture["home_id"] == fixture["away_id"] or not str(fixture.get("home") or "").strip() or not str(fixture.get("away") or "").strip():
         return "API_FIXTURE_UNVERIFIED", "HOME_AWAY_IDENTITY_OR_LOCALITY_INVALID"
     gender = str(fixture.get("gender") or "UNKNOWN").upper()
-    if gender not in {"M", "F"}:
+    if not data_only and gender not in {"M", "F"}:
         return "API_FIXTURE_PENDING_CATEGORY", "GENDER_NOT_VERIFIED_BY_API_DISCOVERY"
     kickoff = parse_dt(fixture.get("kickoff_utc") or fixture.get("kickoff_madrid"))
     if kickoff is None:
@@ -632,7 +632,22 @@ def api_fixture_verification(fixture: dict[str, Any], *, now: datetime | None = 
     reference = (now or now_utc()).astimezone(UTC)
     if kickoff <= reference:
         return "API_FIXTURE_UNVERIFIED", "API_FIXTURE_KICKOFF_NOT_FUTURE"
+    if data_only:
+        return "API_DATA_IDS_VERIFIED", "SPORTING_DATA_ONLY_NO_COMMERCIAL_CATEGORY_CERTIFICATION"
     return "API_FIXTURE_VERIFIED", "API_IDS_LOCALITY_COMPETITION_SEASON_KICKOFF_VERIFIED"
+
+
+def all_data_candidates(fixtures_doc):
+    rows = []
+    for fixture in fixtures_doc['fixtures']:
+        status, reason = api_fixture_verification(fixture, data_only=True)
+        if status != 'API_DATA_IDS_VERIFIED':
+            continue
+        rows.append({**fixture, 'api_fixture_id': fixture['fixture_id'],
+                     'home_team_id': fixture['home_id'], 'away_team_id': fixture['away_id'],
+                     'bwin_binding_status': 'UNVERIFIED', 'data_identity_status': status,
+                     'data_identity_reason': reason})
+    return rows
 
 
 def identity_map(fixtures_doc: dict[str, Any], bwin_doc: dict[str, Any]) -> dict[str, Any]:
@@ -1303,6 +1318,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--longitudinal-preselection", type=Path)
     parser.add_argument("--asof", type=parse_dt)
     parser.add_argument("--discovery-only", action="store_true")
+    parser.add_argument("--data-all-competitions", action="store_true",
+                        help="Adquiere datos por IDs de todos los fixtures NS; no cambia elegibilidad comercial ni certifica categoría")
     parser.add_argument("--bwin-headless", action="store_true")
     parser.add_argument("--bwin-browser-executable", type=Path, help="Chromium local explícito; no descarga navegadores")
     parser.add_argument("--bwin-max-country-pages", type=int, default=30)
@@ -1370,6 +1387,8 @@ def main(argv: list[str] | None = None) -> int:
         # API fixture verification is sufficient for historical acquisition;
         # Bwin verification remains mandatory for any later market/odds stage.
         candidates = identities.get("api_verified", [])
+        if args.data_all_competitions:
+            candidates = all_data_candidates(fixtures_doc)
         if args.fixture_id:
             by_fixture = {int(row["api_fixture_id"]): row for row in candidates}
             missing = [fid for fid in dict.fromkeys(args.fixture_id) if fid not in by_fixture]
