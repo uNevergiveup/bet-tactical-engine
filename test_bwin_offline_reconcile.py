@@ -69,10 +69,26 @@ class OfflineReconcileTests(unittest.TestCase):
         disc=root/'outputs/phase1/2026-11-12_1500_0300/browser_retry_02/bwin_scan/bwin_discovery.json'
         if not inv.is_file() or not disc.is_file():self.skipTest('Frozen 2026-11-12 catalog unavailable')
         rows={x['fixture_id']:x for x in r.run(inv,disc)['fixtures']}
-        expected={1644370:('7910678','CANDIDATE_CATEGORY_UNKNOWN'),1520978:('7911881','CANDIDATE_CATEGORY_UNKNOWN'),
+        expected={1644370:('7910678','IDENTITY_VERIFIED_OFFLINE'),1520978:('7911881','CANDIDATE_CATEGORY_UNKNOWN'),
             1549870:('7912958','IDENTITY_VERIFIED_OFFLINE'),1528963:('7909679','CANDIDATE_TIME_UNVERIFIED'),
             1649147:('7910426','CANDIDATE_TIME_CONFLICT')}
         for fid,(eid,status) in expected.items():self.assertEqual((rows[fid]['event_id'],rows[fid]['post_status']),(eid,status))
+
+    def test_navalcarnero_senior_cup_category_and_armenia_translation(self):
+        root=Path(__file__).parent;inv=root/'outputs/phase1/2026-11-12_1500_0300/fixtures_discovered.json';disc=root/'outputs/phase1/2026-11-12_1500_0300/browser_retry_02/bwin_scan/bwin_discovery.json'
+        if not inv.is_file() or not disc.is_file():self.skipTest('Frozen catalog unavailable')
+        rows={x['fixture_id']:x for x in r.run(inv,disc,[1644363,1528959])['fixtures']}
+        self.assertEqual(rows[1644363]['post_status'],'IDENTITY_VERIFIED_OFFLINE')
+        self.assertEqual(rows[1644363]['category']['status'],'SENIOR_COMPETITION_CORROBORATED')
+        self.assertEqual(rows[1528959]['event_id'],'7909685')
+        self.assertEqual(rows[1528959]['post_status'],'CANDIDATE_TIME_UNVERIFIED')
+
+    def test_senior_category_gate_requires_exact_competition_and_no_female_signal(self):
+        f=self.fixture(league_id=143,league='Copa del Rey',category_status='ELIGIBLE')
+        self.assertTrue(b.senior_category_corroborated(f,'CATEGORY_UNCONFIRMED',1.0))
+        self.assertFalse(b.senior_category_corroborated({**f,'league':'Other'},'CATEGORY_UNCONFIRMED',1.0))
+        self.assertFalse(b.senior_category_corroborated(f,'CATEGORY_UNCONFIRMED',.8))
+        self.assertFalse(b.senior_category_corroborated(f,'OBSERVED_FEMALE_TARGET_UNKNOWN',1.0))
 
     def test_multilingual_national_team_candidates_remain_unverified(self):
         cases=[('Türkiye','Belgium','Turquía Bélgica','7905470'),('Italy','France','Italia Francia','7905471'),

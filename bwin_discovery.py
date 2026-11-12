@@ -54,10 +54,15 @@ NATIONAL_TEAM_TRANSLATIONS = {
     "spain": ("espana",),
     "england": ("inglaterra",),
     "croatia": ("croacia",),
+    "cyprus": ("chipre",),
 }
 INSTITUTIONAL_CANDIDATE_ALIASES = {
     "sl benfica w": ("benfica f",),
     "austria wien w": ("fk austria viena f",),
+}
+SENIOR_COMPETITION_IDENTITIES = {
+    5: "uefa nations league",
+    143: "copa del rey",
 }
 
 
@@ -141,8 +146,22 @@ def category_compatibility(fixture: dict, evidence: str) -> str:
     if expected == "F":
         return "FEMALE_CORROBORATED" if observed_female else "FEMALE_NOT_VISIBLE"
     if expected == "UNKNOWN":
+        if observed_female:return "OBSERVED_FEMALE_TARGET_UNKNOWN"
         return "CATEGORY_UNCONFIRMED"
     return "COMPATIBLE_OR_UNKNOWN"
+
+
+def senior_category_corroborated(fixture: dict, candidate_category: str,
+                                 competition_score: object) -> bool:
+    """Close UNKNOWN only from a known senior competition corroborated by Bwin."""
+    try:league_id=int(fixture.get('league_id'))
+    except (TypeError,ValueError):return False
+    expected=SENIOR_COMPETITION_IDENTITIES.get(league_id)
+    return bool(candidate_category=='CATEGORY_UNCONFIRMED'
+        and str(fixture.get('category_status') or '').upper() in {'ELIGIBLE','ADULT'}
+        and expected and norm(fixture.get('league'))==expected
+        and isinstance(competition_score,(int,float)) and not isinstance(competition_score,bool)
+        and competition_score>=.82)
 
 
 def competition_similarity(competition: str, evidence: str) -> float:
@@ -793,11 +812,13 @@ def summarize(fixture: dict, possible: list[dict], browser, timeout: int, inspec
             if observed.get('status')!='ERROR':break
         observed['attempts']=attempts
         expected_gender = str(fixture.get("gender") or "UNKNOWN").upper()
-        category_ok = ((expected_gender == "M" and winner.get("category_compatibility") == "COMPATIBLE_OR_UNKNOWN") or
-                       (expected_gender == "F" and winner.get("category_compatibility") == "FEMALE_CORROBORATED"))
         competition_score = observed.get("competition_match_score")
         competition_ok = (isinstance(competition_score, (int, float)) and
                           not isinstance(competition_score, bool) and competition_score >= 0.82)
+        senior_inferred=senior_category_corroborated(fixture,winner.get('category_compatibility'),competition_score)
+        category_ok = ((expected_gender == "M" and winner.get("category_compatibility") == "COMPATIBLE_OR_UNKNOWN") or
+                       (expected_gender == "F" and winner.get("category_compatibility") == "FEMALE_CORROBORATED") or senior_inferred)
+        if senior_inferred:observed['category_evidence']='SENIOR_COMPETITION_CORROBORATED'
         if observed.get("identity_status") == "NAME_AND_ABSOLUTE_TIME_MATCH" and not (category_ok and competition_ok):
             if expected_gender=='UNKNOWN' and competition_ok:
                 observed['identity_status']='CATEGORY_UNKNOWN_PENDING'

@@ -109,6 +109,14 @@ class BwinInputTests(unittest.TestCase):
         with mock.patch.object(bwin,'inspect_event',return_value=observed):result=bwin.summarize(row,possible,None,1,True)
         self.assertEqual(result['inspection']['identity_status'],'CATEGORY_UNKNOWN_PENDING')
 
+    def test_unknown_category_can_close_from_exact_senior_competition(self):
+        row=fixture(gender='UNKNOWN');row.update(league='Copa del Rey',league_id=143,category_status='ELIGIBLE')
+        possible=bwin.match_catalog(row,[event(text='Copa del Rey Sevilla Alaves')])
+        observed={'identity_status':'NAME_AND_ABSOLUTE_TIME_MATCH','competition_match_score':1.0,'market_headings':{}}
+        with mock.patch.object(bwin,'inspect_event',return_value=observed):result=bwin.summarize(row,possible,None,1,True)
+        self.assertEqual(result['status'],'IDENTITY_VERIFIED_AUTOMATICALLY')
+        self.assertEqual(result['inspection']['category_evidence'],'SENIOR_COMPETITION_CORROBORATED')
+
     def test_catalog_visits_duplicate_page_once_per_cycle(self):
         class Page:
             def __init__(self): self.visits = []

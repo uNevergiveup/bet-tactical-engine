@@ -5,7 +5,8 @@ import argparse,csv,hashlib,json
 from collections import Counter
 from pathlib import Path
 from bwin_discovery import (TZ,category_compatibility,catalog_relative_kickoff,
-    competition_similarity,displayed_header_kickoff,local_kickoff,match_catalog,norm)
+    competition_similarity,displayed_header_kickoff,local_kickoff,match_catalog,norm,
+    senior_category_corroborated)
 
 VERSION='1.0-frozen-catalog-reconciliation'
 
@@ -60,13 +61,15 @@ def reconcile_fixture(fixture,catalog,prior,pages):
     competition_score=inspect.get('competition_match_score')
     competition_ok=isinstance(competition_score,(int,float)) and not isinstance(competition_score,bool) and competition_score>=.82
     category=win['category_compatibility'];category_unknown=category=='CATEGORY_UNCONFIRMED'
+    senior_inferred=senior_category_corroborated(fixture,category,competition_score)
+    if senior_inferred:category_unknown=False
     base.update(event_id=event_id,bwin_url=win['bwin_url'],source_pages=win.get('source_pages',[]),
         name={'status':'CANDIDATE_COMPATIBLE','score':win['name_score'],'order':win['team_order_status']},
         time={'status':'MATCH' if difference is not None and difference<=15 else 'CONFLICT' if difference is not None else 'MISSING',
               'api':api.isoformat() if api else None,'observed':used_clock.isoformat() if used_clock else None,
               'source':'INSPECTION_ABSOLUTE' if absolute else 'SCOPED_PREMATCH_HEADER' if scoped_header else 'CATALOG_RELATIVE_CAPTURE_ANCHORED' if clock else None,
               'difference_minutes':difference},
-        category={'status':'UNKNOWN_PENDING' if category_unknown else category},
+        category={'status':'SENIOR_COMPETITION_CORROBORATED' if senior_inferred else 'UNKNOWN_PENDING' if category_unknown else category},
         competition={'status':'CORROBORATED_INSPECTION' if competition_ok else 'UNVERIFIED','score':competition_score},
         recovery='OFFLINE_LOCAL_CATALOG')
     if difference is not None and difference>15:
