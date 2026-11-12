@@ -4,7 +4,7 @@ import tempfile
 import unittest
 from pathlib import Path
 from datetime import datetime,timedelta,timezone
-from prematch_llm_research import research_packet,validate_hypotheses,write_pending_runtime,SEGMENT
+from prematch_llm_research import research_packet,validate_hypotheses,write_pending_runtime,run_iterative_research,SEGMENT
 
 
 class LLMResearchTests(unittest.TestCase):
@@ -51,6 +51,40 @@ class LLMResearchTests(unittest.TestCase):
             self.assertEqual(hypotheses['hypotheses'],[])
             self.assertEqual(ranking['status'],'PENDING_LLM_RESEARCH_NOT_FINAL')
             self.assertEqual(ranking['base_ranking'][0]['fixture_id'],99)
+
+    def test_shared_fixture_never_leaks_across_entities(self):
+        extra=copy.deepcopy(self.rows[0]);extra.update(entity_type='PLAYER',player_id=23)
+        latest=copy.deepcopy(self.rows[-1]);latest.update(entity_type='PLAYER',player_id=23)
+        packet,sealed=research_packet(self.rows+[extra,latest],self.targets,self.cut)
+        self.assertFalse({r['fixture_id'] for r in packet['training_observations']} &
+                         {r['fixture_id'] for r in sealed['holdout']})
+
+    def test_loop_keeps_duplicate_and_stops_without_exposing_holdout(self):
+        calls=[]
+        def adapter(request):
+            calls.append(request)
+            self.assertNotIn('holdout',request['packet'])
+            self.assertNotIn('validation',request)
+            proposal=copy.deepcopy(self.h);proposal['hypothesis_id']=str(len(calls))
+            return {'hypotheses':[proposal],'runtime_receipt':{'test_adapter':True},'continue_research':True}
+        artifacts=run_iterative_research(self.packet,self.sealed,[{'fixture_id':99}],adapter,'UNIT_TEST_ONLY')
+        registry=artifacts['pattern_registry.json']
+        self.assertEqual(registry['stop_reason'],'NO_NEW_RELATION')
+        self.assertEqual(registry['iterations_executed'],2)
+        self.assertEqual(len(registry['rules']),2)
+        self.assertEqual(registry['rules'][1]['reason'],'DUPLICATE_VARIABLES')
+        self.assertFalse(artifacts['ranking_enriched.json']['ranking'][0]['actionable_bet'])
+
+    def test_loop_requires_actual_adapter_and_preserves_all_targets(self):
+        with self.assertRaises(ValueError):run_iterative_research(self.packet,self.sealed,[],None,None)
+        with self.assertRaises(ValueError):run_iterative_research(self.packet,self.sealed,[],lambda r: {},'TEST')
+
+    def test_iteration_limit_is_enforced(self):
+        packet,sealed=research_packet(self.rows,self.targets,self.cut,max_iterations=1)
+        response={'hypotheses':[self.h],'runtime_receipt':{'test_adapter':True},'continue_research':True}
+        result=run_iterative_research(packet,sealed,[{'fixture_id':99}],lambda r: response,'UNIT_TEST_ONLY')
+        self.assertEqual(result['pattern_registry.json']['iterations_executed'],1)
+        self.assertEqual(result['pattern_registry.json']['stop_reason'],'ITERATION_LIMIT')
 
 
 if __name__=='__main__':unittest.main()
