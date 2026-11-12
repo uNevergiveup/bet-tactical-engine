@@ -1127,6 +1127,12 @@ def run_bwin_once(root: Path, fixtures_path: Path, output_dir: Path, args: argpa
                str(args.bwin_max_country_pages), "--timeout", str(args.bwin_timeout)]
     if args.bwin_headless:
         command.append("--headless")
+    executable = getattr(args, 'bwin_browser_executable', None)
+    if executable is not None:
+        executable = Path(executable).expanduser().resolve(strict=True)
+        if not executable.is_file():
+            raise Phase1Error('BWIN_BROWSER_EXECUTABLE_NOT_FILE')
+        command.extend(['--browser-executable', str(executable)])
     log = output_dir.parent / "logs" / "bwin_discovery.log"
     log.parent.mkdir(parents=True, exist_ok=True)
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -1298,6 +1304,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--asof", type=parse_dt)
     parser.add_argument("--discovery-only", action="store_true")
     parser.add_argument("--bwin-headless", action="store_true")
+    parser.add_argument("--bwin-browser-executable", type=Path, help="Chromium local explícito; no descarga navegadores")
     parser.add_argument("--bwin-max-country-pages", type=int, default=30)
     parser.add_argument("--bwin-timeout", type=int, default=25000)
     args = parser.parse_args(argv)
@@ -1404,6 +1411,10 @@ def main(argv: list[str] | None = None) -> int:
         print(f"Resumen: {run_dir / 'phase1_summary.md'}")
         return 0
     except (Phase1Error, OSError, ValueError, KeyError, json.JSONDecodeError) as exc:
+        if 'client' in locals():
+            progress['api_usage'] = client.statistics()
+            atomic_json(run_dir / 'api_request_ledger_error.json', {'operations': client.ledger,
+                        'api_usage': client.statistics(), 'recorded_at_utc': now_utc().isoformat()})
         progress.setdefault("stages", {})["error"] = {"status": "ERROR", "detail": str(exc),
                                                         "time_utc": now_utc().isoformat()}
         atomic_json(progress_path, progress)
