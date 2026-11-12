@@ -98,6 +98,9 @@ def verified_preflight(root, path, fixture, prepath, args):
     if len(matches) != 1:
         raise trial.TrialError('PREFLIGHT_FIXTURE_NOT_UNIQUE')
     match = matches[0]
+    if match.get('snapshot', {}).get('snapshot_path'):
+        snapshot = match['snapshot']
+        snapshot['snapshot_path'] = str(resolve_source(root, snapshot['snapshot_path'], snapshot.get('sha256')))
     discovery_path = resolve_source(root, doc.get('source_discovery'), doc.get('source_sha256'))
     if trial.sha(discovery_path) != doc.get('source_sha256'):
         raise trial.TrialError('DISCOVERY_SHA_MISMATCH')

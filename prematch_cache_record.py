@@ -25,3 +25,19 @@ def unpack_record(record):
     if acquired.tzinfo is None:
         raise ValueError('CACHE_TIMESTAMP_OFFSET_REQUIRED')
     return payload, acquired
+
+
+def store_acquisition(directory, payload, now=None):
+    """Append a direct response as evidence, including when reusable cache is bypassed."""
+    from pathlib import Path
+    record = acquisition_record(payload, now)
+    encoded = json.dumps(record, ensure_ascii=False, sort_keys=True, indent=2).encode()
+    path = Path(directory) / (hashlib.sha256(encoded).hexdigest() + '.json')
+    path.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        with path.open('xb') as handle:
+            handle.write(encoded)
+    except FileExistsError:
+        if path.read_bytes() != encoded:
+            raise ValueError('ACQUISITION_RECORD_CONFLICT')
+    return path

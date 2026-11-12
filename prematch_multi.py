@@ -510,7 +510,16 @@ def finish_one(root: Path, event: str, python: str, override_report: str | None 
         engine.extend(['--odds',inputs['odds']['path']])
     else:
         engine.append('--no-odds')
+    previous_cache = state.get('evidence_cache')
+    if previous_cache:
+        from prematch_paths import local_reference
+        cache_path = local_reference(root, previous_cache['path'], previous_cache['sha256'])
+        engine.extend(['--evidence-cache', str(cache_path), '--evidence-cache-sha256', previous_cache['sha256']])
     code=execute(root,event,'motor',engine)
+    cache_path = probdir / f'evidence_cache_{event}.json'
+    if code == 0 and cache_path.is_file():
+        state['evidence_cache'] = {'path': str(cache_path.resolve()),
+                                 'sha256': hashlib.sha256(cache_path.read_bytes()).hexdigest()}
     state['steps']['motor']=code
     state['status']='FINALIZADO' if code==0 else 'ERROR_MOTOR'
     state['finish_completed_at'] = utc_now()

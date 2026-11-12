@@ -225,6 +225,13 @@ El informe canónico debe conservar Event ID, Fixture ID, kickoff, cutoff_utc y 
     for target,body in candidates.items():_create_identical_or_fail(target,body)
     return folder
 
+def analysis_binding_path(ctx, manifest):
+    if manifest.get('invalidated_by_odds_refresh') or manifest.get('invalidated_by_context_refresh'):
+        version = t.sha(ctx['directory'] / 'manifest.json')
+        return ctx['directory'] / 'analysis_bindings' / version / 'analysis_input_binding.json'
+    return ctx['directory'] / 'analysis_input_binding.json'
+
+
 def analysis_input(root,path):
     ctx=single.load_context(argparse.Namespace(root=root,selected=Path(path),decision=None))
     single.ensure_prematch(ctx)
@@ -232,7 +239,7 @@ def analysis_input(root,path):
     if manifest.get('status')!='FINALIZADO':raise ValueError('Validation and motor must complete before final analyst')
     odds=manifest['inputs']['odds'];snap=single.snapshot_info(Path(odds['path']),ctx,max_age=15)
     daily.final_odds_check({'kickoff_madrid':ctx['kickoff'].isoformat(),'capture_madrid':snap['capture']},t.now_madrid())
-    binding=ctx['directory']/'analysis_input_binding.json'
+    binding=analysis_binding_path(ctx,manifest)
     if binding.exists():raise ValueError('Final analyst input already issued: preserve one execution; audit before any new attempt')
     refs={k:reference(v['path']) for k,v in manifest['inputs'].items()}
     refs['manifest']=reference(ctx['directory']/'manifest.json')
@@ -271,7 +278,7 @@ def final_review(root,path,analysis,market=None,selection=None,odd=None):
     single.ensure_prematch(ctx)
     manifest=single.match_manifest(ctx)
     if manifest.get('status')!='FINALIZADO':raise ValueError('Downstream stages invalid or incomplete')
-    binding=t.read(ctx['directory']/'analysis_input_binding.json');verify_refs(binding['source_refs'])
+    binding=t.read(analysis_binding_path(ctx,manifest));verify_refs(binding['source_refs'])
     expected=ctx['directory']/'analysis'/f'analisis_{ctx["event_id"]}.md'
     if Path(analysis).resolve()!=expected.resolve():raise ValueError('Analysis must belong to the selected event directory')
     text=expected.read_text(encoding='utf-8');first=text.splitlines()[0].upper()

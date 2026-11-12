@@ -1084,6 +1084,10 @@ class APIFootballClient:
 
                 if use_cache:
                     CACHE.set(endpoint, params, data)
+                if endpoint == 'fixtures/lineups':
+                    from prematch_cache_record import store_acquisition
+                    acquired_path = store_acquisition(CACHE_DIR / 'acquisitions' / 'fixtures_lineups', data)
+                    LOG.info(f'XI acquisition record: {acquired_path}')
                 return data
 
             except requests.RequestException as exc:

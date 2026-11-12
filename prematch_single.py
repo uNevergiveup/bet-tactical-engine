@@ -182,7 +182,7 @@ def match_manifest(ctx, *, check_files=True):
     if str(manifest.get('event_id'))!=ctx['event_id'] or manifest.get('url')!=ctx['url']:
         raise ValueError('Manifest Event ID / URL distinto a la selección')
     inp=manifest.get('inputs') or {}
-    for kind in ('odds','context','context_json','identity'):
+    for kind in inp:
         e=inp.get(kind)
         if not e:continue
         if check_files:
@@ -580,6 +580,8 @@ def cmd_refresh(ctx,args):
         m['invalidated_by_odds_refresh']={'previous_status':m.get('status'),'previous_sha256':previous['sha256'],
                                           'invalidated_at_utc':iso_utc(),'stages':['validation','probabilistic','codex_analysis','final_review']}
         m['status']='PREPARADO'
+        for step in ('validacion', 'motor'):
+            m.get('steps', {}).pop(step, None)
         m.pop('codex_prompt',None)
         m.pop('validation_state',None)
         atomic_json(ctx['directory']/'manifest.json',m)
@@ -597,6 +599,24 @@ def cmd_refresh(ctx,args):
             if sha(path)!=previous['sha256']:
                 raise RuntimeError('ERROR CRÍTICO restaurando captura anterior')
         raise
+
+
+def cmd_refresh_context(ctx, args):
+    ensure_prematch(ctx, min_lead=args.min_refresh_lead_minutes)
+    manifest = match_manifest(ctx)
+    from prematch_context_delta import refresh_lineups
+    updated, out = refresh_lineups(ctx, manifest, args.snapshot, args.snapshot_sha256, local_now())
+    # Preserve every prior downstream artifact before any later finish rewrites it.
+    for folder in ('validation', 'probabilistic', 'analysis'):
+        source = ctx['directory'] / folder
+        if source.is_dir():
+            shutil.copytree(source, out / 'previous_outputs' / folder)
+    for name in (f'CODEX_{ctx["event_id"]}.md', 'analysis_input_binding.json', 'final_review.json'):
+        backup(ctx['directory'] / name, out / 'previous_outputs')
+    atomic_json(ctx['directory'] / 'manifest.json', updated)
+    update_state(ctx, 'refresh-context', 'REVALIDATION_REQUIRED', {'run': str(out)})
+    print(f'Contexto diferencial local incorporado: {out}; finish y análisis pendientes.')
+    return 0
 
 
 def cmd_retry(ctx,args,kind):
@@ -721,6 +741,9 @@ def main(argv=None):
     pp.add_argument('--force-prepare',action='store_true',help='Rehacer desde cero; respaldar capturas y manifest')
     pp.add_argument('--reuse-odds',action='store_true',help='Reutiliza cuotas seleccionadas por SHA y prepara únicamente el contexto completo')
     s.add_parser('refresh-odds',help='Solo scraper Bwin, sin repetir API ni actualizar otros eventos')
+    delta=s.add_parser('refresh-context',help='Incorpora XI de un registro local adquirido antes del kickoff; sin API')
+    delta.add_argument('--snapshot',type=Path,required=True)
+    delta.add_argument('--snapshot-sha256',required=True)
     rc=s.add_parser('retry-context',help='Reintenta contexto API si falló, sin repetir cuotas')
     rc.add_argument('--api-minute',type=int,default=180)
     rc.add_argument('--api-second',type=int,default=3)
@@ -747,6 +770,7 @@ def main(argv=None):
         if args.action=='verify-temporal-identity':return cmd_verify_temporal_identity(ctx,args)
         if args.action=='prepare':return cmd_prepare(ctx,args)
         if args.action=='refresh-odds':return cmd_refresh(ctx,args)
+        if args.action=='refresh-context':return cmd_refresh_context(ctx,args)
         if args.action in ('retry-context','retry-scraper'):return cmd_retry(ctx,args,args.action)
         if args.action=='finish':return cmd_finish(ctx,args)
     except (ValueError,KeyError,TypeError,OSError,TrialError) as exc:

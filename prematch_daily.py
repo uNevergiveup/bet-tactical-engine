@@ -158,6 +158,16 @@ def review(path, root=None, check_final_odds=False, review_min_lead=REVIEW_MIN_L
         raise trial.TrialError(f'HANDOFF_EXPIRED: partido iniciado o sin margen PREMATCH para review (T-{configured_review_min} min)')
     if not capture or not timedelta(0) <= now-capture <= timedelta(minutes=doc.get('max_odds_age_minutes',120)):
         raise trial.TrialError('HANDOFF_EXPIRED: snapshot caducado')
+    project = root or Path(__file__).resolve().parent
+    from prematch_runtime import resolve_source
+    try:
+        doc['odds_txt'] = str(resolve_source(project, doc['odds_txt'], doc['odds_sha256']))
+    except trial.TrialError as exc:
+        raise trial.TrialError('HANDOFF_SNAPSHOT_SHA_OR_PATH_INVALID: ' + str(exc)) from exc
+    try:
+        doc['context_paths'][0] = str(resolve_source(project, doc['context_paths'][0], doc['context_sha256']))
+    except trial.TrialError as exc:
+        raise trial.TrialError('HANDOFF_CONTEXT_SHA_OR_PATH_INVALID: ' + str(exc)) from exc
     if trial.sha(Path(doc['odds_txt'])) != doc['odds_sha256']:
         raise trial.TrialError('HANDOFF_SNAPSHOT_SHA_MISMATCH')
     if trial.sha(Path(doc['context_paths'][0])) != doc['context_sha256']:
@@ -166,10 +176,10 @@ def review(path, root=None, check_final_odds=False, review_min_lead=REVIEW_MIN_L
     fixture = context['fixture']
     if str(fixture['fixture_id']) != str(doc['fixture_id']):
         raise trial.TrialError('HANDOFF_FIXTURE_IDENTITY_MISMATCH')
-    project = root or Path(__file__).resolve().parent
+    doc['preflight'] = str(resolve_source(project, doc['preflight'], doc.get('preflight_sha256')))
     pf = trial.read(Path(doc['preflight']))
     verified = verified_preflight(project, Path(doc['preflight']), fixture,
-                Path(pf['source_preselection']), SimpleNamespace(min_lead=configured_review_min,
+                resolve_source(project, pf['source_preselection'], pf.get('source_preselection_sha256')), SimpleNamespace(min_lead=configured_review_min,
                                                                max_odds_age=doc['max_odds_age_minutes']))
     if any(str(verified[k]) != str(doc[k]) for k in ('bwin_event_id','bwin_url','home','away','kickoff_madrid')):
         raise trial.TrialError('HANDOFF_EVENT_IDENTITY_MISMATCH')
