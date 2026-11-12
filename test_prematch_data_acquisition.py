@@ -9,6 +9,17 @@ import prematch_phase1 as phase
 
 
 class AcquisitionTests(unittest.TestCase):
+    def test_core_pass_defers_optional_context_explicitly(self):
+        from datetime import datetime,timezone
+        collector=phase.DeepCollector(None,history=5,cutoff=datetime(2026,11,12,tzinfo=timezone.utc),core_only=True)
+        identity={'api_fixture_id':99,'kickoff_utc':'2099-11-12T18:00:00Z',
+                  'home_team_id':1,'away_team_id':2,'league_id':3,'season':2099}
+        with patch.object(collector,'request',return_value=None) as request:
+            result=collector.collect_fixture(identity)
+        self.assertEqual({call.args[0] for call in request.call_args_list},{'fixtures'})
+        self.assertEqual(result['optional_context_status'],'NOT_REQUESTED_CORE_PASS')
+        self.assertNotEqual(result['status'],'COMPLETE')
+
     def test_all_competitions_data_gate_does_not_relax_commercial_gate(self):
         fixture={'fixture_id':99,'home_id':1,'away_id':2,'home':'Youth A','away':'Youth B',
                  'league_id':3,'season':2099,'kickoff_utc':'2099-11-12T18:00:00Z',

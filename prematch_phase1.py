@@ -879,8 +879,9 @@ def player_metric_coverage(player_rows: list[Any]) -> dict[str, int]:
 
 
 class DeepCollector:
-    def __init__(self, client: Phase1ApiClient, *, history: int, cutoff: datetime):
+    def __init__(self, client: Phase1ApiClient, *, history: int, cutoff: datetime, core_only: bool = False):
         self.client = client
+        self.core_only = core_only
         self.history = history
         self.cutoff = cutoff
         self.records: dict[str, dict[str, Any]] = {}
@@ -985,57 +986,58 @@ class DeepCollector:
                 if result:
                     self.fixture_payloads[historical_id][endpoint] = result
 
-        # Optional target/competition context follows the historical detail.
-        self.request("fixtures/headtohead", {"h2h": f"{identity['home_team_id']}-{identity['away_team_id']}",
-                                             "last": min(20, self.history)}, scope={**scope, "role": "head_to_head"})
-        self.request("injuries", {"fixture": fid}, scope={**scope, "role": "target_availability"})
-        if league and season:
-            for endpoint, params, role in (
-                ("standings", {"league": league, "season": season}, "competition_context"),
-                ("leagues", {"id": league, "season": season}, "coverage_contract"),
-                ("fixtures/rounds", {"league": league, "season": season, "dates": "true",
-                                     "timezone": "Europe/Madrid"}, "rounds"),
-                ("players/topscorers", {"league": league, "season": season}, "league_players"),
-                ("players/topassists", {"league": league, "season": season}, "league_players"),
-                ("players/topyellowcards", {"league": league, "season": season}, "league_players"),
-                ("players/topredcards", {"league": league, "season": season}, "league_players")):
-                if endpoint.startswith("players/top"):
-                    self.request_pages(endpoint, params, scope={**scope, "role": role})
-                else:
-                    self.request(endpoint, params, scope={**scope, "role": role})
-        squad_player_ids: set[int] = set()
-        coach_ids: set[int] = set()
-        for side in ("home", "away"):
-            team_id = int(identity[f"{side}_team_id"])
-            team_scope = {**scope, "team_side": side, "team_id": team_id}
-            self.request("teams", {"id": team_id}, scope={**team_scope, "role": "team_identity"})
+        if not self.core_only:
+            # Optional target/competition context follows the historical detail.
+            self.request("fixtures/headtohead", {"h2h": f"{identity['home_team_id']}-{identity['away_team_id']}",
+                                                 "last": min(20, self.history)}, scope={**scope, "role": "head_to_head"})
+            self.request("injuries", {"fixture": fid}, scope={**scope, "role": "target_availability"})
             if league and season:
-                self.request("teams/statistics", {"team": team_id, "league": league,
-                                                  "season": season, "date": target_kickoff.date().isoformat()},
-                             scope={**team_scope, "role": "team_season_asof"})
-                self.request_pages("players", {"team": team_id, "season": season},
-                                   scope={**team_scope, "role": "player_season"})
-            squad = self.request("players/squads", {"team": team_id},
-                                 scope={**team_scope, "role": "squad"})
-            if squad:
-                for team in squad.response:
-                    for player in (team or {}).get("players", []) if isinstance(team, dict) else []:
-                        if isinstance((player or {}).get("id"), int):
-                            squad_player_ids.add(player["id"])
-            coaches = self.request("coachs", {"team": team_id},
-                                   scope={**team_scope, "role": "coaches"})
-            if coaches:
-                for coach in coaches.response:
-                    if isinstance((coach or {}).get("id"), int):
-                        coach_ids.add(coach["id"])
-            self.request("transfers", {"team": team_id}, scope={**team_scope, "role": "transfers"})
-        for start in range(0, len(squad_player_ids), 20):
-            batch = sorted(squad_player_ids)[start:start + 20]
-            self.request("sidelined", {"players": "-".join(map(str, batch))},
-                         scope={**scope, "role": "player_sidelined"})
-        if coach_ids:
-            self.request("sidelined", {"coachs": "-".join(map(str, sorted(coach_ids)[:20]))},
-                         scope={**scope, "role": "coach_sidelined"})
+                for endpoint, params, role in (
+                    ("standings", {"league": league, "season": season}, "competition_context"),
+                    ("leagues", {"id": league, "season": season}, "coverage_contract"),
+                    ("fixtures/rounds", {"league": league, "season": season, "dates": "true",
+                                         "timezone": "Europe/Madrid"}, "rounds"),
+                    ("players/topscorers", {"league": league, "season": season}, "league_players"),
+                    ("players/topassists", {"league": league, "season": season}, "league_players"),
+                    ("players/topyellowcards", {"league": league, "season": season}, "league_players"),
+                    ("players/topredcards", {"league": league, "season": season}, "league_players")):
+                    if endpoint.startswith("players/top"):
+                        self.request_pages(endpoint, params, scope={**scope, "role": role})
+                    else:
+                        self.request(endpoint, params, scope={**scope, "role": role})
+            squad_player_ids: set[int] = set()
+            coach_ids: set[int] = set()
+            for side in ("home", "away"):
+                team_id = int(identity[f"{side}_team_id"])
+                team_scope = {**scope, "team_side": side, "team_id": team_id}
+                self.request("teams", {"id": team_id}, scope={**team_scope, "role": "team_identity"})
+                if league and season:
+                    self.request("teams/statistics", {"team": team_id, "league": league,
+                                                      "season": season, "date": target_kickoff.date().isoformat()},
+                                 scope={**team_scope, "role": "team_season_asof"})
+                    self.request_pages("players", {"team": team_id, "season": season},
+                                       scope={**team_scope, "role": "player_season"})
+                squad = self.request("players/squads", {"team": team_id},
+                                     scope={**team_scope, "role": "squad"})
+                if squad:
+                    for team in squad.response:
+                        for player in (team or {}).get("players", []) if isinstance(team, dict) else []:
+                            if isinstance((player or {}).get("id"), int):
+                                squad_player_ids.add(player["id"])
+                coaches = self.request("coachs", {"team": team_id},
+                                       scope={**team_scope, "role": "coaches"})
+                if coaches:
+                    for coach in coaches.response:
+                        if isinstance((coach or {}).get("id"), int):
+                            coach_ids.add(coach["id"])
+                self.request("transfers", {"team": team_id}, scope={**team_scope, "role": "transfers"})
+            for start in range(0, len(squad_player_ids), 20):
+                batch = sorted(squad_player_ids)[start:start + 20]
+                self.request("sidelined", {"players": "-".join(map(str, batch))},
+                             scope={**scope, "role": "player_sidelined"})
+            if coach_ids:
+                self.request("sidelined", {"coachs": "-".join(map(str, sorted(coach_ids)[:20]))},
+                             scope={**scope, "role": "coach_sidelined"})
         keys = sorted(set(self._active_keys))
         statuses = Counter(self.records[key]["status"] for key in keys)
         required = {}
@@ -1059,10 +1061,13 @@ class DeepCollector:
             result_status = "INCOMPLETE_CONTEXT"
         else:
             result_status = "COMPLETE"
+        if self.core_only and result_status == 'COMPLETE':
+            result_status = 'CORE_COMPLETE_OPTIONAL_PENDING'
         return {"api_fixture_id": fid, "bwin_event_id": identity.get("bwin_event_id"),
                 "bwin_binding_status": "VERIFIED" if bwin_bound else "UNVERIFIED",
                 "market_identity_ready": bwin_bound,
-                "status": result_status, "historical_fixture_ids": ordered_historical_ids,
+                "status": result_status, "optional_context_status": "NOT_REQUESTED_CORE_PASS" if self.core_only else "ATTEMPTED",
+                "acquisition_mode": "CORE" if self.core_only else "FULL", "historical_fixture_ids": ordered_historical_ids,
                 "historical_detail_status": required, "pending_historical_detail": pending_detail,
                 "request_statuses": dict(statuses), "requests": keys}
 
@@ -1318,6 +1323,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--longitudinal-preselection", type=Path)
     parser.add_argument("--asof", type=parse_dt)
     parser.add_argument("--discovery-only", action="store_true")
+    parser.add_argument("--core-only", action="store_true", help="Primera pasada de históricos/estadísticas/jugadores; contexto opcional explícitamente pendiente")
     parser.add_argument("--data-all-competitions", action="store_true",
                         help="Adquiere datos por IDs de todos los fixtures NS; no cambia elegibilidad comercial ni certifica categoría")
     parser.add_argument("--bwin-headless", action="store_true")
@@ -1383,7 +1389,7 @@ def main(argv: list[str] | None = None) -> int:
         progress["stages"]["identity"] = {"status": "COMPLETE", **identities["counts"]}
         atomic_json(progress_path, progress)
 
-        collector = DeepCollector(client, history=args.history, cutoff=now_utc())
+        collector = DeepCollector(client, history=args.history, cutoff=now_utc(), core_only=args.core_only)
         # API fixture verification is sufficient for historical acquisition;
         # Bwin verification remains mandatory for any later market/odds stage.
         candidates = identities.get("api_verified", [])
@@ -1397,7 +1403,12 @@ def main(argv: list[str] | None = None) -> int:
             candidates = [by_fixture[fid] for fid in dict.fromkeys(args.fixture_id)]
         if args.max_matches:
             candidates = candidates[:args.max_matches]
-        deep = [] if args.discovery_only else [collector.collect_fixture(row) for row in candidates]
+        deep = []
+        if not args.discovery_only:
+            for row in candidates:
+                deep.append(collector.collect_fixture(row))
+                atomic_json(run_dir / 'deep_progress.json', {'fixtures': deep, 'api_statistics': client.statistics(),
+                            'request_ledger': client.ledger, 'updated_at_utc': now_utc().isoformat()})
         coverage = collector.coverage(deep)
         atomic_json(run_dir / "api_coverage.json", coverage)
         manifest = {"schema": SCHEMA, "generated_at_utc": now_utc().isoformat(),
