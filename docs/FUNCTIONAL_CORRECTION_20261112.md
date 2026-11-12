@@ -125,3 +125,52 @@ Sigue pendiente probar el ciclo integral finish → motor → análisis → revi
 con fixtures autocontenidos, completar portabilidad de scanner/mapping y resolver
 la suite global histórica sin alterar originales. Por ello NO READY; objetivo
 activo, sin bloqueo externo que impida seguir corrigiendo.
+
+## Tercer bloque: portabilidad y suite autocontenida
+
+- Scanner y selector resuelven snapshots y fuentes de tiempo contra límites
+  deducidos de controles locales o contra el root explícito del runtime.
+- Los lectores operativos de JSON rechazan `outputs/latest` y controles absolutos
+  del proyecto anterior. Las referencias legacy anidadas sólo pueden remapearse
+  mediante SHA; no se abre el original externo como fallback.
+- Mapping concilia claves antiguas de `INTEGRITY_MANIFEST.json` en memoria,
+  comprueba copia local y detecta claves actuales/antiguas con hashes conflictivos.
+- Release verifica también las referencias anidadas de selección y binding final
+  dentro del root. La auditoría de cobertura remapea lotes por hash y no lee
+  respuestas de caché con referencia no verificable.
+- No se reescriben los manifiestos históricos para conseguir que pasen las pruebas.
+
+Fallos históricos resueltos en los tests:
+
+1. Integral/inteligencia táctica: fixtures sintéticos temporales con métricas,
+   mitades, ausencias y denominadores explícitos; no reconstruyen el evento real.
+2. CSV de 162 filas: genera una jornada sintética con duplicados y verifica el
+   exportador real, en lugar de exigir un CSV ausente de otra instalación.
+3. Reuse/Bwin: copia temporal del snapshot archivado cuyo SHA corresponde a la
+   selección congelada. La captura canónica fue refrescada después y debe seguir
+   rechazándose para esa selección antigua.
+4. Test DOM: usa Chromium local disponible si falta el binario esperado por la
+   versión de Playwright. Sólo HTML en memoria y todas las rutas abortadas.
+
+Verificación final de este bloque:
+
+```bash
+.venv/bin/python -B tools/run_offline_tests.py
+```
+
+Resultado: **609 pruebas, cero fallos, cero errores, 10 omisiones explícitas**.
+El resumen JSON del lanzador enumera cada omisión y su causa. No equivale a
+comprobar los expedientes históricos opcionales que faltan.
+Focalizadas de portabilidad/modelos: 80 OK; release/delta adicional: 29 OK.
+Log global: `/tmp/prematch-guarded-global.log`.
+
+El lanzador bloquea conexiones Python y subprocesos de adquisición, y protege
+outputs y el proyecto antiguo contra escrituras/movimientos/borrado. Los hijos
+Python heredan el guard mediante sitecustomize temporal. Es una defensa frente
+a efectos accidentales de las pruebas, no un sandbox para código hostil.
+
+Continúa pendiente la integración autocontenida del ciclo completo de finish y
+revisión final tras refrescos sucesivos. Los tests actuales verifican las piezas,
+pero todavía no acreditan ese recorrido completo con el validador y motor reales.
+Por ese límite, el objetivo sigue activo y la preparación sigue siendo sólo para
+descubrimiento controlado; NO READY para ejecución completa.

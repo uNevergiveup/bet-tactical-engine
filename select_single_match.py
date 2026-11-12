@@ -29,6 +29,8 @@ TIME_OK = {'DISPLAY_TIME_CORROBORATED', 'ABSOLUTE_TIME_VERIFIED', 'COUNTDOWN_TIM
 
 
 def read_json(path):
+    from prematch_paths import control_file
+    path = control_file(path)
     data = json.loads(path.read_text(encoding='utf-8-sig'))
     if not isinstance(data, dict):
         raise ValueError(f'JSON debe ser objeto: {path}')
@@ -121,6 +123,8 @@ def scan_preflights(paths, folder):
 
 def audit_preflight_match(m,preflight,disc,preselect,discovery_sha,preselect_sha,now,age_minutes,min_candidate_odd=Decimal("1.20")):
     reasons=[]
+    if m.get('_snapshot_reference_error'):
+        reasons.extend(['SNAPSHOT_SHA_MISMATCH', m['_snapshot_reference_error']])
     fid=str(m.get('fixture_id'))
     if preflight.get('source_sha256')!=discovery_sha:reasons.append('DISCOVERY_SHA_MISMATCH')
     if preflight.get('source_preselection_sha256')!=preselect_sha:reasons.append('PRESELECTION_SHA_MISMATCH')
@@ -190,6 +194,16 @@ def prepare_rows(preselection,discovery,preflights,now,min_lead,max_snapshot_age
     reports={}
     for path,data in preflights:
         for m in data.get('matches') or []:
+            from prematch_paths import local_reference, reference_root
+            project = reference_root(preselection['_path'], path)
+            snap = m.get('snapshot') or {}
+            try:
+                snap['snapshot_path'] = str(local_reference(project, snap.get('snapshot_path'), snap.get('sha256')))
+                if data.get('source_discovery'):
+                    data = dict(data, source_discovery=str(local_reference(project, data['source_discovery'], data.get('source_sha256'))))
+            except (ValueError, OSError) as exc:
+                snap['snapshot_path'] = ''
+                m['_snapshot_reference_error'] = str(exc)
             fid=str(m.get('fixture_id'))
             reports.setdefault(fid,[]).append((path,data,m))
     pre_hash=sha256(preselection['_path'])

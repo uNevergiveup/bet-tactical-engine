@@ -332,7 +332,8 @@ def audit_frozen_coverage(root, preselection):
     from preselect_matches import METRICS,read_stat_block
     root=Path(root);pre=copy.deepcopy(preselection);ledgers=[];sources={};raw_index=defaultdict(list);requests=[]
     for batch in pre.get('source_batches',[]):
-        path=Path(batch['path'])
+        from prematch_paths import local_reference
+        path=local_reference(root,batch['path'],batch['sha256'])
         if hashlib.sha256(path.read_bytes()).hexdigest()!=batch['sha256']:raise ValueError('COVERAGE_BATCH_SHA_MISMATCH')
         doc=json.loads(path.read_text());ledgers.extend(doc.get('api_request_ledger',[]));sources[str(path)]=batch['sha256']
     seen=set()
@@ -357,7 +358,11 @@ def audit_frozen_coverage(root, preselection):
     request_summary=Counter(r.get('status','UNKNOWN') for r in requests)
     request_versions=[]
     for req in requests:
-        path=Path(req.get('cache_path') or '__missing__')
+        try:
+            from prematch_paths import local_reference
+            path=local_reference(root,req.get('cache_path'),req.get('cache_sha256'))
+        except (ValueError,OSError):
+            path=root/'__unverified_cache_reference__'
         current=hashlib.sha256(path.read_bytes()).hexdigest() if path.is_file() else None
         request_versions.append({'endpoint':req.get('endpoint'),'parameters':req.get('parameters'),'status':req.get('status'),'recorded_cache_sha256':req.get('cache_sha256'),'current_cache_sha256':current,'version_matches':current is not None and current==req.get('cache_sha256')})
     audit=[];recovered=[]

@@ -40,3 +40,38 @@ def explicit_selection(path):
     """Reject global pointers before resolving them, including external links."""
     root = Path(__file__).resolve().parent
     return local_reference(root, path)
+
+
+def reference_root(*control_paths):
+    """Infer a boundary from explicit control files, never from a document's references."""
+    import os
+    paths = [Path(p).absolute() for p in control_paths]
+    for path in paths:
+        if 'outputs' in path.parts:
+            index = path.parts.index('outputs')
+            return Path(*path.parts[:index]).resolve()
+    for path in paths:
+        for parent in path.parents:
+            if parent.name == 'prospective_trial':
+                return parent.parent.parent.resolve()
+    return Path(os.path.commonpath([str(p.parent) for p in paths])).resolve()
+
+
+def manifest_reference(root, value, hashes):
+    """Lookup legacy manifest keys without rewriting the immutable manifest."""
+    raw = Path(value)
+    candidate = Path(root) / raw.relative_to(LEGACY_ROOT) if raw.is_absolute() and raw.is_relative_to(LEGACY_ROOT) else raw
+    path = local_reference(root, candidate)
+    names = [str(path), str(LEGACY_ROOT / path.relative_to(Path(root).resolve()))]
+    found = {hashes[name] for name in names if name in hashes}
+    if len(found) != 1:
+        raise ValueError('MANIFEST_REFERENCE_MISSING_OR_CONFLICTING')
+    return local_reference(root, path, found.pop())
+
+
+def control_file(value):
+    """Explicit input has no implicit legacy SHA: require a local, non-global file."""
+    path = Path(value).absolute()
+    if path.is_relative_to(LEGACY_ROOT):
+        raise ValueError('LEGACY_CONTROL_REQUIRES_EXPLICIT_LOCAL_SHA_BINDING')
+    return local_reference(reference_root(path), path)

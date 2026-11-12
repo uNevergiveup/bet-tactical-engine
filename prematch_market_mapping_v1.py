@@ -42,6 +42,8 @@ def code_sha() -> str:
 
 
 def read(path: Path):
+    from prematch_paths import control_file
+    path = control_file(path)
     try:
         value = json.loads(Path(path).read_text(encoding='utf-8-sig'))
     except (OSError, json.JSONDecodeError) as exc:
@@ -253,6 +255,14 @@ def map_markets(pattern_path: Path, preflight_paths=(), *, output_dir: Path | No
     for path in preflight_paths:
         doc = read(Path(path))
         for match in doc.get('matches', []):
+            from prematch_paths import local_reference, reference_root
+            snap = match.get('snapshot') or {}
+            if snap.get('snapshot_path'):
+                try:
+                    snap['snapshot_path'] = str(local_reference(reference_root(path), snap['snapshot_path'], snap.get('sha256')))
+                except (ValueError, OSError):
+                    # Fail before any attempt to read an external original.
+                    snap['snapshot_path'] = ''
             fid = str(match.get('fixture_id'))
             if fid in preflights:
                 duplicate_fixtures.add(fid)
@@ -423,8 +433,12 @@ def integrate_reconciliation(root, output_dir, *, asof=None):
     from prematch_opportunity_scanner import validate_snapshot, identify_market, parse_line as safe_line
     from prematch_predictive_evidence_ranking_v1 import write_once
     root=Path(root).resolve();output_dir=Path(output_dir)
+    from prematch_paths import local_reference, manifest_reference, reference_root
+    project = reference_root(root / 'INTEGRITY_MANIFEST.json')
     scanpath=root/'scanner/opportunity_scan.json';scan=read(scanpath)
-    prepath=Path(scan['sources']['preselection']).resolve();pre=read(prepath)
+    try: prepath=local_reference(project,scan['sources']['preselection'],scan['sources']['preselection_sha256'])
+    except ValueError as exc: raise MappingError('SCANNER_PRESELECTION_SHA_MISMATCH') from exc
+    pre=read(prepath)
     if sha(prepath)!=scan['sources']['preselection_sha256']:raise MappingError('SCANNER_PRESELECTION_SHA_MISMATCH')
     tacticalpath=root/'tactical_reused/tactical_signal_engine.json';tactical=read(tacticalpath)
     ledgerpath=root/'ledger_final.json';ledger=read(ledgerpath)['fixtures']
@@ -433,7 +447,8 @@ def integrate_reconciliation(root, output_dir, *, asof=None):
     statpath=statpaths[0];statdoc=read(statpath);stat_byid={r['fixture_id']:r for r in statdoc['ranking']}
     integrity=read(root/'INTEGRITY_MANIFEST.json')['files_sha256']
     for path in (scanpath,prepath,tacticalpath,ledgerpath,statpath):
-        if integrity.get(str(path))!=sha(path):raise MappingError('INTEGRITY_MANIFEST_SOURCE_MISMATCH:'+str(path))
+        try: manifest_reference(project,path,integrity)
+        except ValueError as exc: raise MappingError('INTEGRITY_MANIFEST_SOURCE_MISMATCH:'+str(path)) from exc
     if tactical['sources']['preselection_sha256']!=sha(prepath):raise MappingError('TACTICAL_PRESELECTION_SHA_MISMATCH')
     clock=dt(asof or scan['asof_madrid']);audit_clock=dt(scan['asof_madrid'])
     if clock is None or audit_clock is None:raise MappingError('CLOCK_INVALID')
@@ -453,18 +468,18 @@ def integrate_reconciliation(root, output_dir, *, asof=None):
         tf=tactical['fixtures'][str(fid)];signals=tf.get('signals',[]);supported=[s for s in signals if s['status']=='SUPPORTED_DESCRIPTIVE_SIGNAL' and s.get('metric')!='offsides']
         a=audits.get(fid);reasons=[];parsed=[];pm=None;path=None
         if a:
-            path=Path(a['preflight_path']).resolve()
-            if integrity.get(str(path))!=sha(path):raise MappingError('PREFLIGHT_MANIFEST_SHA_MISMATCH')
+            path=manifest_reference(project,a['preflight_path'],integrity)
             pf=read(path);rows=[r for r in pf['matches'] if r['fixture_id']==fid]
             if len(rows)!=1:raise MappingError('PREFLIGHT_FIXTURE_NOT_UNIQUE')
-            pm=rows[0];snap=Path(pm['snapshot']['snapshot_path']);sources[str(path)]=sha(path)
+            pm=rows[0];snap=manifest_reference(project,pm['snapshot']['snapshot_path'],integrity);sources[str(path)]=sha(path)
+            pm['snapshot']['snapshot_path']=str(snap)
             if a['status']!='VERIFIED':reasons.append('SCANNER_NOT_VERIFIED')
             if str(a['bwin_event_id'])!=str(pm['bwin_event_id']) or a['snapshot']['sha256']!=pm['snapshot']['sha256']:reasons.append('SCANNER_PREFLIGHT_ID_OR_SHA_CONFLICT')
-            if not snap.is_file() or integrity.get(str(snap))!=sha(snap):reasons.append('SNAPSHOT_MANIFEST_SHA_MISMATCH_OR_MISSING')
+            if not snap.is_file() or sha(snap)!=pm['snapshot'].get('sha256'):reasons.append('SNAPSHOT_MANIFEST_SHA_MISMATCH_OR_MISSING')
             bad,raw,meta=validate_snapshot(f,pm,pf,path,prepath,None,audit_clock,120,5,True)
             reasons.extend(bad)
             # Verify the original discovery for every time-evidence type.
-            discpath=Path(pf['source_discovery']).resolve();disc=read(discpath)
+            discpath=local_reference(project,pf['source_discovery'],pf['source_sha256']);disc=read(discpath)
             if sha(discpath)!=pf['source_sha256']:reasons.append('DISCOVERY_SHA_MISMATCH')
             origin=[r for r in disc['matches'] if r['fixture_id']==fid and str(r.get('bwin_event_id'))==str(pm['bwin_event_id'])]
             if len(origin)!=1 or any(origin[0].get(k)!=f.get(k) for k in ('home_id','away_id','league_id','season','gender')):reasons.append('DISCOVERY_API_IDENTITY_CONFLICT')
@@ -566,7 +581,9 @@ def audit_coverage_models(root, output_dir):
     root=Path(root).resolve();out=Path(output_dir);oldroot=root/'commercial_join'
     old=read(oldroot/'commercial_ranking.json');quotes=read(oldroot/'market_pattern_matches.json')['quotes'];diagnostics=read(oldroot/'coverage_diagnostics.json')
     for path,digest in old['input_hashes'].items():
-        if sha(Path(path))!=digest:raise MappingError('FROZEN_INPUT_CHANGED:'+path)
+        from prematch_paths import local_reference, reference_root
+        try: local_reference(reference_root(root/'commercial_join/commercial_ranking.json'),path,digest)
+        except ValueError as exc: raise MappingError('FROZEN_INPUT_CHANGED:'+path) from exc
     source=root/'verified_schedule/preselection_reconciled.json';pre=read(source)
     recovered,audit=audit_frozen_coverage(Path(__file__).parent,pre)
     recovered.update(coverage_recovery_is_offline_derivative=True,original_preselection_path=str(source),original_preselection_sha256=sha(source),coverage_recovery_sources=audit['source_hashes'])

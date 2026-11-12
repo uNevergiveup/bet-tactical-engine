@@ -14,7 +14,12 @@ class AliasTests(unittest.TestCase):
  def test_event_tile_time_never_uses_other_event(self):
   from playwright.sync_api import sync_playwright
   with sync_playwright() as p:
-   browser=p.chromium.launch(headless=True);page=browser.new_page();page.route('**/*',lambda route:route.abort())
+   options={'headless':True}
+   if not Path(p.chromium.executable_path).is_file():
+    cached=sorted((Path.home()/'Library/Caches/ms-playwright').glob('chromium-*/chrome-mac-*/Google Chrome for Testing.app/Contents/MacOS/Google Chrome for Testing'))
+    if not cached:self.skipTest('No local Chromium binary for offline DOM test')
+    options['executable_path']=str(cached[-1])
+   browser=p.chromium.launch(**options);page=browser.new_page();page.route('**/*',lambda route:route.abort())
    page.set_content('<div>Hoy / 01:00</div><ms-tree-event><a href="https://www.bwin.es/es/sports/eventos/a-b-2:7910157">Juventus F OL Lyonnes F</a><span>Hoy / 21:00</span></ms-tree-event><ms-tree-event><a href="https://www.bwin.es/es/sports/eventos/c-d-2:7910155">Leuven F Koge F</a><span>Hoy / 18:45</span></ms-tree-event>')
    rows=b.browser_collect_anchors(page,0);byid={r['bwin_event_id']:r for r in rows};self.assertIn('21:00',byid['7910157']['text']);self.assertNotIn('18:45',byid['7910157']['text']);self.assertNotIn('01:00',byid['7910157']['text']);browser.close()
 

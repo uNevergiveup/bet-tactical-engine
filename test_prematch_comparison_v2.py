@@ -106,11 +106,16 @@ class AuditPackageV2Tests(unittest.TestCase):
             manifest=json.loads((out/'MANIFEST.json').read_text())
             self.assertTrue(any(row['path']=='COMPARATIVA_PREMATCH_3_PARTIDOS.md' for row in manifest['artifacts']))
 
-    def test_historical_daily_csv_retains_162_unique_rows(self):
-        root=Path(__file__).parent
-        path=root/'outputs/engineering/prematch_comparison_v2_1/partidos_diarios.csv'
-        with path.open(encoding='utf-8-sig',newline='') as handle:
-            rows=list(csv.DictReader(handle,delimiter=';'))
+    def test_daily_csv_retains_162_unique_rows_with_duplicate_discovery(self):
+        from prematch_daily_csv import export_daily
+        with tempfile.TemporaryDirectory() as td:
+            folder=Path(td)/'2026-11-12_1500_0300';base=folder/'prospective_trial'
+            fixtures=[{'fixture_id': i, 'home': f'Synthetic {i}', 'away':'Synthetic Away',
+                       'kickoff_madrid':'2026-11-12T18:00:00+01:00','status':'NS','season':2026} for i in range(162)]
+            t.dump(folder/'fixtures.json',{'fixtures':fixtures+fixtures[:5]})
+            export_daily(base)
+            with (base/'partidos_diarios.csv').open(encoding='utf-8-sig',newline='') as handle:
+                rows=list(csv.DictReader(handle,delimiter=';'))
         self.assertEqual(len(rows),162)
         self.assertEqual(len({row['fixture_id'] for row in rows}),162)
 

@@ -13,11 +13,17 @@ SELECTED=ROOT/'outputs/phase3/bwin_reuse_integrity/selection/selected_match.json
 
 
 class ReuseTests(unittest.TestCase):
+    def setUp(self):
+        from prematch_test_fixtures import restored_selection_fixture
+        tmp=tempfile.TemporaryDirectory();self.addCleanup(tmp.cleanup)
+        self.root=Path(tmp.name).resolve();self.selected=restored_selection_fixture(self.root)
+
     def test_producer_exports_verified_snapshot_binding(self):
         import select_single_match as selector
         from decimal import Decimal
-        ctx=self.context();decision=json.loads((SELECTED.parent/'selection_decision.json').read_text())
-        pre=Path(decision['sources']['preselection']);disc=Path(decision['sources']['discovery']);pf=Path(decision['sources']['preflights'][0])
+        ctx=self.context();decision=json.loads((self.selected.parent/'selection_decision.json').read_text())
+        from prematch_paths import local_reference
+        pre=local_reference(self.root,decision['sources']['preselection'],decision['sources']['preselection_sha256']);disc=local_reference(self.root,decision['sources']['discovery'],decision['sources']['discovery_sha256']);pf=local_reference(self.root,decision['sources']['preflights'][0],ctx['selection']['preflight_sha256'])
         now=ctx['selection_time'];args=SimpleNamespace(asof=None,min_candidate_odd=Decimal('1.20'),min_lead_minutes=45,
             max_snapshot_age_minutes=120,max_discovery_age_minutes=180,min_comparable_matches=1,
             preselection=pre,discovery=disc,preflight_files_resolved=[pf])
@@ -32,7 +38,7 @@ class ReuseTests(unittest.TestCase):
             self.assertEqual(doc['preflight_sha256'],s.sha(pf))
 
     def context(self):
-        return s.load_context(SimpleNamespace(root=ROOT,selected=SELECTED,decision=None))
+        return s.load_context(SimpleNamespace(root=self.root,selected=self.selected,decision=None))
 
     def test_real_origin_and_hash(self):
         ctx=self.context();when=datetime.fromisoformat(ctx['selection']['selection_asof_madrid'])+timedelta(seconds=5)
@@ -52,7 +58,7 @@ class ReuseTests(unittest.TestCase):
                 else:
                     ctx['directory']=Path(td);folder=Path(td)/'inputs';folder.mkdir()
                     target=folder/'cuotas_bwin_7903872.txt'
-                    target.write_bytes(Path(selection['odds_txt']).read_bytes()+b'\nchanged\n')
+                    target.write_bytes((original['directory']/'inputs/cuotas_bwin_7903872.txt').read_bytes()+b'\nchanged\n')
                     selection['odds_txt']=str(target)
                 with patch.object(s,'local_now',return_value=when),self.assertRaises(ValueError):s.validate_reuse_odds(ctx)
 

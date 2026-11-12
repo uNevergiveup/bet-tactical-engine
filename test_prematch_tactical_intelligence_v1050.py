@@ -7,8 +7,12 @@ import prematch_tactical_intelligence_v1050 as mod
 
 
 class TacticalIntelligenceTests(unittest.TestCase):
+    def setUp(self):
+        from prematch_test_fixtures import integral_fixture
+        tmp = tempfile.TemporaryDirectory(); self.addCleanup(tmp.cleanup)
+        self.root = integral_fixture(Path(tmp.name))
     def test_offline_event_without_external_reports(self):
-        root = Path(__file__).resolve().parent
+        root = self.root
         out_path, md_path = mod.run("7902458", root)
         self.assertTrue(out_path.exists())
         self.assertTrue(md_path.exists())
@@ -55,7 +59,7 @@ class TacticalIntelligenceTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             bad = Path(tmp) / "grok_bad.md"
             bad.write_text("Event ID: 7999999\nFixture ID: 1570450\ncutoff_utc: 2026-11-06T12:00:00+00:00\nFACT: texto")
-            root = Path(__file__).resolve().parent
+            root = self.root
             integral = json.loads((root / "outputs/matches/7902458/analysis/deep_v1042/analisis_integral_7902458.json").read_text())
             doc = mod.build(integral, qualitative_reports=[bad])
             self.assertEqual(doc["qualitative"]["status"], "PARTIAL_NO_EXTERNAL_REPORTS")
@@ -63,7 +67,7 @@ class TacticalIntelligenceTests(unittest.TestCase):
             self.assertEqual(doc["teams"]["home"]["name"], "Sevilla")
 
     def test_duels_keep_unverified_positional_mechanisms_explicit(self):
-        root = Path(__file__).resolve().parent
+        root = self.root
         out, _ = mod.run("7902458", root)
         doc = json.loads(out.read_text())
         self.assertTrue(doc["duel_matrix"][0]["statistical_cross"])
@@ -74,7 +78,7 @@ class TacticalIntelligenceTests(unittest.TestCase):
                 self.assertFalse(duel["players_involved"])
 
     def test_player_denominators_are_explicit_and_unverifiable_per90_is_suppressed(self):
-        root = Path(__file__).resolve().parent
+        root = self.root
         out, _ = mod.run("7902458", root)
         doc = json.loads(out.read_text())
         player = doc["teams"]["home"]["players"][0]
@@ -89,7 +93,7 @@ class TacticalIntelligenceTests(unittest.TestCase):
                 self.assertIsNone(denominator["per90"])
 
     def test_l5_trace_and_scenarios_do_not_claim_probable_without_xi(self):
-        root = Path(__file__).resolve().parent
+        root = self.root
         out, _ = mod.run("7902458", root)
         doc = json.loads(out.read_text())
         trace = doc["teams"]["home"]["window_trace"]
@@ -98,7 +102,7 @@ class TacticalIntelligenceTests(unittest.TestCase):
         self.assertNotIn("PROBABLE", {x["label"] for x in doc["scenarios"]})
 
     def test_research_questions_and_priority_components_are_present(self):
-        root = Path(__file__).resolve().parent
+        root = self.root
         out, _ = mod.run("7902458", root)
         doc = json.loads(out.read_text())
         self.assertTrue(doc["research_questions"])
@@ -111,7 +115,7 @@ class TacticalIntelligenceTests(unittest.TestCase):
             self.assertIn("contradictions", item)
 
     def test_halves_use_metric_deltas_not_coverage_only(self):
-        root = Path(__file__).resolve().parent
+        root = self.root
         out, _ = mod.run("7902458", root)
         doc = json.loads(out.read_text())
         for side in ("home", "away"):
@@ -120,14 +124,14 @@ class TacticalIntelligenceTests(unittest.TestCase):
             self.assertIsNotNone(period["metrics"]["xg"]["difference_second_minus_first"])
 
     def test_source_cutoff_is_preserved(self):
-        root = Path(__file__).resolve().parent
+        root = self.root
         integral = json.loads((root / "outputs/matches/7902458/analysis/deep_v1042/analisis_integral_7902458.json").read_text())
         doc = mod.build(integral)
         self.assertEqual(doc["analysis_cutoff_utc"], integral["analysis_cutoff_utc"])
         self.assertEqual(doc["target_fixture_id"], integral["target_fixture_id"])
 
     def test_integral_source_hash_mismatch_is_blocked(self):
-        root = Path(__file__).resolve().parent
+        root = self.root
         integral = json.loads((root / "outputs/matches/7902458/analysis/deep_v1042/analisis_integral_7902458.json").read_text())
         with tempfile.TemporaryDirectory() as tmp:
             source = Path(tmp) / "source.json"

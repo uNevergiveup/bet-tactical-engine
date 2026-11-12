@@ -26,6 +26,10 @@ def performance(rows_home, rows_away):
 
 
 class IntegralAnalysisTests(unittest.TestCase):
+    def fixture_root(self):
+        from prematch_test_fixtures import integral_fixture
+        tmp = tempfile.TemporaryDirectory(); self.addCleanup(tmp.cleanup)
+        return integral_fixture(Path(tmp.name))
     def test_temporal_guard_excludes_target_and_future_without_leakage(self):
         rows = [row(999, "2026-11-06T12:00:00+00:00"), row(1000, "2026-11-06T15:00:00+00:00"),
                 row(1001, "2026-11-05T12:00:00+00:00", missing=True)]
@@ -89,14 +93,14 @@ class IntegralAnalysisTests(unittest.TestCase):
 
     def test_sos_hash_is_authentic_in_offline_run(self):
         import hashlib
-        root = Path(__file__).resolve().parent
+        root = self.fixture_root()
         out_p, _ = mod.run("7902458", root)
         data = json.loads(out_p.read_text())
         sos_path = Path(data["source_files"]["sos"])
         self.assertEqual(data["sos"]["source_sha256"], hashlib.sha256(sos_path.read_bytes()).hexdigest())
 
     def test_offline_integration_sevilla_alaves(self):
-        root = Path(__file__).resolve().parent
+        root = self.fixture_root()
         out_p, md_p = mod.run("7902458", root)
         self.assertTrue(out_p.exists())
         self.assertTrue(md_p.exists())

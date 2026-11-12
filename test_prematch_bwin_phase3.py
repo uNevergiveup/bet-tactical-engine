@@ -70,28 +70,33 @@ class BwinPhase3Tests(unittest.TestCase):
         self.assertEqual(links['1490611']['event_id'],'7903341')
         self.assertNotEqual(links['1490611']['status'],'VERIFIED')
 
-    def test_real_preflight_selector_check_and_reuse_no_capture(self):
-        # Revalidate original sources with an injected audit clock; never alter
-        # system time or use it to activate a scraper.
+    def test_archived_preflight_selector_check_and_reuse_no_capture(self):
         from prematch_single import main
-        selected=ROOT/'outputs/phase3/2026-11-07_1500_0300/runs/20261107T164622711846/fixtures/1570448/selection_pipeline/selected_match.json'
-        saved=json.loads(selected.read_text());when=datetime.fromisoformat(saved['selection_asof_madrid'])+timedelta(seconds=5)
-        with patch('prematch_single.local_now',return_value=when),patch('socket.socket.connect',side_effect=AssertionError('network')):
-            self.assertEqual(main(['--root',str(ROOT),'--selected',str(selected),'check']),0)
-        a,b,c=self.sample();link=self.link();ranked=[{'fixture_id':1570448,'bwin':link}]
-        pf=ROOT/'outputs/phase3/bwin_integration_selected/preflight/market_preflight.json'
-        args=SimpleNamespace(asof=None,fixture_id=1570448,preflight=pf,min_lead=45,max_odds_age=120)
-        def fake_cli(command, **kwargs):
-            if 'select_single_match.py' in command[1]:
-                destination=Path(command[command.index('--output-dir')+1])
-                (destination/'selected_match.json').write_text(selected.read_text())
-            return SimpleNamespace(returncode=0)
-        with tempfile.TemporaryDirectory() as td,patch('socket.socket.connect',side_effect=AssertionError('network')),patch.object(d.trial,'now_madrid',return_value=when),patch('subprocess.run',side_effect=fake_cli) as runner:
-            result=d.select_verified_bwin(args,ROOT,Path(td),ranked,PRE,REAL)
-            self.assertEqual(result['status'],'SELECTED_AND_CHECKED_FOR_RESEARCH')
-            self.assertEqual(result['preflight'],str(pf))
-            self.assertFalse((Path(td)/'fixtures/1570448/selection_pipeline/preflight.log').exists())
-            self.assertEqual(runner.call_count,2) # selector and check; no capture
+        from prematch_test_fixtures import restored_selection_fixture
+        from prematch_paths import local_reference
+        with tempfile.TemporaryDirectory() as td:
+            root=Path(td).resolve();selected=restored_selection_fixture(root)
+            saved=json.loads(selected.read_text());when=datetime.fromisoformat(saved['selection_asof_madrid'])+timedelta(seconds=5)
+            with patch('prematch_single.local_now',return_value=when),patch('socket.socket.connect',side_effect=AssertionError('network')):
+                self.assertEqual(main(['--root',str(root),'--selected',str(selected),'check']),0)
+            pf=local_reference(root,saved['preflight_path'],saved['preflight_sha256'])
+            document=json.loads(pf.read_text())
+            pre=local_reference(root,document['source_preselection'],document['source_preselection_sha256'])
+            catalog=local_reference(root,document['source_discovery'],document['source_sha256'])
+            ranked=[{'fixture_id':1570448,'bwin':self.link()}]
+            args=SimpleNamespace(asof=None,fixture_id=1570448,preflight=pf,min_lead=45,max_odds_age=120)
+            def fake_cli(command, **kwargs):
+                if 'select_single_match.py' in command[1]:
+                    destination=Path(command[command.index('--output-dir')+1])
+                    (destination/'selected_match.json').write_text(selected.read_text())
+                return SimpleNamespace(returncode=0)
+            out=root/'run'
+            with patch('socket.socket.connect',side_effect=AssertionError('network')),patch.object(d.trial,'now_madrid',return_value=when),patch('subprocess.run',side_effect=fake_cli) as runner:
+                result=d.select_verified_bwin(args,root,out,ranked,pre,catalog)
+                self.assertEqual(result['status'],'SELECTED_AND_CHECKED_FOR_RESEARCH')
+                self.assertEqual(result['preflight'],str(pf))
+                self.assertFalse((out/'fixtures/1570448/selection_pipeline/preflight.log').exists())
+                self.assertEqual(runner.call_count,2)
 
 
 if __name__=='__main__':unittest.main()

@@ -27,9 +27,13 @@ def reference(path):
     return {'path':str(path),'sha256':t.sha(path)}
 
 
-def verify_refs(refs):
+def verify_refs(refs, root):
+    from prematch_paths import local_reference
     for name,ref in refs.items():
-        if t.sha(Path(ref['path']))!=ref['sha256']:raise ValueError('SOURCE_CHANGED: '+name)
+        try:
+            ref['path'] = str(local_reference(root, ref['path'], ref['sha256']))
+        except (ValueError, OSError) as exc:
+            raise ValueError('SOURCE_CHANGED: '+name+': '+str(exc)) from exc
 
 
 def bridge(root,handoff_path,output=None,*,historical=False,asof=None):
@@ -94,7 +98,7 @@ def bridge(root,handoff_path,output=None,*,historical=False,asof=None):
 
 def selected_context(root,path):
     ctx=single.load_context(argparse.Namespace(root=root,selected=Path(path),decision=None))
-    verify_refs(ctx['selection'].get('source_refs',{}))
+    verify_refs(ctx['selection'].get('source_refs',{}), root)
     return ctx
 
 
@@ -278,7 +282,7 @@ def final_review(root,path,analysis,market=None,selection=None,odd=None):
     single.ensure_prematch(ctx)
     manifest=single.match_manifest(ctx)
     if manifest.get('status')!='FINALIZADO':raise ValueError('Downstream stages invalid or incomplete')
-    binding=t.read(analysis_binding_path(ctx,manifest));verify_refs(binding['source_refs'])
+    binding=t.read(analysis_binding_path(ctx,manifest));verify_refs(binding['source_refs'], root)
     expected=ctx['directory']/'analysis'/f'analisis_{ctx["event_id"]}.md'
     if Path(analysis).resolve()!=expected.resolve():raise ValueError('Analysis must belong to the selected event directory')
     text=expected.read_text(encoding='utf-8');first=text.splitlines()[0].upper()

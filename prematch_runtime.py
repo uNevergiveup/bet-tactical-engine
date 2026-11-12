@@ -115,7 +115,7 @@ def verified_preflight(root, path, fixture, prepath, args):
     if checked['status'] != 'READY_FOR_SCRAPER':
         raise trial.TrialError(','.join(checked['reasons']))
     reasons, _, _ = validate_snapshot(fixture, match, doc, path, prepath, None,
-                                     trial.now_madrid(), args.max_odds_age, args.min_lead, False)
+                                     trial.now_madrid(), args.max_odds_age, args.min_lead, False, project_root=root)
     if reasons:
         raise trial.TrialError(','.join(reasons))
     snapshot = match.get('snapshot', {})

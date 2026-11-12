@@ -14,6 +14,30 @@ import prematch_single as single
 
 
 class IsolationTests(unittest.TestCase):
+    def test_manifest_legacy_keys_verify_local_copy_and_conflicts_block(self):
+        from prematch_paths import manifest_reference
+        with tempfile.TemporaryDirectory() as td:
+            root=Path(td).resolve();path=root/'outputs/discovery/source.json'
+            path.parent.mkdir(parents=True);path.write_text('{}')
+            old='/Users/antonio/Projects/scraper/outputs/discovery/source.json'
+            digest=hashlib.sha256(path.read_bytes()).hexdigest()
+            self.assertEqual(manifest_reference(root,old,{old:digest}),path)
+            with self.assertRaises(ValueError):manifest_reference(root,old,{old:digest,str(path):'0'*64})
+            path.write_text('{"tampered":true}')
+            with self.assertRaises(ValueError):manifest_reference(root,old,{old:digest})
+
+    def test_operational_readers_reject_global_and_legacy_controls_before_reading(self):
+        from select_single_match import read_json
+        from prematch_opportunity_scanner import load_json
+        from prematch_market_mapping_v1 import read
+        with tempfile.TemporaryDirectory() as td:
+            root=Path(td);latest=root/'outputs/latest';latest.mkdir(parents=True)
+            (latest/'ACTIVE_EVENT.json').write_text('{}')
+            for reader in (read_json,load_json,read):
+                with self.subTest(reader=reader.__module__):
+                    with self.assertRaises(ValueError):reader(latest/'ACTIVE_EVENT.json')
+                    with self.assertRaises(ValueError):reader(Path('/Users/antonio/Projects/scraper/outputs/control.json'))
+
     def test_all_old_global_pointers_are_rejected_without_changing_them(self):
         with tempfile.TemporaryDirectory() as td, tempfile.TemporaryDirectory() as other:
             root = Path(td)
