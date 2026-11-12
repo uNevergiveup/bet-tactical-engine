@@ -204,8 +204,16 @@ def normalize(pre,source_ref,cache=None,retrospective=False):
                         rejected.append({'fixture_id':rec['fixture_id'],'reason':'HALF_STATISTICS_TEAM_IDENTITY'})
                 score=doc.get('score',{});ft=score.get('fulltime',{});half=score.get('halftime',{})
                 label='home' if rec['venue']=='HOME' else 'away'
+                rival_label='away' if label=='home' else 'home'
+                # Official interval score is a historical condition, never a
+                # known prematch feature. No event timeline is interpolated.
+                if finite(half.get(label)) and finite(half.get(rival_label)):
+                    delta=half[label]-half[rival_label]
+                    rec['conditions']['halftime_score_state']=('LEADING' if delta>0 else 'TRAILING' if delta<0 else 'LEVEL')
                 if finite(ft.get(label)) and finite(half.get(label)) and 0<=half[label]<=ft[label]:
                     rec['metrics']['own.goals_h1']=half[label];rec['metrics']['own.goals_h2']=ft[label]-half[label]
+                if finite(ft.get(rival_label)) and finite(half.get(rival_label)) and 0<=half[rival_label]<=ft[rival_label]:
+                    rec['metrics']['conceded.goals_h1']=half[rival_label];rec['metrics']['conceded.goals_h2']=ft[rival_label]-half[rival_label]
                 if any(dt(r.get('fetched_at_utc')) and dt(r.get('fetched_at_utc'))>cut for r in rec['provenance']):rec['acquisition_status']='RETROSPECTIVE_RECONSTRUCTION'
     # Context is computed only from records already finished at each historical KO.
     # An observed gap is NOT a guaranteed rest interval in an incomplete schedule.

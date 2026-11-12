@@ -66,6 +66,16 @@ def norm(value) -> str:
     return ' '.join(''.join(c for c in raw if not unicodedata.combining(c)).casefold().split())
 
 
+def exact_owner_alias(owner, team):
+    """Exact category-preserving club tokens; only in an already verified fixture."""
+    from generate_context import club_category_compatible
+    female=bool(re.search(r'\b(?:w|women|f)\b',norm(team)))
+    if not club_category_compatible(owner,team,'female' if female else None):return False
+    def tokens(name):
+        return [t for t in re.findall(r'\w+',norm(name)) if t not in {'fc','f','w','women'}]
+    return bool(tokens(owner)) and tokens(owner)==tokens(team)
+
+
 def parse_line(selection):
     text = norm(selection)
     direction = 'OVER' if text.startswith(('mas ', 'más ')) or ' mas de ' in f' {text} ' else None
@@ -214,7 +224,7 @@ def _compatible(row, pattern):
         if not (re.search(female, norm(owner)) and re.search(female, team)):
             return False
         from generate_context import team_name_similarity
-        if (team_name_similarity(owner, pattern.get('team'), 'female') != 100
+        if ((team_name_similarity(owner, pattern.get('team'), 'female') != 100 and not exact_owner_alias(owner,pattern.get('team')))
                 or team_name_similarity(owner, pattern.get('opponent'), 'female') == 100):
             return False
     # Direct team lines only: totals without a team and player props are not
@@ -450,6 +460,52 @@ def explain_research(preselection, ranking, mapping, llm_status):
     return {'schema_version':'1.0-explainable-research','fixtures':fixtures,'llm_status':llm_status,
             'offsides_policy':'STATISTICAL_RETENTION_ONLY_EXCLUDED_FROM_COMMERCIAL_EXPLANATIONS',
             'value_validated':False,'actionable_bet':False}
+
+
+def integrate_advanced(ranking, advanced, mapping, explanations, discovery):
+    """Attach frozen advanced evidence; exploratory volume cannot boost priority."""
+    import copy
+    result=copy.deepcopy(ranking)
+    dossiers={str(r['fixture_id']):r for r in explanations['fixtures']}
+    indexed={}
+    for pattern in advanced['patterns']:
+        for target in pattern.get('next_match_applicability',[]):
+            indexed.setdefault(str(target['fixture_id']),[]).append((pattern,target))
+    captures={str(r['fixture_id']) for r in mapping['mappings'] if r.get('bwin_event_id')}
+    found={str(r['fixture_id']):r for r in discovery['matches']}
+    audit=[]
+    for row in result:
+        fid=str(row['fixture_id']); evidence=[]
+        for p,target in indexed.get(fid,[]):
+            metric=p.get('commercial_adapter',{}).get('metric')
+            if metric=='offsides':continue
+            evidence.append({'pattern_id':p['pattern_id'],'family':metric,'entity_type':p['entity_type'],
+                'team_id':p['team_id'],'player_id':p.get('player_id'),'period':p['period'],
+                'variables':p['variables'],'train':p['train'],'holdout':p['holdout'],
+                'uncertainty':p['uncertainty'],'validation_status':p['validation_status'],
+                'evidence_fixture_ids':p['evidence_fixture_ids'],'counterevidence_fixture_ids':p['counterevidence_fixture_ids'],
+                'applicability':target,'limitations':p['limitations'],'predictive_use':p['predictive_use'],
+                'market_status':'EXPLORATORY_ASSOCIATION_REQUIRES_CONTRACT_AND_MODEL_VALIDATION',
+                'explanation':f"Relación histórica de {metric}: condición {p['variables']['condition']}. "
+                    f"Entrenamiento n={p['train']['n']}; prueba n={p['holdout']['n']}. "
+                    f"Contraejemplos registrados: {len(p['counterevidence_fixture_ids'])}. "
+                    "La relación no demuestra causalidad ni valor de apuesta.",
+                'actionable_bet':False})
+        row['advanced_evidence']=evidence
+        row['advanced_summary']={'associations':len(evidence),
+            'families':dict(Counter(e['family'] for e in evidence)),
+            'with_counterevidence':sum(bool(e['counterevidence_fixture_ids']) for e in evidence),
+            'ranking_policy':'BASE_EVIDENCE_PRIORITY_PRESERVED_EXPLORATORY_VOLUME_NOT_REWARDED'}
+        dossiers[fid]['advanced_evidence']=evidence
+        dossiers[fid]['advanced_summary']=row['advanced_summary']
+        status='LOCAL_CAPTURE_AUDITED' if fid in captures else found.get(fid,{}).get('status','NOT_IN_LEGACY_DISCOVERY_COHORT')
+        audit.append({'fixture_id':row['fixture_id'],'capture_status':status,
+            'discovery_evidence':found.get(fid),'captured':fid in captures,
+            'interpretation':'Ausencia de captura local no acredita ausencia de oferta Bwin.'})
+    return {'ranking':result,'explanations':explanations,'fixture_capture_audit':audit,
+        'mapping_reasons':dict(Counter(r['reason'] for r in mapping['mappings'])),
+        'mapping_by_fixture':{str(row['fixture_id']):dict(Counter(r['reason'] for r in mapping['mappings'] if str(r['fixture_id'])==str(row['fixture_id']))) for row in result},
+        'status':'PYTHON_RESEARCH_INTEGRATED_COMMERCIAL_MODELS_PARTIAL','ready':False,'actionable_bet':False}
 
 
 def classify_signal_market(signals, metric, side, period, line):

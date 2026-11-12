@@ -261,6 +261,12 @@ def execute(plan, *, external=False, confirmation=None, resume=False):
             from prematch_market_mapping_v1 import explain_research
             result=explain_research(json.loads(pre.read_text()),json.loads(base.read_text()),
                 json.loads(market_artifact.read_text()),json.loads((out/'llm/ranking_enriched.json').read_text())['status'])
+            from prematch_market_mapping_v1 import integrate_advanced
+            integrated=integrate_advanced(json.loads(base.read_text()),
+                json.loads((out/'advanced/advanced_patterns.json').read_text()),
+                json.loads(market_artifact.read_text()),result,
+                json.loads(bwin.read_text()) if bwin else {'matches':[]})
+            write_once(out/'integrated_research.json',integrated)
             write_once(out/'explanations.json',result)
             lines=['# Investigación PREMATCH','',
                    'Orden de investigación descriptivo. Valor financiero no demostrado. Sin picks ni stakes.','']

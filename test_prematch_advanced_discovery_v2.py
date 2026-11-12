@@ -103,6 +103,8 @@ class AdvancedDiscoveryTests(unittest.TestCase):
             rows,_,_=engine.normalize(pre,{'fetched_at_utc':fixtures.CUT.isoformat()},engine.EnrichedCache(root))
             team=next(r for r in rows if r['entity_type']=='TEAM')
             self.assertEqual(team['metrics']['own.goals_h1'],1)
+            self.assertEqual(team['conditions']['halftime_score_state'],'LEADING')
+            self.assertEqual(team['metrics']['conceded.goals_h2'],0)
 
     def test_real_half_query_remains_separate_from_ft_and_coach_is_historical(self):
         with tempfile.TemporaryDirectory() as td:

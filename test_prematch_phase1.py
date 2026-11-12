@@ -83,13 +83,13 @@ class BwinInputTests(unittest.TestCase):
         self.assertEqual(bwin.summarize(row, possible, browser=None, timeout=1, inspect=False)["status"],
                          "AMBIGUOUS_MULTIPLE_EVENTS")
 
-    def test_explicitly_excluded_categories_are_not_scanned(self):
+    def test_legacy_excluded_categories_remain_in_discovery_inventory(self):
         with tempfile.TemporaryDirectory() as td:
             path = Path(td) / "fixtures.json"
             path.write_text(json.dumps({"fixtures": [fixture(category="EXCLUDED")]}))
             ready, skipped = bwin.read_candidates(path, [], 0, False,
                                                   datetime(2099, 11, 7, 10, tzinfo=phase1.MADRID))
-            self.assertEqual(ready, [])
+            self.assertEqual([row['fixture_id'] for row in ready], [1])
             self.assertEqual(skipped, [])
 
     def test_absolute_time_alone_does_not_bypass_competition_check(self):
@@ -101,7 +101,13 @@ class BwinInputTests(unittest.TestCase):
             result = bwin.summarize(row, possible, browser=None, timeout=1, inspect=True)
         self.assertEqual(result["status"], "EVENT_REQUIRES_REVIEW")
         self.assertEqual(result["inspection"]["identity_status"],
-                         "CATEGORY_OR_COMPETITION_UNVERIFIED")
+                         "COMPETITION_UNVERIFIED")
+
+    def test_unknown_category_is_distinct_from_contradiction(self):
+        row=fixture(gender='UNKNOWN');possible=bwin.match_catalog(row,[event(text='La Liga Sevilla Alaves')])
+        observed={'identity_status':'NAME_AND_ABSOLUTE_TIME_MATCH','competition_match_score':1.0,'market_headings':{}}
+        with mock.patch.object(bwin,'inspect_event',return_value=observed):result=bwin.summarize(row,possible,None,1,True)
+        self.assertEqual(result['inspection']['identity_status'],'CATEGORY_UNKNOWN_PENDING')
 
     def test_catalog_visits_duplicate_page_once_per_cycle(self):
         class Page:

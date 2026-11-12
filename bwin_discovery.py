@@ -43,6 +43,11 @@ STOP_TOKENS = {
     "de", "del", "el", "la", "los", "las", "the", "futbol", "futebol",
     "f", "w", "women", "femenino", "femenil", "fem", "femenina",
 }
+NATIONAL_TEAM_TRANSLATIONS = {
+    "finland": ("finlandia",),
+    "turkiye": ("turquia", "turkey"),
+    "turkey": ("turquia", "turkiye"),
+}
 
 
 def norm(s: object) -> str:
@@ -87,6 +92,7 @@ def team_similarity(team: str, evidence: str) -> float:
     # Exact club aliases only generate candidates; temporal/category/ID gates remain.
     from config.constants import TEAM_ALIASES
     query=norm(team);queries={str(team)}
+    queries.update(NATIONAL_TEAM_TRANSLATIONS.get(query, ()))
     for canonical,aliases in TEAM_ALIASES.items():
         variants={norm(x) for x in (canonical,*aliases)}
         if query in variants:queries.update(variants)
@@ -212,8 +218,9 @@ def displayed_header_kickoff(evidence: dict) -> datetime | None:
         label = norm(evidence.get('date_label',''))
         if label not in ('hoy','manana'):return None
         clock = evidence.get('time_label','').strip()
-        if not re.fullmatch(r'\d{2}:\d{2}',clock):return None
+        if not re.fullmatch(r'\d{1,2}:\d{2}',clock):return None
         hour,minute = map(int,clock.split(':'))
+        if hour>23 or minute>59:return None
         date = end.date() + timedelta(days=int(label=='manana'))
         kickoff = datetime(date.year,date.month,date.day,hour,minute,tzinfo=TZ)
         # A displayed clock without an offset cannot disambiguate a DST fold.
@@ -222,6 +229,22 @@ def displayed_header_kickoff(evidence: dict) -> datetime | None:
         return kickoff
     except (KeyError,ValueError,TypeError,AttributeError):
         return None
+
+
+def catalog_relative_kickoff(event: dict) -> datetime | None:
+    """Resolve an event-anchor Hoy/Mañana clock from its retained observation."""
+    text=str(event.get('text') or '')
+    observed=event.get('text_observed_at_utc')
+    match=re.search(r'\b(Hoy|Mañana)\s*/\s*(\d{1,2}):(\d{2})\b',text,re.I)
+    if not match or not observed:return None
+    try:seen=datetime.fromisoformat(str(observed).replace('Z','+00:00')).astimezone(TZ)
+    except (ValueError,TypeError):return None
+    hour,minute=int(match.group(2)),int(match.group(3))
+    if hour>23 or minute>59:return None
+    date=seen.date()+timedelta(days=int(norm(match.group(1))=='manana'))
+    result=datetime(date.year,date.month,date.day,hour,minute,tzinfo=TZ)
+    if result.replace(fold=0).utcoffset()!=result.replace(fold=1).utcoffset():return None
+    return result if result>seen else None
 
 
 def event_absolute_kickoff(raw_html: str) -> datetime | None:
@@ -312,7 +335,10 @@ def read_candidates(path: Path, fixture_ids: list[int], top: int, include_past: 
             -(i["research_priority_score"] or 0),
             i["kickoff_madrid"] or "9999",
         ))
-        eligible = [i for i in priority_order if i.get("category_status") != "EXCLUDED"]
+        # Every inventory fixture enters candidate discovery. An old category
+        # filter is evidence for review, never a reason to hide the fixture.
+        # Category/gender conflicts remain hard gates in match_catalog().
+        eligible = priority_order
         # Choose the best N *upcoming* fixtures; don't fill a finite quota with
         # started matches. Shared-catalog mode keeps all rows so the skipped
         # temporal state is auditable in its output.
@@ -723,7 +749,8 @@ def inspect_event(browser, result: dict, fixture: dict, navigation_timeout: int)
     return observation
 
 
-def summarize(fixture: dict, possible: list[dict], browser, timeout: int, inspect: bool) -> dict:
+def summarize(fixture: dict, possible: list[dict], browser, timeout: int, inspect: bool,
+              inspection_retries: int = 0) -> dict:
     out = {**fixture, "status": "NOT_FOUND_IN_SCANNED_PAGES", "bwin_event_id": None,
            "bwin_url": None, "candidates_found": len(possible), "alternatives": [],
            "identity_status": "NOT_VERIFIED", "markets": None}
@@ -745,7 +772,12 @@ def summarize(fixture: dict, possible: list[dict], browser, timeout: int, inspec
                 "category_compatibility": winner.get("category_compatibility"),
                 "competition_similarity": winner.get("competition_similarity")})
     if inspect:
-        observed = inspect_event(browser, winner, fixture, timeout)
+        attempts=[]
+        for attempt in range(inspection_retries+1):
+            observed = inspect_event(browser, winner, fixture, timeout)
+            attempts.append({'attempt':attempt+1,'status':observed.get('status'),'error':observed.get('error')})
+            if observed.get('status')!='ERROR':break
+        observed['attempts']=attempts
         expected_gender = str(fixture.get("gender") or "UNKNOWN").upper()
         category_ok = ((expected_gender == "M" and winner.get("category_compatibility") == "COMPATIBLE_OR_UNKNOWN") or
                        (expected_gender == "F" and winner.get("category_compatibility") == "FEMALE_CORROBORATED"))
@@ -753,7 +785,12 @@ def summarize(fixture: dict, possible: list[dict], browser, timeout: int, inspec
         competition_ok = (isinstance(competition_score, (int, float)) and
                           not isinstance(competition_score, bool) and competition_score >= 0.82)
         if observed.get("identity_status") == "NAME_AND_ABSOLUTE_TIME_MATCH" and not (category_ok and competition_ok):
-            observed["identity_status"] = "CATEGORY_OR_COMPETITION_UNVERIFIED"
+            if expected_gender=='UNKNOWN' and competition_ok:
+                observed['identity_status']='CATEGORY_UNKNOWN_PENDING'
+            elif category_ok and not competition_ok:
+                observed['identity_status']='COMPETITION_UNVERIFIED'
+            else:
+                observed["identity_status"] = "CATEGORY_OR_COMPETITION_UNVERIFIED"
             observed["supporting_identity_checks"] = {
                 "category_compatible": category_ok,
                 "competition_compatible": competition_ok,
@@ -840,6 +877,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--max-country-pages", type=int, default=8, help="Máximo de páginas nacionales adicionales (default: 8)")
     parser.add_argument("--timeout", type=int, default=25000, help="Timeout navegación en milisegundos")
     parser.add_argument("--no-inspect", action="store_true", help="Solo identificar links, sin abrir eventos")
+    parser.add_argument("--directed-pilot", action="store_true", help="Piloto dirigido: exige 1-10 --fixture-id y limita páginas nacionales")
+    parser.add_argument("--inspection-retries",type=int,default=0,help="Reintentos por página de evento (piloto: 0-2)")
     parser.add_argument("--include-past-for-debug", action="store_true", help="No omitir encuentros ya iniciados (solo depuración; nunca PREMATCH)")
     parser.add_argument("--base-url", default=BASE)
     args = parser.parse_args(argv)
@@ -848,6 +887,12 @@ def main(argv: list[str] | None = None) -> int:
     except ValueError as error:parser.error(str(error))
     if args.top < 0:
         parser.error('--top debe ser >=0; 0 significa todos los fixtures')
+    if args.directed_pilot and (not args.fixture_id or len(set(args.fixture_id))>10):
+        parser.error('--directed-pilot exige entre 1 y 10 --fixture-id distintos')
+    if args.directed_pilot and args.max_country_pages>10:
+        parser.error('--directed-pilot limita --max-country-pages a 10')
+    if args.inspection_retries<0 or (args.directed_pilot and args.inspection_retries>2):
+        parser.error('--inspection-retries inválido; en piloto se permiten 0-2')
     now = datetime.now(timezone.utc).astimezone(TZ)
     try:
         chosen, skipped = read_candidates(args.input, args.fixture_id, args.top, args.include_past_for_debug, now)
@@ -896,7 +941,7 @@ def main(argv: list[str] | None = None) -> int:
             results = []
             for fixture in chosen:
                 possibilities = match_catalog(fixture, catalog)
-                result = summarize(fixture, possibilities, browser, args.timeout, not args.no_inspect)
+                result = summarize(fixture, possibilities, browser, args.timeout, not args.no_inspect,args.inspection_retries)
                 print(f"[{fixture['fixture_id']}] {fixture['home']} - {fixture['away']}: {result['status']}" +
                       (f" | bwin={result['bwin_event_id']}" if result['bwin_event_id'] else ""))
                 results.append(result)
