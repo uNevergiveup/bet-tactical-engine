@@ -32,6 +32,8 @@ class BridgeTests(unittest.TestCase):
         with patch('socket.socket.connect',side_effect=AssertionError('NO_NETWORK')):
             d=phase1_preselection(self.source,self.cache,CUT)
         self.assertEqual(len(d['matches']),2);self.assertEqual(d['api_calls'],0)
+        from prematch_predictive_engine import validate_source
+        validate_source(d,CUT)
         row=d['matches'][0];self.assertEqual(row['category_status'],'EXCLUDED')
         obs=row['statistical_observations']['home'][0]
         self.assertEqual(obs['own']['shots'],0);self.assertIsNone(obs['own'].get('fouls'))

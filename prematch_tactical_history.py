@@ -85,7 +85,7 @@ class LocalHistoryCache:
 def phase1_preselection(fixtures_path, cache_root, cutoff, history=20):
     """Bridge shared Phase 1 cache to existing engines; no requests or new model."""
     import copy
-    from preselect_matches import prepare_history
+    from preselect_matches import prepare_history, evaluate_fixture
     from prematch_advanced_discovery_v2 import EnrichedCache, allowed_ref
     fixtures_path = Path(fixtures_path)
     doc = t.read(fixtures_path)
@@ -131,12 +131,14 @@ def phase1_preselection(fixtures_path, cache_root, cutoff, history=20):
             row['data_state'] = 'BLOCKED_TARGET_NOT_FUTURE'
             row['statistical_observations'] = {'home': [], 'away': []}
             matches.append(row); continue
+        histories = {}; combined_details = {}; detail_requested = set()
         for side in ('home', 'away'):
             tid = target[side + '_id']
             candidates = [r for r, ref in available.values()
                           if tid in [r.get('teams', {}).get(s, {}).get('id') for s in ('home', 'away')]
                           and r.get('fixture', {}).get('id') != target['fixture_id']]
             games = prepare_history(candidates, tid, cutoff, history)
+            histories[tid] = games
             details = {}; provenance = {}; requested = set()
             for game in games:
                 fid = game['id']; raw, ref = available[fid]
@@ -146,14 +148,22 @@ def phase1_preselection(fixtures_path, cache_root, cutoff, history=20):
                 if stats is not None and allowed_ref(stat_ref, cutoff, False):
                     details[fid]['statistics'] = stats
                     provenance[fid].append(stat_ref); requested.add(fid)
+            combined_details.update(details); detail_requested.update(requested)
             observations = observations_from_games(games, tid, details, requested)
             for obs in observations:
                 obs['provenance'] = provenance[obs['fixture_id']]
                 for ref in obs['provenance']: refs[ref['path']] = ref
             row['statistical_observations'][side] = observations
+        # Reuse the established coverage/readiness formulas and evidence schema.
+        # The independently built observations retain their raw-source provenance.
+        formatted = {**{k:None for k in ('country','league','gender','region','region_priority')},**target}
+        evaluated = evaluate_fixture(formatted,histories,combined_details,{}, {},cutoff,history,
+                                     detail_requested_ids=detail_requested)
+        row.update({k:v for k,v in evaluated.items() if k!='statistical_observations'})
         if any(row['statistical_observations'].values()): row['data_state'] = 'HISTORY_OBSERVED_COVERAGE_PARTIAL'
         matches.append(row)
-    return {'schema_version': '1.1-tactical-cache-preselection', 'generated_at_utc': cutoff.isoformat(),
+    return {'schema_version': '1.3-preselection', 'bridge_version':'1.1-tactical-cache',
+            'generated_at_utc': cutoff.isoformat(),
             'source_filter_sha256': t.sha(fixtures_path), 'source': str(fixtures_path.resolve()),
             'matches': matches, 'cache_sources': list(refs.values()), 'api_calls': 0,
             'audit': {'rejected': audit, 'cache_rejections': cache.rejected},
