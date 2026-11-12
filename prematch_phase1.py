@@ -280,6 +280,10 @@ class Phase1ApiClient:
                 continue
             try:
                 document = json.loads(path.read_text(encoding="utf-8"))
+                context_fetched = None
+                if source == 'legacy_generate_context':
+                    from prematch_cache_record import unpack_record
+                    document, context_fetched = unpack_record(document)
                 if not isinstance(document, dict) or not isinstance(document.get("response"), list):
                     raise ValueError("LEGACY_RESPONSE_NOT_LIST")
                 if source == "legacy_generate_context":
@@ -288,7 +292,7 @@ class Phase1ApiClient:
                     if document.get("errors"):
                         raise ValueError("LEGACY_API_ERRORS")
                     raw = document
-                    fetched = datetime.fromtimestamp(path.stat().st_mtime, UTC)
+                    fetched = context_fetched
                 else:
                     raw = {"response": document["response"], "paging": {"current": 1, "total": 1}}
                     fetched = parse_dt(document.get("retrieved_at_utc"))

@@ -19,6 +19,7 @@ env/
 outputs/
 *.txt
 !requirements.txt
+!instructions/analysis_instructions.txt
 *.log
 
 # macOS

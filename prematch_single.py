@@ -129,8 +129,9 @@ def validate_selected(selected: dict, decision: dict):
 
 def load_context(args):
     root=args.root.expanduser().resolve()
-    selected_path=(root/args.selected).resolve()
-    decision_path=(root/args.decision).resolve() if args.decision else selected_path.parent/'selection_decision.json'
+    from prematch_paths import local_reference
+    selected_path=local_reference(root, args.selected)
+    decision_path=local_reference(root, args.decision) if args.decision else selected_path.parent/'selection_decision.json'
     if not selected_path.is_file():raise ValueError(f'Falta selección: {selected_path}')
     if not decision_path.is_file():raise ValueError(f'Falta decisión: {decision_path}; añade --decision')
     selected=read_json(selected_path)
@@ -185,7 +186,9 @@ def match_manifest(ctx, *, check_files=True):
         e=inp.get(kind)
         if not e:continue
         if check_files:
-            path=Path(e['path'])
+            from prematch_paths import local_reference
+            path=local_reference(ctx['root'], e['path'], e.get('sha256'))
+            e['path']=str(path)
             if not path.is_file() or not e.get('sha256') or sha(path)!=e['sha256']:
                 raise ValueError(f'SHA/ruta de manifest.{kind} inválido: {path}')
     ident=inp.get('identity') or {}
@@ -249,24 +252,25 @@ def validate_reuse_odds(ctx, max_age=60):
     expected=ctx['directory']/'inputs'/f'cuotas_bwin_{ctx["event_id"]}.txt'
     if not selected.get('odds_sha256') or not selected.get('odds_txt'):
         raise ValueError('REUSE_ODDS_SELECTION_BINDING_MISSING: regenerar con selector y preflight originales')
-    if Path(selected['odds_txt']).resolve()!=expected.resolve():raise ValueError('REUSE_ODDS_SELECTION_PATH_MISMATCH')
+    from prematch_paths import local_reference
+    if local_reference(ctx['root'],selected['odds_txt'],selected['odds_sha256'])!=expected.resolve():raise ValueError('REUSE_ODDS_SELECTION_PATH_MISMATCH')
     info=snapshot_info(expected,ctx,max_age=max_age)
     header=expected.read_text(encoding='utf-8-sig',errors='replace')[:6000]
     if RE_URL.search(header).group(1).strip()!=ctx['url']:raise ValueError('REUSE_ODDS_SELECTION_URL_MISMATCH')
     if info['sha256']!=selected['odds_sha256']:raise ValueError('REUSE_ODDS_SELECTION_SHA_MISMATCH')
     preflight=selected.get('preflight_path')
     if not preflight or not selected.get('preflight_sha256'):raise ValueError('REUSE_ODDS_PREFLIGHT_BINDING_MISSING')
-    path=Path(preflight)
+    path=local_reference(ctx['root'],preflight,selected['preflight_sha256'])
     if sha(path)!=selected['preflight_sha256']:raise ValueError('REUSE_ODDS_PREFLIGHT_SHA_MISMATCH')
     doc=read_json(path)
     for field, digest in (('source_discovery','source_sha256'),('source_preselection','source_preselection_sha256')):
-        origin=Path(doc.get(field) or '')
+        origin=local_reference(ctx['root'],doc.get(field),doc.get(digest))
         if not origin.is_file() or sha(origin)!=doc.get(digest):raise ValueError('REUSE_ODDS_ORIGINAL_SOURCE_SHA_MISMATCH')
     rows=[r for r in doc.get('matches',[]) if r.get('fixture_id')==ctx['fixture_id'] and str(r.get('bwin_event_id'))==ctx['event_id'] and r.get('bwin_url')==ctx['url']]
     if len(rows)!=1:raise ValueError('REUSE_ODDS_PREFLIGHT_IDENTITY_MISMATCH')
     snapshot=rows[0].get('snapshot') or {}
     if any(rows[0].get(k)!=ctx[k] for k in ('home','away')):raise ValueError('REUSE_ODDS_PREFLIGHT_TEAMS_MISMATCH')
-    if snapshot.get('sha256')!=info['sha256'] or Path(snapshot.get('snapshot_path','')).resolve()!=expected.resolve():
+    if snapshot.get('sha256')!=info['sha256'] or local_reference(ctx['root'],snapshot.get('snapshot_path'),snapshot.get('sha256'))!=expected.resolve():
         raise ValueError('REUSE_ODDS_PREFLIGHT_SNAPSHOT_MISMATCH')
     if dt(rows[0]['kickoff_madrid'],'preflight.kickoff')!=ctx['kickoff']:raise ValueError('REUSE_ODDS_PREFLIGHT_KICKOFF_MISMATCH')
     info['temporal_identity']=validate_temporal_identity_evidence(
@@ -274,9 +278,9 @@ def validate_reuse_odds(ctx, max_age=60):
     return info
 
 
-def _source_path(root, value):
-    path=Path(value or '')
-    return path if path.is_absolute() else root/path
+def _source_path(root, value, digest=None):
+    from prematch_paths import local_reference
+    return local_reference(root, value, digest)
 
 
 def validate_temporal_identity_evidence(ctx, *, max_age_minutes=180, reference_now=None):
@@ -291,12 +295,12 @@ def validate_temporal_identity_evidence(ctx, *, max_age_minutes=180, reference_n
             raise ValueError('TEMPORAL_IDENTITY_WRONG_EVENT: '+key)
     if contract.get('schema_version')!='1.0-phase3-temporal-identity' or contract.get('status')!='BWIN_API_KICKOFF_VERIFIED':
         raise ValueError('TEMPORAL_IDENTITY_CONTRACT_INVALID')
-    preflight=_source_path(ctx['root'],selected.get('preflight_path'))
+    preflight=_source_path(ctx['root'],selected.get('preflight_path'),selected.get('preflight_sha256'))
     if (not preflight.is_file() or sha(preflight)!=selected.get('preflight_sha256') or
             sha(preflight)!=contract.get('preflight_sha256')):
         raise ValueError('TEMPORAL_IDENTITY_PREFLIGHT_SHA_MISMATCH')
     doc=read_json(preflight)
-    discovery=_source_path(ctx['root'],doc.get('source_discovery'))
+    discovery=_source_path(ctx['root'],doc.get('source_discovery'),doc.get('source_sha256'))
     if (not discovery.is_file() or sha(discovery)!=doc.get('source_sha256') or
             sha(discovery)!=contract.get('discovery_sha256')):
         raise ValueError('TEMPORAL_IDENTITY_DISCOVERY_SHA_MISMATCH')

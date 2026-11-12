@@ -28,6 +28,9 @@ def legacy_index(root,wanted):
     for p in sorted((root/'outputs/data/cache').rglob('*.json')):
         try:
             doc=read(p);payload=doc.get('payload',doc)
+            if doc.get('schema') == 'context-acquisition-v1':
+                from prematch_cache_record import unpack_record
+                payload, _ = unpack_record(doc)
             rows=payload.get('response',[])
             if payload.get('errors'):continue
             if not isinstance(rows,list):continue

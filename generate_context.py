@@ -848,22 +848,25 @@ class JSONCache:
         if not path.exists():
             return None
         try:
-            age = time.time() - path.stat().st_mtime
+            from prematch_cache_record import unpack_record
             with path.open("r", encoding="utf-8") as file:
-                data = json.load(file)
+                data, acquired = unpack_record(json.load(file))
+            age = (datetime.now(timezone.utc) - acquired).total_seconds()
         except Exception:
             return None
 
         ttl = self.ttl_for(endpoint, params)
         if isinstance(data, dict) and data.get("response") == []:
             ttl = min(ttl, CACHE_TTL_EMPTY)  # las respuestas vacías caducan rápido
-        return data if age <= ttl else None
+        return data if 0 <= age <= ttl else None
 
     def set(self, endpoint: str, params: dict[str, Any], data: dict[str, Any]) -> None:
         path = self._path(endpoint, params)
         tmp_path = path.with_suffix(f".{threading.get_ident()}.tmp")
+        from prematch_cache_record import acquisition_record
+        self.directory.mkdir(parents=True, exist_ok=True)
         with tmp_path.open("w", encoding="utf-8") as file:
-            json.dump(data, file, ensure_ascii=False, indent=2)
+            json.dump(acquisition_record(data), file, ensure_ascii=False, indent=2)
         tmp_path.replace(path)
 
 

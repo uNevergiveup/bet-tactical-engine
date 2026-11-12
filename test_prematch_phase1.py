@@ -252,7 +252,7 @@ class CacheTests(unittest.TestCase):
         self.assertEqual(result.source, "api")
         self.assertEqual(len(self.calls), 2)
 
-    def test_generate_context_legacy_cache_is_reused_read_only(self):
+    def test_generate_context_acquisition_cache_is_reused_read_only(self):
         params = {"fixture": "44"}
         key = phase1.hashlib.sha256(json.dumps(
             {"endpoint": "fixtures/statistics", "params": params},
@@ -262,7 +262,8 @@ class CacheTests(unittest.TestCase):
         payload = {"get": "fixtures/statistics", "parameters": params, "errors": [],
                    "paging": {"current": 1, "total": 1}, "results": 2,
                    "response": [{"team": {"id": 1}}, {"team": {"id": 2}}]}
-        path.write_text(json.dumps(payload))
+        from prematch_cache_record import acquisition_record
+        path.write_text(json.dumps(acquisition_record(payload, self.clock_value)))
         stamp = self.clock_value.timestamp(); os.utime(path, (stamp, stamp))
         before = path.read_bytes()
         client = phase1.Phase1ApiClient(self.cache, offline=True, clock=self.clock)

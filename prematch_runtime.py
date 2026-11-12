@@ -17,9 +17,12 @@ from market_quality_gate import is_period, is_player_market
 from prematch_opportunity_scanner import match_identity, validate_snapshot
 
 
-def resolve_source(root, raw):
-    path = Path(raw or '__missing__')
-    return path if path.is_absolute() else root / path
+def resolve_source(root, raw, digest=None):
+    from prematch_paths import local_reference
+    try:
+        return local_reference(root, raw, digest)
+    except ValueError as exc:
+        raise trial.TrialError(str(exc)) from exc
 
 
 def stamp():
@@ -77,7 +80,7 @@ def reusable_preparation(root, folder, day, args):
     if eligible_pre & disc_deferred and (not disc_budget or len(eligible_pre-disc_deferred)<min(disc_budget,len(eligible_pre))):
         raise trial.TrialError('DISCOVERY_SCOPE_INCOMPLETE: el presupuesto actual permite evaluar pendientes')
     for batch in pre.get('source_batches',[]):
-        if trial.sha(resolve_source(root,batch['path']))!=batch['sha256'] or trial.sha(resolve_source(root,batch['input']))!=batch['input_sha256']:
+        if trial.sha(resolve_source(root,batch['path'],batch['sha256']))!=batch['sha256'] or trial.sha(resolve_source(root,batch['input'],batch['input_sha256']))!=batch['input_sha256']:
             raise trial.TrialError('ENRICHMENT_BATCH_SHA_MISMATCH')
     pattern = trial.read(base / 'patterns/pattern_engine.json')
     if pattern.get('data_sources', {}).get('preselection_sha256') != trial.sha(prepath):
@@ -95,7 +98,7 @@ def verified_preflight(root, path, fixture, prepath, args):
     if len(matches) != 1:
         raise trial.TrialError('PREFLIGHT_FIXTURE_NOT_UNIQUE')
     match = matches[0]
-    discovery_path = resolve_source(root, doc.get('source_discovery'))
+    discovery_path = resolve_source(root, doc.get('source_discovery'), doc.get('source_sha256'))
     if trial.sha(discovery_path) != doc.get('source_sha256'):
         raise trial.TrialError('DISCOVERY_SHA_MISMATCH')
     discovery = trial.read(discovery_path)

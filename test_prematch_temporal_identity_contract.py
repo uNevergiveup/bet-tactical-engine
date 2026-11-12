@@ -30,7 +30,7 @@ class TemporalIdentityContractTests(unittest.TestCase):
         ctx=copy.deepcopy(self.context())
         original_preflight=Path(ctx['selection']['preflight_path'])
         preflight=json.loads(original_preflight.read_text())
-        original_discovery=single._source_path(ROOT,preflight['source_discovery'])
+        original_discovery=single._source_path(ROOT,preflight['source_discovery'],preflight['source_sha256'])
         discovery=json.loads(original_discovery.read_text())
         discovery_path=folder/'discovery.json';preflight_path=folder/'preflight.json'
         discovery_path.write_text(json.dumps(discovery),encoding='utf-8')
@@ -42,6 +42,7 @@ class TemporalIdentityContractTests(unittest.TestCase):
         selected['preflight_sha256']=single.sha(preflight_path)
         contract['discovery_sha256']=single.sha(discovery_path)
         contract['preflight_sha256']=single.sha(preflight_path)
+        ctx['root']=folder.resolve()
         return ctx,discovery,preflight,discovery_path,preflight_path
 
     def persist(self, ctx, discovery, preflight, discovery_path, preflight_path):

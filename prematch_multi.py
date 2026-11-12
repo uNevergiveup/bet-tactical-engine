@@ -79,6 +79,10 @@ def load_manifest(root: Path, event: str) -> dict:
     obj = json.loads(path.read_text(encoding='utf-8'))
     if obj.get('event_id') != event or identifier(obj.get('url', '')) != event:
         raise ValueError(f'Manifiesto del evento {event} inconsistente')
+    from prematch_paths import local_reference
+    for entry in (obj.get('inputs') or {}).values():
+        if isinstance(entry, dict) and entry.get('path'):
+            entry['path'] = str(local_reference(root, entry['path'], entry.get('sha256')))
     return obj
 
 

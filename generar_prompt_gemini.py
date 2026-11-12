@@ -2,7 +2,7 @@
 """Genera un mensaje corto para una Gem con instrucciones PREMATCH V5.0 precargadas.
 
 Uso:
- python generar_prompt_gemini.py --selected outputs/latest/selected_match.json
+ python generar_prompt_gemini.py --selected outputs/matches/<event_id>/selection/<run>/selected_match.json
 """
 import argparse
 import json
@@ -15,7 +15,8 @@ MADRID = ZoneInfo('Europe/Madrid')
 
 
 def generar(selected_path: Path, output_dir: Path | None = None) -> Path:
-    selected_path = selected_path.expanduser().resolve(strict=True)
+    from prematch_paths import explicit_selection
+    selected_path = explicit_selection(selected_path)
     with selected_path.open(encoding='utf-8') as f:
         data = json.load(f)
     eid = str(data.get('bwin_event_id') or '').strip()

@@ -319,7 +319,7 @@ def main(argv=None):
     b=sub.add_parser('bridge');b.add_argument('--handoff',type=Path,required=True);b.add_argument('--output-dir',type=Path)
     b.add_argument('--historical',action='store_true');b.add_argument('--asof')
     for name in ('research-kit','analysis-input','final-review'):
-        p=sub.add_parser(name);p.add_argument('--selected',type=Path,default=Path('outputs/latest/selected_match.json'))
+        p=sub.add_parser(name);p.add_argument('--selected',type=Path,required=True)
         if name=='final-review':
             p.add_argument('--analysis',type=Path,required=True);p.add_argument('--market');p.add_argument('--selection');p.add_argument('--odd',type=float)
     sub.add_parser('freeze')
