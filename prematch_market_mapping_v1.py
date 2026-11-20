@@ -224,9 +224,17 @@ def _compatible(row, pattern):
         if not (re.search(female, norm(owner)) and re.search(female, team)):
             return False
         from generate_context import team_name_similarity
-        if ((team_name_similarity(owner, pattern.get('team'), 'female') != 100 and not exact_owner_alias(owner,pattern.get('team')))
-                or team_name_similarity(owner, pattern.get('opponent'), 'female') == 100):
-            return False
+        from bwin_discovery import resolve_verified_team_side
+        alias_side = resolve_verified_team_side(
+            owner,
+            {'home': pattern.get('team'), 'away': pattern.get('opponent')},
+        )
+        if alias_side != 'home':
+            if (
+                (team_name_similarity(owner, pattern.get('team'), 'female') != 100 and not exact_owner_alias(owner, pattern.get('team')))
+                or team_name_similarity(owner, pattern.get('opponent'), 'female') == 100
+            ):
+                return False
     # Direct team lines only: totals without a team and player props are not
     # silently promoted to a team market.
     if 'jugador' in market or 'goleador' in market or 'player' in market:

@@ -104,7 +104,8 @@ def temporal_identity_contract(preflight_match, discovery, discovery_sha, prefli
         'bwin_kickoff_madrid':(evidence.get('bwin_visible_kickoff_madrid') or
                                 evidence.get('bwin_inferred_kickoff_madrid') or
                                 preflight_match.get('kickoff_madrid')),
-        'api_kickoff_madrid':evidence.get('api_kickoff_madrid'),
+        'api_kickoff_madrid':(evidence.get('api_kickoff_madrid') or
+                              preflight_match.get('kickoff_madrid')),
         'difference_minutes':evidence.get('difference_minutes'),
         'catalog_text':evidence.get('catalog_text'),
         'discovery_sha256':discovery_sha,
@@ -121,7 +122,7 @@ def scan_preflights(paths, folder):
     return [(p,read_json(p)) for p in unique]
 
 
-def audit_preflight_match(m,preflight,disc,preselect,discovery_sha,preselect_sha,now,age_minutes,min_candidate_odd=Decimal("1.20")):
+def audit_preflight_match(m,preflight,disc,preselect,discovery_sha,preselect_sha,now,age_minutes,min_candidate_odd=Decimal("1.20"),exploration=False):
     reasons=[]
     if m.get('_snapshot_reference_error'):
         reasons.extend(['SNAPSHOT_SHA_MISMATCH', m['_snapshot_reference_error']])
@@ -133,7 +134,13 @@ def audit_preflight_match(m,preflight,disc,preselect,discovery_sha,preselect_sha
     if m.get('home')!=preselect.get('home') or m.get('away')!=preselect.get('away'):reasons.append('TEAM_MISMATCH')
     if m.get('kickoff_madrid')!=preselect.get('kickoff_madrid'):reasons.append('KICKOFF_TEXT_MISMATCH')
     if m.get('status') not in VALID_PREFLIGHT:reasons.append('PREFLIGHT_STATUS_NOT_VALID')
-    if not event_time_ok(m):reasons.append('TIME_NOT_CORROBORATED')
+    if not exploration:
+        if disc.get('gender')=='UNKNOWN':reasons.append('CATEGORY_UNKNOWN_FINAL_VERIFICATION_PENDING')
+        if disc.get('inspection',{}):
+            category=disc['inspection'].get('page_category_compatibility')
+            if category in {'GENDER_CONFLICT','NON_ADULT_CONFLICT'}:reasons.append('CATEGORY_CONFLICT')
+        if disc.get('identity_warnings'):reasons.append('IDENTITY_WARNINGS_REQUIRE_FINAL_REVIEW')
+    if not event_time_ok(m) and not exploration:reasons.append('TIME_NOT_CORROBORATED')
     if (m.get('time_evidence') or {}).get('status') in ('COUNTDOWN_TIME_CORROBORATED', 'ABSOLUTE_TIME_VERIFIED'):
         from bwin_market_preflight import validate_match
         try:
@@ -165,7 +172,7 @@ def audit_preflight_match(m,preflight,disc,preselect,discovery_sha,preselect_sha
     valid_kinds=sorted(k for k,v in kinds.items() if isinstance(v,dict) and (v.get('researchable') or 0)>0)
     total_ready=sum(int(kinds[k].get('researchable') or 0) for k in valid_kinds)
     if total_ready!=int(gate.get('researchable_after_data_gate') or 0):reasons.append('READY_COUNT_MISMATCH')
-    if not valid_kinds:reasons.append('NO_RESEARCHABLE_MARKET_FAMILY')
+    if not valid_kinds and not exploration:reasons.append('NO_RESEARCHABLE_MARKET_FAMILY')
     dt=parse_time(snapshot.get('capture_declared_madrid'))
     kickoff=parse_time(preselect.get('kickoff_madrid'))
     if not dt:reasons.append('NO_SNAPSHOT_CAPTURE_TIMESTAMP')
@@ -185,7 +192,7 @@ def audit_preflight_match(m,preflight,disc,preselect,discovery_sha,preselect_sha
     return sorted(set(reasons)),valid_kinds,age
 
 
-def prepare_rows(preselection,discovery,preflights,now,min_lead,max_snapshot_age,max_discovery_age,min_competitors,min_candidate_odd=Decimal('1.20')):
+def prepare_rows(preselection,discovery,preflights,now,min_lead,max_snapshot_age,max_discovery_age,min_competitors,min_candidate_odd=Decimal('1.20'),exploration=False):
     pref={str(m.get('fixture_id')):m for m in preselection['matches']}
     disc={str(m.get('fixture_id')):m for m in discovery['matches']}
     if len(pref)!=len(preselection['matches']) or len(disc)!=len(discovery['matches']):
@@ -225,8 +232,16 @@ def prepare_rows(preselection,discovery,preflights,now,min_lead,max_snapshot_age
         if not d: continue
         reasons=[]
         if lead<min_lead: reasons.append('INSUFFICIENT_ANALYSIS_TIME')
-        if not s.get('details_checked'): reasons.append('STATISTICAL_DETAIL_NOT_CHECKED')
-        if not valid_discovery_match(d):reasons.append('BWIN_IDENTITY_NOT_ESTABLISHED')
+        if exploration and s.get('data_readiness_score') is None and not any(
+                (s.get(side+'_evidence',{}).get('history',{}).get('completed_total') or 0)>0
+                for side in ('home','away')):
+            reasons.append('INSUFFICIENT_STATISTICAL_COVERAGE')
+        if not s.get('details_checked') and not exploration: reasons.append('STATISTICAL_DETAIL_NOT_CHECKED')
+        if exploration:
+            from bwin_market_preflight import exploration_check
+            checked=exploration_check(d,discovery.get('catalog_observed',[]),now,min_lead,max_discovery_age)
+            reasons.extend(checked['reasons'])
+        elif not valid_discovery_match(d):reasons.append('BWIN_IDENTITY_NOT_ESTABLISHED')
         if len(event_owners.get(str(d.get('bwin_event_id')),set()))>1:reasons.append('BWIN_ID_REUSED_ACROSS_FIXTURES')
         if s.get('home')!=d.get('home') or s.get('away')!=d.get('away'):
             reasons.append('DISCOVERY_TEAM_MISMATCH')
@@ -239,7 +254,7 @@ def prepare_rows(preselection,discovery,preflights,now,min_lead,max_snapshot_age
         if len(unique_event_ids)>1: reasons.append('CONFLICTING_PREFLIGHT_EVENT_IDS')
         candidates=[]
         for path,data,m in found:
-            audit,market_kinds,price_age=audit_preflight_match(m,data,d,s,disc_hash,pre_hash,now,max_snapshot_age,min_candidate_odd)
+            audit,market_kinds,price_age=audit_preflight_match(m,data,d,s,disc_hash,pre_hash,now,max_snapshot_age,min_candidate_odd,exploration)
             cap=parse_time((m.get('snapshot') or {}).get('capture_declared_madrid'))
             candidates.append((len(audit), -(cap.timestamp() if cap else -1e20),str(path),audit,market_kinds,price_age,m))
         candidates.sort(key=lambda x:(x[0],x[1],x[2]))
@@ -262,6 +277,8 @@ def prepare_rows(preselection,discovery,preflights,now,min_lead,max_snapshot_age
         stability=score_100(s.get('stability_score'))
         final_score=round(.35*priority+.25*readiness+.15*stability+.25*kind_score,3)
         rows.append({'fixture_id':int(fid),'home':s.get('home'),'away':s.get('away'),
+            'home_api_id':s.get('home_id'),'away_api_id':s.get('away_id'),
+            'league_id':s.get('league_id'),'season':s.get('season'),'gender':s.get('gender'),
             'league':s.get('league'),'kickoff_madrid':s.get('kickoff_madrid'),
             'bwin_event_id':d.get('bwin_event_id'),'bwin_url':d.get('bwin_url'),
             'lead_minutes':round(lead,1),'research_priority_score':priority,
@@ -296,6 +313,8 @@ def prepare_rows(preselection,discovery,preflights,now,min_lead,max_snapshot_age
 def export(output_dir,status,winner,rows,meta,preselection,discovery,now,args):
     output_dir.mkdir(parents=True,exist_ok=True)
     selected_path=output_dir/'selected_match.json'
+    if selected_path.exists() and getattr(args,'research_only',False):
+        raise ValueError('OPERATIONAL_SELECTION_EXISTS_USE_NEW_RESEARCH_OUTPUT')
     if selected_path.exists(): selected_path.unlink()  # No dejar una selección anterior engañosa
     decision={'schema_version':VERSION,'asof_madrid':now.astimezone(MADRID).isoformat(),
         'status':status,'method':'DATA_READINESS_AND_MARKET_DIVERSITY_NO_EV_NO_PREDICTION',
@@ -314,8 +333,9 @@ def export(output_dir,status,winner,rows,meta,preselection,discovery,now,args):
                    'Cuotas históricas pueden haber cambiado; se deben recapturar cerca del kickoff.',
                    'Las familias de mercado no sustituyen análisis de XI, árbitro o táctica.']}
     (output_dir/'selection_decision.json').write_text(json.dumps(decision,ensure_ascii=False,indent=2)+'\n',encoding='utf-8')
-    if status=='SELECTED' and args.asof is None:
+    if status=='SELECTED' and args.asof is None and not getattr(args,'research_only',False):
         selection={'schema_version':'1.0-selected-single-fixture','status':'SELECTED_FOR_DEEP_RESEARCH',
+            **{k:winner.get(k) for k in ('home_api_id','away_api_id','league_id','season','gender')},
             'fixture_id':winner['fixture_id'],'bwin_event_id':winner['bwin_event_id'],
             'bwin_url':winner['bwin_url'],'home':winner['home'],'away':winner['away'],
             'kickoff_madrid':winner['kickoff_madrid'],'selection_asof_madrid':now.astimezone(MADRID).isoformat(),
@@ -331,7 +351,7 @@ def export(output_dir,status,winner,rows,meta,preselection,discovery,now,args):
     fields=['fixture_id','home','away','league','kickoff_madrid','bwin_event_id','lead_minutes',
        'research_priority_score','data_readiness_score','stability_score','score','status',
        'market_families_ready','researchable_selections','captured_selections','price_eligible_selections',
-       'price_snapshot_age_minutes','block_reasons','preflight_path']
+       'price_snapshot_age_minutes','block_reasons','preflight_path','capture_status','model_status']
     with (output_dir/'selection_ranking.csv').open('w',encoding='utf-8-sig',newline='') as fh:
         writer=csv.DictWriter(fh,fieldnames=fields);writer.writeheader()
         for r in rows:
@@ -405,6 +425,8 @@ def main(argv=None):
     parser.add_argument('--discovery',type=Path,required=True)
     parser.add_argument('--preflight',type=Path,action='append',default=[],help='market_preflight.json, repetible')
     parser.add_argument('--preflight-dir',type=Path,help='Busca market_preflight.json en subcarpetas')
+    parser.add_argument('--research-only',action='store_true',help='Selecciona para investigación; nunca emite selected_match operativo')
+    parser.add_argument('--scanner',type=Path,help='Resultado del cruce completo; obligatorio con --research-only')
     parser.add_argument('--output-dir',type=Path,default=Path('outputs/discovery/single_match_selection'))
     parser.add_argument('--asof',type=str,default=None,help='Fecha ISO con offset, para reproducir una auditoría')
     parser.add_argument('--min-lead-minutes',type=int,default=45)
@@ -417,6 +439,8 @@ def main(argv=None):
     parser.add_argument('--root',type=Path,default=Path.cwd())
     parser.add_argument('--scraper-timeout-seconds',type=int,default=240)
     args=parser.parse_args(argv)
+    if args.research_only and (not args.scanner or args.auto_preflight_missing):
+        parser.error('--research-only exige --scanner y no permite adquisiciones')
     now=parse_time(args.asof) if args.asof else datetime.now(timezone.utc)
     if not now:parser.error('--asof exige ISO 8601 con offset, por ejemplo 2026-11-01T19:00:00+01:00')
     try:
@@ -441,10 +465,66 @@ def main(argv=None):
         all_reports=scan_preflights([*args.preflight,*new],args.preflight_dir)
         args.preflight_files_resolved=[p for p,_ in all_reports]
         status,winner,rows,meta=prepare_rows(preselection,discovery,all_reports,now,
-            args.min_lead_minutes,args.max_snapshot_age_minutes,args.max_discovery_age_minutes,args.min_comparable_matches,args.min_candidate_odd)
+            args.min_lead_minutes,args.max_snapshot_age_minutes,args.max_discovery_age_minutes,args.min_comparable_matches,args.min_candidate_odd,args.research_only)
+        if args.research_only:
+            scan=read_json(args.scanner)
+            if scan.get('sources',{}).get('preselection_sha256')!=sha256(args.preselection):
+                raise ValueError('SCANNER_STATISTICS_CHANGED')
+            audited={str(a['fixture_id']):a for a in scan.get('audits',[])}
+            planned=set();finished=set();pending=set();capture_states={};retryable=[]
+            scanned_refs={str(Path(p).resolve()):digest for p,digest in
+                          scan.get('sources',{}).get('preflight_sha256',{}).items()}
+            for path,report in all_reports:
+                if scanned_refs.get(str(path.resolve()))!=sha256(path):
+                    raise ValueError('SCANNER_PREFLIGHT_CHANGED_OR_NOT_ANALYZED')
+                for m in report.get('matches',[]):
+                    fid=str(m['fixture_id']);planned.add(fid)
+                    capture_states[fid]=m['status']
+                    if m['status']=='NOT_EVALUATED_BUDGET':
+                        pending.add(fid)
+                    else:finished.add(fid)
+                    if m['status'] in {'SCRAPER_FAILED_OR_UNVERIFIED','SCRAPER_OUTPUT_INVALID'}:retryable.append(fid)
+            # Every candidate in the current discovery must have an explicit
+            # terminal result. A --top cut cannot masquerade as full comparison.
+            expected={str(m['fixture_id']) for m in discovery['matches']}
+            pending|=expected-planned
+            budget_exhausted=any(r.get('status')=='BLOCKED_BY_REQUEST_RESERVE'
+                                 for r in preselection.get('api_request_ledger',[]))
+            for row in rows:
+                fid=str(row['fixture_id']);a=audited.get(fid,{})
+                capture_state=capture_states.get(fid,'NOT_EVALUATED')
+                row['capture_status']=capture_state
+                row['model_status']='PENDING_CALIBRATED_MODEL'
+                if capture_state in {'NOT_EVALUATED','NOT_EVALUATED_BUDGET'}:
+                    row['status']='NOT_EVALUATED';row['block_reasons']=[capture_state]
+                elif capture_state in {'SCRAPER_FAILED_OR_UNVERIFIED','SCRAPER_OUTPUT_INVALID'}:
+                    row['status']='CAPTURE_FAILED_RETRYABLE';row['block_reasons']=[capture_state]
+                elif not row.get('bwin_event_id'):
+                    row['status']='IDENTITY_PENDING';row['block_reasons']=['NO_EVENT_OBSERVED_IN_SCANNED_SCOPE']
+                if row['status']=='QUALIFIED_FOR_COMPARISON' and a.get('status') not in {'VERIFIED','RESEARCH_ONLY'}:
+                    row['status']='PENDING_COMMERCIAL_ANALYSIS';row['block_reasons'].append('SCANNER_NOT_COMPLETED')
+            qualified=[r for r in rows if r['status']=='QUALIFIED_FOR_COMPARISON']
+            meta.update(planned=len(expected),completed=len(finished),pending_fixture_ids=sorted(pending),
+                        retryable_capture_failures=retryable,
+                        qualified_matches=len(qualified),statistics_budget_exhausted=budget_exhausted,
+                        comparison_complete=not pending and not budget_exhausted)
+            status='INCOMPLETE_COMPARISON' if pending or budget_exhausted else 'SELECTED' if qualified else 'NO_SELECTION'
+            winner=qualified[0] if qualified and meta['comparison_complete'] else None
         if args.asof and status=='SELECTED':
             status='HISTORICAL_REPLAY_SELECTED_NOT_ACTIONABLE'
         export(args.output_dir,status,winner,rows,meta,preselection,discovery,now,args)
+        if args.research_only:
+            _,_,strict_rows,_=prepare_rows(preselection,discovery,all_reports,now,
+                args.min_lead_minutes,args.max_snapshot_age_minutes,args.max_discovery_age_minutes,1,args.min_candidate_odd)
+            strict={r['fixture_id']:r for r in strict_rows}
+            packet={'schema_version':'1.0-research-selection','status':status,'actionable_bet':False,
+                    'comparison':meta,'selected':winner,'final_validation_pending':True,
+                    'final_validation_reasons':strict.get(winner['fixture_id'],{}).get('block_reasons',[]) if winner else [],
+                    'sources':{'preselection':{'path':str(args.preselection),'sha256':sha256(args.preselection)},
+                               'discovery':{'path':str(args.discovery),'sha256':sha256(args.discovery)},
+                               'scanner':{'path':str(args.scanner.resolve()),'sha256':sha256(args.scanner)}}}
+            packet['sources']['preflights']=[{'path':str(p),'sha256':sha256(p)} for p,_ in all_reports]
+            (args.output_dir/'research_selection.json').write_text(json.dumps(packet,ensure_ascii=False,indent=2)+'\n')
     except (ValueError,KeyError,OSError,subprocess.TimeoutExpired) as exc:
         parser.error(str(exc))
     print(f'Estado: {status} | comparables={meta["qualified_matches"]}/{meta["minimum_comparable_matches"]}',flush=True)
@@ -454,7 +534,7 @@ def main(argv=None):
     elif status.startswith('PROVISIONAL'):print('PROVISIONAL: no se emite selected_match.json hasta comparar suficientes partidos',flush=True)
     else:print('SIN SELECCIÓN: no se emite selected_match.json',flush=True)
     print(f'Salida: {args.output_dir / "selection_decision.json"} | {args.output_dir / "selection_ranking.md"}',flush=True)
-    return 0 if status=='SELECTED' else 3
+    return 0 if args.research_only or status=='SELECTED' else 3
 
 
 if __name__=='__main__':

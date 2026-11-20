@@ -65,10 +65,51 @@ VERSION = "V5.7-MICRO"
 API_USER_AGENT = f"AnalistaBet-API-Football-{VERSION}"
 GET_DEEP_HISTORY = True
 MICRO_HISTORY_LIMIT = 6
-DEEP_HISTORY_LIMIT = MICRO_HISTORY_LIMIT
+DEEP_HISTORY_LIMIT = 20
+DEEP_HISTORY_DETAIL_LIMIT = MICRO_HISTORY_LIMIT
+VALID_DEEP_HISTORY_WINDOWS = (6, 10, 20)
 MICRO_RECENT_WINDOW = 3
 MICRO_CONTEXT_WINDOW = 6
 MICRO_HISTORY_WINDOWS = (MICRO_RECENT_WINDOW, MICRO_CONTEXT_WINDOW)
+
+
+def resolve_deep_history_limit(
+    explicit: int | None = None,
+    *,
+    default: int | None = None,
+) -> int:
+    """Resuelve profundidad histórica para modelado (20 por defecto; 6 o 10 por activación explícita)."""
+    fallback = DEEP_HISTORY_LIMIT if default is None else int(default)
+    if explicit is not None:
+        val = int(explicit)
+    else:
+        raw_env = os.getenv("PREMATCH_DEEP_HISTORY_LIMIT", "").strip()
+        val = int(raw_env) if raw_env else fallback
+    if val < 4 or val > 20:
+        raise ValueError(f"INVALID_DEEP_HISTORY_LIMIT:{val} (rango permitido 4..20)")
+    return val
+
+
+def resolve_deep_history_detail_limit(
+    explicit: int | None = None,
+    *,
+    history_limit: int,
+    default: int | None = DEEP_HISTORY_DETAIL_LIMIT,
+) -> int | None:
+    """Límite de fixtures con /fixtures?ids=... (6 por defecto para microdetalle; hasta history_limit explícito)."""
+    if explicit is not None:
+        val = int(explicit)
+    else:
+        raw_env = os.getenv("PREMATCH_DEEP_HISTORY_DETAIL_LIMIT", "").strip()
+        if raw_env:
+            val = int(raw_env)
+        elif default is None:
+            return None
+        else:
+            val = int(default)
+    if val < 0:
+        raise ValueError(f"INVALID_DEEP_HISTORY_DETAIL_LIMIT:{val}")
+    return min(int(history_limit), val)
 FIXTURE_IDS_BATCH_SIZE = 20
 COMPLETED_STATUSES = {"FT", "AET", "PEN"}
 FUTURE_STATUSES = {"NS", "TBD", "PST", "SUSP"}

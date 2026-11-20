@@ -1,0 +1,51 @@
+{
+  "schema_version": "2B.4-cand-manifest-v1",
+  "phase": "2B.4",
+  "candidate_key": "CAND_2B3B_V1",
+  "candidate_version": "CoherentMatchModeler_cand_2b3b_v1",
+  "baseline_key": "B0_baseline",
+  "baseline_version": "CoherentMatchModeler_baseline_2.0_2.1A",
+  "experimental_only": true,
+  "production_calibrated_out_of_sample": false,
+  "auto_promotion_disabled": true,
+  "corpus_cutoff_utc": "2026-11-14T19:45:00+00:00",
+  "spec_params": {
+    "version": "CoherentMatchModeler_cand_2b3b_v1",
+    "spec_id": "INT_B3_A6a_kish_k8_C4",
+    "metric": "goals",
+    "history_limit": 20,
+    "shrink_k": 8.0,
+    "use_kish_neff": true,
+    "venue_mode": "shrunk_anchor_50",
+    "venue_blend": 0.5,
+    "venue_k": 4.0,
+    "recency_l6_weight": 0.35,
+    "recency_l20_weight": 0.65,
+    "own_attack_weight": 0.55,
+    "opp_defense_weight": 0.45,
+    "shared_h2h_discount": 0.5,
+    "red_card_policy": "exclude_any",
+    "strict_competition_identity": true,
+    "rho": -0.04,
+    "max_goals": 12,
+    "experimental_only": true,
+    "bet_authorization_allowed": false
+  },
+  "spec_params_sha256": "41aba3689331527f213a05c9c6a7e015658b45e750b92183bedae9120c5954cd",
+  "code_hashes": {
+    "bet_engine/modeling/distributions.py": "3f690ae1493a30df63fc20301db133af0449935857f82d6b10b3febbf8c68b26",
+    "bet_engine/modeling/prospective_cand_2b3b.py": "d6df5d708ca7dbaa21cbf37faec14fa7866e0694ed38535d7e3da4ec18d29a07",
+    "bet_engine/modeling/prospective_registry.py": "0701287568209ea1341f41193286ff93f66086f14b5a610e9d508fc55572cdbb",
+    "bet_engine/modeling/__init__.py": "c260cf2aee055136101a290b881fbf60af552319dc5e1cde31a8c73e183e9ed4",
+    "bet_engine/context/observation_store.py": "2f0236243e74f160fae604d5e5e2f09257e4c39aa65807fad13dbef4ae143c79",
+    "bet_engine/orchestration/shadow_pipeline.py": "26cb001bd24574d7ea0d9c2a3f742a3217cb8bd8bc9c0dc813aea4cf616ac0e9",
+    "bet_engine/orchestration/adapters.py": "5c851286c908271057cba1b06b3014d9a28a1b40642b04c5ae49deaa97ac3044",
+    "tools/prospective_tracker.py": "b2bcec73389fed7d70de8bd83b32321d32328b7640f7da5d914149fbe45e16cb"
+  },
+  "artifact_hashes": {
+    "audit/fase2b_experimentos/resultados_2b3b.json": "c906ecc0798c0ebb76843158361cd514c1c4142e0ee04b01e0671d11dddcad79",
+    "audit/fase2b_experimentos/especificacion_candidata.md": "bb1c6aaea8d65d06d6b82d7168287c2bea11fdf82990aeefcd3351e1de65cd14",
+    "audit/fase2b_experimentos/protocolo_validacion_prospectiva.md": "3ad6e607730208e1ae1308be6280ac6b8b6754c0f95f946092d17ad508f9f560",
+    "audit/fase2b_backtesting/MANIFEST_MODELOS_CONGELADOS_V2_2B2A.json": "9e7eb6806a85361e7ed2a36d6904289751ed6dd32431717190a199d4a7298606"
+  }
+}

@@ -1,0 +1,2925 @@
+# CAMBIOS P0 (Iteracion 1 + Iteracion 1.1)
+# Rama: refactor/etapa2-fundamentos
+# HEAD: 7390981d8da690e34eb96a1dbf944d9e67546708
+# Nota: El arbol de trabajo ya contenia modificaciones y archivos untracked previos a la Iteracion 1.
+# Este fichero recoge el git diff de los archivos trackeados modificados en P0 mas las secciones modificadas en los archivos untracked (bet_engine/orchestration/adapters.py, prematch_case.py, test/test_p0_temporal_and_shadow_sync.py).
+
+diff --git a/bwin_market_preflight.py b/bwin_market_preflight.py
+index 100704d2..2109ad85 100644
+--- a/bwin_market_preflight.py
++++ b/bwin_market_preflight.py
+@@ -30,6 +30,7 @@ VERSION = '0.3.1-market-preflight-time-evidence'
+ ID_RE = re.compile(r'(?:-2:|:)(\d{5,12})$')
+ CATALOG_TIME_RE = re.compile(r'\b(hoy|ma(?:ñ|n)ana)\s*/\s*(\d{1,2}):(\d{2})\b', re.I)
+ CATALOG_ABS_RE = re.compile(r'\b(\d{1,2})/(\d{1,2})/(\d{2,4})\s+(\d{1,2}):(\d{2})\b')
++CATALOG_COUNTDOWN_RE = re.compile(r'\b(?:comienza|empieza)\s+en\s+(?:(?P<h>\d{1,2})\s*h(?:oras?)?\s*)?(?P<m>\d{1,3})\s*min(?:utos?)?\b', re.I)
+ LIVE_RE = re.compile(r'(?i)\blive(?:1t|2t|descanso|parado)?\b|\ben\s+vivo\b|\bdescanso\b|\b\d\s*[tT]\s*[•:]')
+ MARKET_LABEL_RE = re.compile(r'^\s*(?:mercado|market)\s*:\s*(.+?)\s*$', re.I)
+ SELECTION_LABEL_RE = re.compile(r'^\s*(?:selecci[oó]n|selection)\s*:\s*(.+?)\s*$', re.I)
+@@ -96,9 +97,18 @@ def time_evidence(match, catalog, *, tolerance_minutes=3):
+                 if y<100:y+=2000
+                 try: start=datetime(y,mon,day,h,mn,tzinfo=MADRID); method='BWIN_VISIBLE_DATED_TIME'
+                 except ValueError:pass
++        if start is None:
++            cd=CATALOG_COUNTDOWN_RE.search(raw)
++            if cd and item.get('browser_timezone', 'Europe/Madrid') == 'Europe/Madrid':
++                cd_mins = int(cd.group('h') or 0) * 60 + int(cd.group('m'))
++                if 0 < cd_mins <= 180:
++                    start = observation.astimezone(MADRID) + timedelta(minutes=cd_mins)
++                    method = 'BWIN_EVENT_COUNTDOWN_MINUTES'
+         if start is not None:
+             diff=abs((start-kickoff).total_seconds())/60
+-            candidates.append((diff,{'status':'DISPLAY_TIME_CORROBORATED' if diff<=tolerance_minutes else 'DISPLAY_TIME_CONFLICT',
++            eff_tol = 4 if method == 'BWIN_EVENT_COUNTDOWN_MINUTES' else tolerance_minutes
++            ok_status = 'COUNTDOWN_TIME_CORROBORATED' if method == 'BWIN_EVENT_COUNTDOWN_MINUTES' else 'DISPLAY_TIME_CORROBORATED'
++            candidates.append((diff,{'status':ok_status if diff<=eff_tol else 'DISPLAY_TIME_CONFLICT',
+                                      'source':method,'observed_at_utc':observation.astimezone(timezone.utc).isoformat(),
+                                      'bwin_visible_kickoff_madrid':start.isoformat(),
+                                      'api_kickoff_madrid':kickoff.astimezone(MADRID).isoformat(),
+@@ -176,7 +186,81 @@ def select_matches(data, fixture_ids, top):
+         return [byid[f] for f in dict.fromkeys(fixture_ids)]
+     found=[x for x in rows if x.get('bwin_event_id') and x.get('bwin_url')]
+     found.sort(key=lambda x:(-(float(x.get('research_priority_score') or 0)),int(x.get('fixture_id') or 0)))
+-    return found[:top]
++    return found[:top] if top else list(rows)
++
++
++def exploration_check(m, catalog, now, min_lead, max_age):
++    """Research admission only. Never upgrades the strict identity evidence."""
++    from bwin_discovery import match_catalog, catalog_relative_kickoff, category_compatibility
++    checked=validate_match(m,catalog,now,min_lead,max_age)
++    strict_reasons=list(checked['reasons'])
++    checked.update(validation_level='EXPLORATION',final_validation_reasons=strict_reasons,
++                   final_validation_pending=bool(strict_reasons),actionable_bet=False)
++    candidates=[row for row in catalog if str(row.get('bwin_event_id'))==str(m.get('bwin_event_id'))]
++    # Reapply the existing team/order/category matcher to the actual observed
++    # event. A manual confirmation is provenance, not a bypass of this gate.
++    possible=match_catalog(m,candidates)
++    hard=[r for r in strict_reasons if r in {
++        'EVENT_ID_AND_URL_MISMATCH','INSPECTED_EVENT_ID_MISMATCH','BWIN_EVENT_LIVE',
++        'INVALID_TIMEZONE_AWARE_KICKOFF','ALREADY_STARTED_OR_INSUFFICIENT_PREMATCH_MARGIN',
++        'BWIN_API_KICKOFF_CONFLICT','CATALOG_TIMESTAMP_FROM_FUTURE','DISCOVERY_SNAPSHOT_TOO_OLD'}]
++    if len(possible)!=1 or possible[0]['name_score']<.94:hard.append('TEAM_IDENTITY_NOT_CORROBORATED')
++    if m.get('candidates_found',1)>1:hard.append('AMBIGUOUS_EVENT_IDENTITY')
++    inspection=m.get('inspection') or {}
++    if inspection.get('identity_status') in {'TITLE_MISMATCH_REVIEW','EVENT_ID_CHANGED_REVIEW',
++        'KICKOFF_MISMATCH_REVIEW','CONFLICTING_TIME_SOURCES_REVIEW','KICKOFF_COUNTDOWN_MISMATCH_REVIEW',
++        'CATEGORY_CONFLICT','COMPETITION_CONFLICT'}:
++        hard.append(inspection['identity_status'])
++    if m.get('competition_compatibility')=='COMPETITION_CONFLICT':hard.append('COMPETITION_CONFLICT')
++    page_category=category_compatibility(m,inspection.get('page_title') or '')
++    if page_category in {'GENDER_CONFLICT','NON_ADULT_CONFLICT'}:hard.append('CATEGORY_CONFLICT')
++    kickoff=isodt(m.get('kickoff_madrid'))
++    event_time=isodt(inspection.get('event_start_machine_readable'))
++    if not event_time and len(candidates)==1:event_time=catalog_relative_kickoff(candidates[0])
++    if event_time and kickoff and abs((event_time-kickoff).total_seconds())>15*60:
++        hard.append('BWIN_API_KICKOFF_CONFLICT')
++    warnings=[]
++    if any(r in strict_reasons for r in ('KICKOFF_NOT_CORROBORATED','NO_TIMESTAMPED_CATALOG_EVIDENCE')):
++        warnings.append('TIME_UNCONFIRMED')
++    if not m.get('gender') or m.get('gender')=='UNKNOWN' or not m.get('category_evidence_status'):
++        warnings.append('CATEGORY_UNKNOWN')
++    if not m.get('competition_similarity') or m.get('competition_similarity',0)<.82:
++        warnings.append('COMPETITION_UNCONFIRMED')
++    checked['final_validation_pending']=bool(strict_reasons or warnings)
++    checked['final_validation_reasons']=sorted(set(strict_reasons+warnings))
++    if m.get('manual_identity_review',{}).get('decision')=='REJECT':hard.append('MANUAL_IDENTITY_REJECTED')
++    checked.update(reasons=sorted(set(hard)),warnings=warnings,
++                   status='BLOCKED' if hard else 'READY_FOR_SCRAPER')
++    return checked
++
++
++def reviewed_discovery(data, path, source_sha256):
++    """Apply auditable user decisions to a copy, preserving the source snapshot."""
++    import copy
++    doc=copy.deepcopy(data);review=json.loads(path.read_text(encoding='utf-8'))
++    if review.get('source_discovery_sha256')!=source_sha256:
++        raise ValueError('MANUAL_REVIEW_SOURCE_CONTENT_MISMATCH')
++    seen=set()
++    for decision in review.get('decisions',[]):
++        fid=decision['fixture_id']
++        if fid in seen:raise ValueError('DUPLICATE_MANUAL_DECISION')
++        seen.add(fid)
++        if (decision.get('decision') not in {'CONFIRM','CORRECT','REJECT'} or
++            not decision.get('reviewer') or not decision.get('evidence') or not isodt(decision.get('reviewed_at'))):
++            raise ValueError('MANUAL_REVIEW_REQUIRES_REVIEWER_TIME_AND_EVIDENCE')
++        matches=[m for m in doc['matches'] if m['fixture_id']==fid]
++        if len(matches)!=1:raise ValueError('MANUAL_FIXTURE_NOT_UNIQUE')
++        m=matches[0]
++        m['manual_identity_review']=decision
++        if decision['decision']=='CORRECT':
++            event=decision['event']
++            if published_event_id(event.get('bwin_url'))!=str(event.get('bwin_event_id')):
++                raise ValueError('MANUAL_EVENT_ID_URL_CONFLICT')
++            m.update(bwin_event_id=str(event['bwin_event_id']),bwin_url=event['bwin_url'],
++                     status='POSSIBLE_EVENT_FOUND',identity_status='NOT_VERIFIED',inspection=None,candidates_found=1)
++            doc['catalog_observed']=[e for e in doc.get('catalog_observed',[])
++                                      if str(e.get('bwin_event_id'))!=str(event['bwin_event_id'])]+[event]
++    return doc
+ 
+ def validate_match(m, catalog, now, min_lead, max_age):
+     info={'fixture_id':m.get('fixture_id'),'home':m.get('home'),'away':m.get('away'),
+@@ -367,41 +451,80 @@ def snapshot_odds(path,eid):
+             'warnings':warnings,'status':status,
+             '_parsed_selection_rows':rows}
+ 
+-def run_scraper(root,out,eid,url,refresh=False,immutable=False):
+-    if refresh:
+-        # Capture in a new directory first. A failed scrape never replaces the
+-        # canonical snapshot; every previous byte remains recoverable by SHA.
+-        canonical=root/'outputs'/'matches'/eid/'inputs'/f'cuotas_bwin_{eid}.txt'
++def run_scraper(root,out,eid,url,refresh=False,immutable=False,timeout_seconds=240,scraper_attempts=1):
++    root=Path(root).resolve();out=Path(out).resolve();eid=str(eid)
++    canonical=root/'outputs'/'matches'/eid/'inputs'/f'cuotas_bwin_{eid}.txt'
++    if published_event_id(url)!=eid:
++        return {'returncode':None,'error':'EVENT_ID_URL_CONFLICT'}
++    if immutable or refresh:
+         if (canonical.parent.parent/'manifest.json').exists() and not immutable:
+             return {'returncode':None,'error':'Evento preparado: usar prematch_single.py refresh-odds para actualizar manifest e invalidar derivados'}
+-        if canonical.exists():
+-            old=snapshot_odds(canonical,eid)
+-            stage=canonical.parent.parent/'staging'/utcnow().strftime('%Y%m%dT%H%M%S%fZ')/eid/'inputs'
+-            stage.mkdir(parents=True,exist_ok=False)
+-            env=os.environ.copy();env.update(PREMATCH_BATCH_MODE='1',PREMATCH_EVENT_ID=eid,PREMATCH_EVENT_DATA_DIR=str(stage.resolve()),PREMATCH_IMMUTABLE_CAPTURE='1')
+-            log=stage/'scraper.log'
+-            with log.open('w') as fh:
+-                code=subprocess.run([sys.executable,'-u',str(root/'scraper_bwin.py'),'--url',url],cwd=root,env=env,stdout=fh,stderr=subprocess.STDOUT).returncode
+-            fresh=stage/canonical.name
+-            if code or not fresh.is_file():return {'returncode':code,'error':'Recaptura fallida; snapshot previo intacto','log':str(log)}
++        # Use precisely the operational staging contract already enforced by
++        # scraper_bwin.rutas_salida_evento. The batch archive is never an env path.
++        started=utcnow().astimezone(timezone.utc);stamp=started.strftime('%Y%m%dT%H%M%S%fZ')
++        stage=canonical.parent.parent/'staging'/stamp/eid/'inputs'
++        history=out/'captures'/eid/stamp
++        stage.mkdir(parents=True,exist_ok=False);history.mkdir(parents=True,exist_ok=False)
++        fresh=stage/canonical.name;archived=history/canonical.name;log=history/'scraper.log'
++        old_sha=hashlib.sha256(canonical.read_bytes()).hexdigest() if canonical.is_file() else None
++        info={'returncode':None,'log':str(log),'started_at_utc':started.isoformat(),
++              'operational_inputs':str(stage),'archive_directory':str(history),
++              'original_snapshot_path':str(canonical),'original_sha256':old_sha}
++        env=os.environ.copy();env.update(PREMATCH_BATCH_MODE='1',PREMATCH_EVENT_ID=eid,
++            PREMATCH_EVENT_DATA_DIR=str(stage),PREMATCH_IMMUTABLE_CAPTURE='1')
++        command=[sys.executable,'-u',str(root/'scraper_bwin.py'),'--url',url,'--intentos',str(scraper_attempts)]
++        info['command']=command
++        try:
++            with log.open('w',encoding='utf-8') as fh:
++                result=subprocess.run(command,cwd=root,env=env,stdout=fh,stderr=subprocess.STDOUT,timeout=timeout_seconds)
++            info['returncode']=result.returncode
++            if result.returncode:
++                raise ValueError('SCRAPER_EXIT_NONZERO')
++            if not fresh.is_file():raise ValueError('NO_NEW_SCRAPER_OUTPUT')
+             declared=re.findall(r'(?m)^TXT:\s*(.+?\.txt)\s*$',log.read_text(encoding='utf-8',errors='replace'))
+-            if not declared or Path(declared[-1].strip()).resolve()!=fresh.resolve():
+-                return {'returncode':None,'error':'Recaptura sin declaración TXT exacta; snapshot previo intacto','log':str(log)}
+-            snap=snapshot_odds(fresh,eid)
+-            capture=isodt(snap['capture_declared_madrid']);now=utcnow()
+-            if not capture or not 0<=(now-capture).total_seconds()<=120 or not old.get('capture_declared_madrid') or capture<=isodt(old['capture_declared_madrid']):
+-                return {'returncode':None,'error':'Recaptura sin tiempo nuevo verificable; snapshot previo intacto'}
++            declared_path=Path(declared[-1].strip()) if declared else None
++            if declared_path and not declared_path.is_absolute():declared_path=root/declared_path
++            if not declared_path or declared_path.resolve()!=fresh.resolve():raise ValueError('SCRAPER_PATH_NOT_DECLARED')
++            snap=snapshot_odds(fresh,eid);captured=isodt(snap.get('capture_declared_madrid'))
++            if not captured or not started-timedelta(seconds=5)<=captured<=utcnow()+timedelta(seconds=5):
++                raise ValueError('CAPTURE_NOT_FROM_THIS_ATTEMPT')
++            if snap.get('source_url')!=url:raise ValueError('CAPTURE_URL_MISMATCH')
++            if (snap['status']!='MARKET_TRIPLES_EXTRACTED' or not snap['selection_triplets_verified'] or
++                snap.get('invalid_price_values') or snap.get('unparsed_colon_lines') or
++                snap.get('selection_count_matches_scraper_header') is False):
++                raise ValueError('CAPTURE_MARKETS_OR_COUNTS_INVALID')
++            current_sha=hashlib.sha256(canonical.read_bytes()).hexdigest() if canonical.is_file() else None
++            if current_sha!=old_sha:raise ValueError('ORIGINAL_CHANGED_DURING_CAPTURE')
++            shutil.copy2(fresh,archived)
++            if hashlib.sha256(archived.read_bytes()).hexdigest()!=snap['sha256']:raise ValueError('ARCHIVE_SHA_MISMATCH')
++            info.update(archived_snapshot_path=str(archived),snapshot_sha256=snap['sha256'],
++                        capture_madrid=snap['capture_declared_madrid'],canonical_unchanged=True)
+             if immutable:
+-                if hashlib.sha256(canonical.read_bytes()).hexdigest()!=old['sha256']:raise ValueError('ORIGINAL_CHANGED_DURING_CAPTURE')
+-                return {'returncode':0,'fresh_snapshot_path':str(fresh),'original_snapshot_path':str(canonical),'original_sha256':old['sha256'],'canonical_unchanged':True,'log':str(log)}
+-            archive=canonical.parent.parent/'archives'/('odds_'+now.strftime('%Y%m%dT%H%M%S%fZ'))
+-            archive.mkdir(parents=True,exist_ok=False)
+-            previous=archive/canonical.name
+-            shutil.copy2(canonical,previous)
+-            if hashlib.sha256(previous.read_bytes()).hexdigest()!=old['sha256']:raise ValueError('ARCHIVE_SHA_MISMATCH')
+-            (archive/'provenance.json').write_text(json.dumps({'original_path':str(canonical),'sha256':old['sha256'],'replacement_sha256':snap['sha256'],'archived_at_utc':now.isoformat()},indent=2))
+-            shutil.copy2(fresh,canonical)
+-            return {'returncode':0,'fresh_snapshot_path':str(canonical),'archived_previous':str(previous),'log':str(log)}
++                info['fresh_snapshot_path']=str(archived)
++            else:
++                if old_sha:
++                    previous=history/'previous'/canonical.name;previous.parent.mkdir()
++                    shutil.copy2(canonical,previous)
++                    if hashlib.sha256(previous.read_bytes()).hexdigest()!=old_sha:raise ValueError('PREVIOUS_ARCHIVE_SHA_MISMATCH')
++                    info['archived_previous']=str(previous)
++                canonical.parent.mkdir(parents=True,exist_ok=True)
++                shutil.copy2(archived,canonical)
++                info.update(fresh_snapshot_path=str(canonical),canonical_unchanged=False)
++        except (OSError,ValueError,subprocess.TimeoutExpired) as exc:
++            info.pop('fresh_snapshot_path',None)
++            info['error']=f'{type(exc).__name__}: {exc}'
++            info['timed_out']=isinstance(exc,subprocess.TimeoutExpired)
++        finally:
++            info['canonical_unchanged']=(hashlib.sha256(canonical.read_bytes()).hexdigest() if canonical.is_file() else None)==old_sha
++            info['finished_at_utc']=utcnow().isoformat()
++            info['duration_seconds']=round((isodt(info['finished_at_utc'])-started).total_seconds(),6)
++            text=log.read_text(encoding='utf-8',errors='replace') if log.is_file() else ''
++            info['subprocess_output_tail']=text[-4000:]
++            if 'error' in info and text:info['error']+=' | '+text[-1500:].strip()
++            diagnostics=stage.parent/'scraper'
++            if diagnostics.is_dir():shutil.copytree(diagnostics,history/'scraper_diagnostics')
++            (history/'provenance.json').write_text(json.dumps(info,ensure_ascii=False,indent=2)+'\n',encoding='utf-8')
++        return info
+     script=root/'scraper_bwin.py'
+     if not script.is_file():return {'returncode':None,'error':f'No existe {script}; no se ejecutó scraping'}
+     path=root/'outputs'/'matches'/eid/'inputs'/f'cuotas_bwin_{eid}.txt'
+@@ -412,17 +535,19 @@ def run_scraper(root,out,eid,url,refresh=False,immutable=False):
+     env['PREMATCH_BATCH_MODE']='1'
+     env['PREMATCH_EVENT_ID']=eid
+     env['PREMATCH_EVENT_DATA_DIR']=str(path.parent.resolve())
+-    command=[sys.executable,'-u',str(script),'--url',url]
++    command=[sys.executable,'-u',str(script),'--url',url,'--intentos',str(scraper_attempts)]
+     started=utcnow()
+     try:
+         with log.open('w',encoding='utf-8') as fh:
+             fh.write(f'# {started.isoformat()} | Event ID {eid} | {script.name}\n');fh.flush()
+-            completed=subprocess.run(command,cwd=root,env=env,stdout=fh,stderr=subprocess.STDOUT,check=False)
++            completed=subprocess.run(command,cwd=root,env=env,stdout=fh,stderr=subprocess.STDOUT,check=False,timeout=timeout_seconds)
+         code=completed.returncode
+-    except OSError as ex: return {'returncode':None,'error':f'{type(ex).__name__}: {ex}','log':str(log)}
++    except (OSError,subprocess.TimeoutExpired) as ex: return {'returncode':None,'error':f'{type(ex).__name__}: {ex}','log':str(log)}
+     info={'returncode':code,'log':str(log),'started_at_utc':started.isoformat(),
+           'finished_at_utc':utcnow().isoformat()}
+-    if code != 0:info['error']='El scraper devolvió código distinto de cero'
++    if code != 0:
++        tail=log.read_text(encoding='utf-8',errors='replace')[-4000:]
++        info.update(error='El scraper devolvió código distinto de cero: '+tail[-1500:],subprocess_output_tail=tail)
+     # Require new output (not a previously existing file) and the declared TXT path.
+     if code==0:
+         text=log.read_text(encoding='utf-8',errors='replace')
+@@ -529,7 +654,13 @@ def main(argv=None):
+     p.add_argument('--min-odd-candidate',type=str,default='1.20',help='Cuota mínima para pasar el filtro de precio')
+     p.add_argument('--min-odd-observation',type=str,default='1.10',help='Cuota mínima para mantener en observación')
+     p.add_argument('--fixture-id',action='append',type=int,default=[])
+-    p.add_argument('--top',type=int,default=1)
++    p.add_argument('--top',type=int,default=0,help='0=todos; sin recorte implícito del inventario')
++    p.add_argument('--exploration',action='store_true',help='Permite hora/categoría pendientes para investigar, nunca para apuestas')
++    p.add_argument('--max-captures',type=int,default=0,help='0=todos; límite de intentos, incluidos fallos')
++    p.add_argument('--capture-timeout-seconds',type=int,default=240)
++    p.add_argument('--resume',action='store_true',help='Reutilizar solo capturas de este lote con mismos hashes y aún frescas')
++    p.add_argument('--identity-review',type=Path,help='Decisiones manuales identificadas y con evidencia; nunca fuerza VERIFIED')
++    p.add_argument('--write-identity-review',type=Path,help='Crear plantilla de revisión manual, sin red')
+     p.add_argument('--root',type=Path,default=Path.cwd())
+     p.add_argument('--output-dir',type=Path,default=Path('outputs/discovery/market_preflight'))
+     p.add_argument('--run-scraper',action='store_true',help='EJECUTAR scraper_bwin.py para encuentros validos; por defecto solo auditoria')
+@@ -551,7 +682,7 @@ def main(argv=None):
+         p.error('Usa solo uno: --run-scraper, --reuse-existing o --audit-txt')
+     if args.audit_txt and len(set(args.fixture_id))!=1:
+         p.error('--audit-txt exige exactamente un --fixture-id')
+-    if args.top<1:p.error('--top debe ser >=1')
++    if args.top<0 or args.max_captures<0 or args.capture_timeout_seconds<1:p.error('Presupuestos inválidos')
+     try:
+         candidate_limit=Decimal(args.min_odd_candidate)
+         observation_limit=Decimal(args.min_odd_observation)
+@@ -560,19 +691,66 @@ def main(argv=None):
+     except (ValueError,ArithmeticError):p.error('Umbrales: 1 < --min-odd-observation <= --min-odd-candidate')
+     if args.min_lead_minutes<0 or args.max_discovery_age_minutes<1:p.error('Margen o antigüedad inválidos')
+     root=args.root.resolve();out=args.output_dir.resolve();data=read_discovery(args.discovery)
++    if args.write_identity_review:
++        template={'source_discovery_sha256':hashlib.sha256(args.discovery.read_bytes()).hexdigest(),
++                  'decisions':[],
++                  'example':{'fixture_id':None,'decision':'CONFIRM','reviewer':'',
++                             'reviewed_at':'ISO8601 con offset','evidence':'ruta/hash o descripción comprobable',
++                             'event':{'bwin_event_id':'','bwin_url':'','text':'','text_observed_at_utc':''}}}
++        with args.write_identity_review.open('x',encoding='utf-8') as fh:json.dump(template,fh,ensure_ascii=False,indent=2)
++        return 0
++    source_path=args.discovery
++    if args.identity_review:
++        data=reviewed_discovery(data,args.identity_review,hashlib.sha256(args.discovery.read_bytes()).hexdigest())
++        out.mkdir(parents=True,exist_ok=True);source_path=out/'reviewed_discovery.json'
++        reviewed_bytes=(json.dumps(data,ensure_ascii=False,indent=2)+'\n').encode()
++        if source_path.exists() and source_path.read_bytes()!=reviewed_bytes:p.error('MANUAL_REVIEW_WRITE_ONCE_CONFLICT')
++        source_path.write_bytes(reviewed_bytes)
+     statistical_index={}
+     if args.preselection:
+         try:_,statistical_index=quality_gate.load_preselection(args.preselection)
+         except (OSError,ValueError,json.JSONDecodeError) as ex:p.error(f'Preselection inválida: {ex}')
+     selected=select_matches(data,args.fixture_id,args.top)
+-    results=[]
++    previous={};report_path=out/'market_preflight.json'
++    if report_path.exists():
++        if not args.resume:p.error('Salida existente: usa otro directorio o --resume explícito')
++        old=json.loads(report_path.read_text())
++        if old.get('source_sha256')!=hashlib.sha256(source_path.read_bytes()).hexdigest():p.error('RESUME_DISCOVERY_CHANGED')
++        if (old.get('validation_level','STRICT')!=('EXPLORATION' if args.exploration else 'STRICT') or
++            old.get('min_odd_candidate')!=str(candidate_limit) or old.get('min_odd_observation')!=str(observation_limit)):
++            p.error('RESUME_VALIDATION_CONTRACT_CHANGED')
++        prehash=hashlib.sha256(args.preselection.read_bytes()).hexdigest() if args.preselection else None
++        if old.get('source_preselection_sha256')!=prehash:p.error('RESUME_STATISTICS_CHANGED')
++        previous={str(m['fixture_id']):m for m in old.get('matches',[])}
++        table=out/'market_selection_review.csv'
++        if table.is_file():
++            with table.open(encoding='utf-8-sig',newline='') as fh:
++                for row in csv.DictReader(fh):
++                    prior=previous.get(str(row['fixture_id']))
++                    if prior is not None:
++                        prior.setdefault('_quality_rows',[]).append({k:v for k,v in row.items()
++                                                                   if k not in {'fixture_id','bwin_event_id'}})
++    results=[];attempts=0
++    owners={}
++    for m in data['matches']:
++        if m.get('bwin_event_id'):owners.setdefault(str(m['bwin_event_id']),set()).add(str(m['fixture_id']))
+     for m in selected:
+         eid=str(m.get('bwin_event_id') or '')
+         target=root/'outputs'/'matches'/eid/'inputs'/f'cuotas_bwin_{eid}.txt'
+         audit_path=args.audit_txt.resolve() if args.audit_txt else target if args.reuse_existing else None
+         declared_time=declared_capture_time(audit_path) if audit_path and audit_path.is_file() else None
+         validation_at=declared_time.astimezone(timezone.utc) if declared_time else utcnow()
+-        checked=validate_match(m,data.get('catalog_observed',[]),validation_at,args.min_lead_minutes,args.max_discovery_age_minutes)
++        check=exploration_check if args.exploration else validate_match
++        checked=check(m,data.get('catalog_observed',[]),validation_at,args.min_lead_minutes,args.max_discovery_age_minutes)
++        if len(owners.get(eid,set()))>1:
++            checked['reasons'].append('BWIN_EVENT_REUSED_ACROSS_FIXTURES');checked['status']='BLOCKED'
++        prior=previous.get(str(m['fixture_id']),{})
++        prior_snap=prior.get('snapshot',{});prior_path=Path(prior_snap.get('snapshot_path') or '_missing_')
++        prior_time=isodt(prior_snap.get('capture_declared_madrid'))
++        if (args.resume and checked['status']=='READY_FOR_SCRAPER' and prior_path.is_file() and prior_time and
++            0<=(utcnow()-prior_time).total_seconds()<=args.max_discovery_age_minutes*60 and
++            hashlib.sha256(prior_path.read_bytes()).hexdigest()==prior_snap.get('sha256')):
++            results.append(prior);continue
+         if audit_path:
+             checked['time_validation_basis']='SCRAPER_TXT_DECLARED_CAPTURE_TIME' if declared_time else 'CURRENT_TIME_FALLBACK_NO_CAPTURE_TIME'
+             checked['audit_mode']='RETROSPECTIVE_SNAPSHOT_NOT_CURRENT_ODDS'
+@@ -581,9 +759,15 @@ def main(argv=None):
+         if checked['status']!='READY_FOR_SCRAPER':
+             print(f"[{m.get('fixture_id')}] BLOQUEADO: {', '.join(checked['reasons'])}",flush=True)
+             results.append(checked);continue
+-        print(f"[{m.get('fixture_id')}] {m.get('home')}–{m.get('away')} | bwin={eid} | hora CORROBORADA",flush=True)
++        clock_label='TIME_UNCONFIRMED' if 'TIME_UNCONFIRMED' in checked.get('warnings',[]) else 'hora CORROBORADA'
++        print(f"[{m.get('fixture_id')}] {m.get('home')}–{m.get('away')} | bwin={eid} | {clock_label}",flush=True)
+         if args.run_scraper:
+-            checked['scraper']=run_scraper(root,out,eid,m['bwin_url'],refresh=args.refresh_existing,immutable=args.immutable_capture)
++            if args.max_captures and attempts>=args.max_captures:
++                checked['status']='NOT_EVALUATED_BUDGET';checked['reasons'].append('CAPTURE_BUDGET_REACHED')
++                results.append(checked);continue
++            attempts+=1
++            checked['scraper']=run_scraper(root,out,eid,m['bwin_url'],refresh=args.refresh_existing,
++                immutable=args.immutable_capture,timeout_seconds=args.capture_timeout_seconds)
+             found=(checked['scraper'] or {}).get('fresh_snapshot_path')
+             if found:
+                 try:
+@@ -615,8 +799,15 @@ def main(argv=None):
+                 checked['status']='QUALITY_GATE_ERROR'
+         print(f"   {checked['status']}" + (f" | cuotas={checked['snapshot']['selection_triplets_verified']}" if 'snapshot' in checked else ''),flush=True)
+         results.append(checked)
+-    payload={'schema_version':VERSION,'generated_at_utc':utcnow().isoformat(),'source_discovery':str(args.discovery),
+-             'source_sha256':hashlib.sha256(args.discovery.read_bytes()).hexdigest(),'action':'RUN_SCRAPER' if args.run_scraper else 'AUDIT_TXT' if args.audit_txt else 'REUSE_EXISTING' if args.reuse_existing else 'AUDIT_ONLY',
++    pending=[m['fixture_id'] for m in results if m['status']=='NOT_EVALUATED_BUDGET']
++    retryable=[m['fixture_id'] for m in results if m['status'] in {'SCRAPER_FAILED_OR_UNVERIFIED','SCRAPER_OUTPUT_INVALID'}]
++    payload={'schema_version':VERSION,'generated_at_utc':utcnow().isoformat(),'source_discovery':str(source_path),
++             'source_sha256':hashlib.sha256(source_path.read_bytes()).hexdigest(),'action':'RUN_SCRAPER' if args.run_scraper else 'AUDIT_TXT' if args.audit_txt else 'REUSE_EXISTING' if args.reuse_existing else 'AUDIT_ONLY',
++             'validation_level':'EXPLORATION' if args.exploration else 'STRICT',
++             'batch_summary':{'planned':len(selected),'attempted_this_invocation':attempts,
++                 'status':'INCOMPLETE' if pending else 'COMPLETED_WITH_ERRORS' if retryable else 'COMPLETED',
++                 'pending_fixture_ids':pending,'retryable_fixture_ids':retryable,
++                 'states':dict(__import__('collections').Counter(m['status'] for m in results))},
+              'timezone':'Europe/Madrid','prematch_only':True,
+              'source_preselection':str(args.preselection) if args.preselection else None,
+              'source_preselection_sha256':hashlib.sha256(args.preselection.read_bytes()).hexdigest() if args.preselection else None,
+@@ -626,7 +817,8 @@ def main(argv=None):
+     print(f"Salida: {out/'market_preflight.json'} | {out/'market_preflight.csv'} | {out/'market_preflight.md'}")
+     print(f"Selecciones: {out/'market_selection_review.csv'} | investigables: {out/'market_research_shortlist.csv'}")
+     success_statuses={'READY_NOT_EXECUTED','MARKET_TRIPLES_EXTRACTED','HISTORICAL_MARKET_TRIPLES_EXTRACTED'}
+-    return 0 if results and all(x['status'] in success_statuses for x in results) else 2
++    # A structured per-fixture rejection/failure is not a global CLI failure.
++    return 0
+ 
+ from prematch_execution_control import confirmed_cli
+ main = confirmed_cli(main)
+diff --git a/generate_context.py b/generate_context.py
+index 9c8dfd3b..cd077a4e 100644
+--- a/generate_context.py
++++ b/generate_context.py
+@@ -64,6 +64,8 @@ from config.constants import (
+     MICRO_RECENT_WINDOW,
+     MICRO_CONTEXT_WINDOW,
+     MICRO_HISTORY_WINDOWS,
++    resolve_deep_history_limit,
++    resolve_deep_history_detail_limit,
+     FIXTURE_IDS_BATCH_SIZE,
+     COMPLETED_STATUSES,
+     FUTURE_STATUSES,
+@@ -843,7 +845,7 @@ class JSONCache:
+             return CACHE_TTL_FIXTURE_IDS
+         return CACHE_TTL_DEFAULT
+ 
+-    def get(self, endpoint: str, params: dict[str, Any]) -> Optional[dict[str, Any]]:
++    def get(self, endpoint: str, params: dict[str, Any], asof: Optional[datetime] = None) -> Optional[dict[str, Any]]:
+         path = self._path(endpoint, params)
+         if not path.exists():
+             return None
+@@ -851,14 +853,14 @@ class JSONCache:
+             from prematch_cache_record import unpack_record
+             with path.open("r", encoding="utf-8") as file:
+                 data, acquired = unpack_record(json.load(file))
+-            age = (datetime.now(timezone.utc) - acquired).total_seconds()
++            age = ((asof or datetime.now(timezone.utc)) - acquired).total_seconds()
+         except Exception:
+             return None
+ 
+         ttl = self.ttl_for(endpoint, params)
+         if isinstance(data, dict) and data.get("response") == []:
+             ttl = min(ttl, CACHE_TTL_EMPTY)  # las respuestas vacías caducan rápido
+-        return data if 0 <= age <= ttl else None
++        return dict(data, _acquired_at_utc=acquired.isoformat()) if 0 <= age <= ttl else None
+ 
+     def set(self, endpoint: str, params: dict[str, Any], data: dict[str, Any]) -> None:
+         path = self._path(endpoint, params)
+@@ -867,6 +869,8 @@ class JSONCache:
+         self.directory.mkdir(parents=True, exist_ok=True)
+         with tmp_path.open("w", encoding="utf-8") as file:
+             json.dump(acquisition_record(data), file, ensure_ascii=False, indent=2)
++        from prematch_cache_record import preserve_cache_version
++        preserve_cache_version(path)
+         tmp_path.replace(path)
+ 
+ 
+@@ -976,7 +980,8 @@ API_RATE_LIMITER = SharedAPIRateLimiter()
+ 
+ 
+ class APIFootballClient:
+-    def __init__(self, api_key: str, cache_enabled: bool = True) -> None:
++    def __init__(self, api_key: str, cache_enabled: bool = True, asof: Optional[datetime] = None) -> None:
++        self.asof = asof
+         if not api_key:
+             raise RuntimeError("No se encontró FOOTBALL_API_KEY.")
+         self.api_key = api_key
+@@ -1025,19 +1030,23 @@ class APIFootballClient:
+             endpoint: str,
+             params: Optional[dict[str, Any]] = None,
+             use_cache: Optional[bool] = None,
++            asof: Optional[datetime] = None,
+     ) -> dict[str, Any]:
+         params = params or {}
++        asof = asof or self.asof
+         if use_cache is None:
+             use_cache = self.cache_enabled
+ 
+         if use_cache:
+-            cached = CACHE.get(endpoint, params)
++            cached = CACHE.get(endpoint, params, asof=asof) if asof is not None else CACHE.get(endpoint, params)
+             if cached is not None:
+                 with self._lock:
+                     self.cache_hits += 1
+                 LOG.debug(f"CACHE HIT /{endpoint} {params}")
+                 return cached
+ 
++        if asof is not None:
++            raise ValueError('FROZEN_ASOF_REQUIRES_VERIFIED_PRIOR_CACHE')
+         url = f"{FOOTBALL_BASE_URL.rstrip('/')}/{endpoint.lstrip('/')}"
+         last_error: Optional[str] = None
+         for attempt in range(1, MAX_RETRIES + 1):
+@@ -1088,7 +1097,7 @@ class APIFootballClient:
+                     from prematch_cache_record import store_acquisition
+                     acquired_path = store_acquisition(CACHE_DIR / 'acquisitions' / 'fixtures_lineups', data)
+                     LOG.info(f'XI acquisition record: {acquired_path}')
+-                return data
++                return dict(data, _acquired_at_utc=datetime.now(timezone.utc).isoformat())
+ 
+             except requests.RequestException as exc:
+                 last_error = str(exc)
+@@ -1189,11 +1198,13 @@ class BwinParser:
+             home_gender = away_gender = 'female'
+ 
+         event_date_utc = bwin_event_datetime_utc(html, event_id)
+-        visible = browser_event_datetime_utc(browser_catalog or [], event_id)
+-        if visible is not None:
++        visible_info = resolve_browser_event_kickoff(browser_catalog or [], event_id)
++        visible = visible_info['kickoff_utc'] if visible_info else None
++        if visible_info is not None:
+             if len(_structured_bwin_event_datetimes(html or '', event_id)) > 1:
+                 raise ValueError('BWIN_KICKOFF_CONFLICT: ambiguous structured event times')
+-            if event_date_utc is not None and event_date_utc != visible:
++            tol_sec = float(visible_info.get('tolerance_minutes') or 3) * 60.0
++            if event_date_utc is not None and abs((event_date_utc - visible).total_seconds()) > tol_sec:
+                 raise ValueError('BWIN_KICKOFF_CONFLICT: structured and visible event times disagree')
+             event_date_utc = visible
+         if event_date_utc is not None:
+@@ -1226,12 +1237,26 @@ class BwinParser:
+             # parse_date() la normaliza a UTC antes de cualquier comparación.
+             event_date=(event_date_utc.astimezone(MADRID_TZ).isoformat()
+                          if event_date_utc else None),
+-            temporal_identity_evidence=({'schema_version':'1.0-browser-event-time',
+-                'source':'SINGLE_EVENT_TILE', 'timezone':'Europe/Madrid',
+-                'kickoff_utc':visible.isoformat(),
+-                'catalog_observations':[r for r in browser_catalog or []
+-                                        if str(r.get('bwin_event_id'))==str(event_id)]}
+-                if visible is not None else None),
++            temporal_identity_evidence=({
++                'schema_version': '1.1-browser-event-time',
++                'source': 'SINGLE_EVENT_TILE',
++                'method': visible_info['method'],
++                'timezone': 'Europe/Madrid',
++                'bwin_event_id': str(event_id),
++                'bwin_url': url,
++                'observed_at_utc': visible_info['observed_at_utc'],
++                'raw_text': visible_info['raw_text'],
++                'countdown_minutes': visible_info['countdown_minutes'],
++                'tolerance_minutes': visible_info['tolerance_minutes'],
++                'kickoff_utc': visible.isoformat(),
++                'metadata_json_path': visible_info.get('metadata_json_path'),
++                'metadata_json_sha256': visible_info.get('metadata_json_sha256'),
++                'metadata_html_sha256': visible_info.get('metadata_html_sha256'),
++                'catalog_observations': [
++                    r for r in (browser_catalog or [])
++                    if str(r.get('bwin_event_id')) == str(event_id)
++                ],
++            } if visible_info is not None else None),
+         )
+ 
+     def _extract_teams_from_html(self, html: Optional[str], slug: str) -> tuple[str, str]:
+@@ -1280,36 +1305,131 @@ class BwinParser:
+         return slug.replace("-", " "), "Rival"
+ 
+ 
+-def browser_event_datetime_utc(catalog, event_id):
+-    """Use only timestamped, single-event tiles from a Madrid browser context."""
+-    from bwin_market_preflight import CATALOG_TIME_RE, LIVE_RE, published_event_id
+-    found = set()
+-    for row in catalog:
++COUNTDOWN_RE = re.compile(
++    r"\b(?:comienza|empieza)\s+en\s+(?:(?P<h>\d{1,2})\s*h(?:oras?)?\s*)?(?P<m>\d{1,3})\s*min(?:utos?)?\b",
++    re.I,
++)
++
++
++def resolve_browser_event_kickoff(
++    catalog,
++    event_id,
++    *,
++    max_countdown_minutes: int = 180,
++    countdown_tolerance_minutes: int = 4,
++):
++    """Resolve event kickoff from timestamped SINGLE_EVENT_TILE rows in Europe/Madrid.
++
++    Supports Hoy/Mañana clocks, dated clocks (DD/MM/YY HH:MM), and relative
++    countdowns ("Comienza en N min") with strict provenance and conflict checks.
++    Never invents Bwin kickoff from API-Football.
++    """
++    from bwin_market_preflight import CATALOG_ABS_RE, CATALOG_TIME_RE, LIVE_RE, published_event_id
++
++    candidates = []
++    for row in catalog or []:
+         if (str(row.get('bwin_event_id')) != str(event_id)
+                 or published_event_id(row.get('bwin_url')) != str(event_id)
+                 or row.get('text_source') != 'SINGLE_EVENT_TILE'
+                 or row.get('browser_timezone') != 'Europe/Madrid'):
+             continue
+-        text = row.get('text', '')
++        text = str(row.get('text') or '')
+         observed = parse_date(row.get('text_observed_at_utc'))
++        if LIVE_RE.search(text) or not observed or observed.tzinfo is None:
++            continue
++
+         times = list(CATALOG_TIME_RE.finditer(text))
+-        if LIVE_RE.search(text) or not observed or len(times) != 1:
++        abs_hits = list(CATALOG_ABS_RE.finditer(text))
++        cd_hits = list(COUNTDOWN_RE.finditer(text))
++
++        # Reject ambiguous tiles mixing multiple distinct temporal expressions
++        total_patterns = int(bool(times)) + int(bool(abs_hits)) + int(bool(cd_hits))
++        if total_patterns != 1:
+             continue
+-        # The capture timestamp, never the API kickoff, anchors Hoy/Mañana.
++
+         local = observed.astimezone(MADRID_TZ)
+-        hit = times[0]
+-        day = local.date() + timedelta(days=int(hit[1].lower().startswith('ma')))
+-        try:
+-            value = datetime(day.year, day.month, day.day, int(hit[2]), int(hit[3]), tzinfo=MADRID_TZ)
+-        except ValueError:
++        value = None
++        method = None
++        countdown_mins = None
++        tolerance_mins = 3
++
++        if len(times) == 1:
++            hit = times[0]
++            day = local.date() + timedelta(days=int(hit[1].lower().startswith('ma')))
++            try:
++                value = datetime(day.year, day.month, day.day, int(hit[2]), int(hit[3]), tzinfo=MADRID_TZ)
++            except ValueError:
++                continue
++            if value.replace(fold=0).utcoffset() != value.replace(fold=1).utcoffset():
++                continue
++            method = 'BWIN_VISIBLE_HOY_MANANA_TIME'
++        elif len(abs_hits) == 1:
++            day_i, mon_i, year_i, h_i, m_i = map(int, abs_hits[0].groups())
++            if year_i < 100:
++                year_i += 2000
++            try:
++                value = datetime(year_i, mon_i, day_i, h_i, m_i, tzinfo=MADRID_TZ)
++            except ValueError:
++                continue
++            if value.replace(fold=0).utcoffset() != value.replace(fold=1).utcoffset():
++                continue
++            method = 'BWIN_VISIBLE_DATED_TIME'
++        elif len(cd_hits) == 1:
++            hit = cd_hits[0]
++            hours = int(hit.group('h') or 0)
++            mins = int(hit.group('m'))
++            countdown_mins = hours * 60 + mins
++            if countdown_mins <= 0 or countdown_mins > max_countdown_minutes:
++                continue
++            value = observed.astimezone(timezone.utc) + timedelta(minutes=countdown_mins)
++            method = 'BWIN_EVENT_COUNTDOWN_MINUTES'
++            tolerance_mins = countdown_tolerance_minutes
++        else:
+             continue
+-        found.add(value.astimezone(timezone.utc))
+-        LOG.info(f'BWIN_KICKOFF_CANDIDATE source=SINGLE_EVENT_TILE event_id={event_id} raw={text!r} observed={observed.isoformat()} timezone=Europe/Madrid utc={value.astimezone(timezone.utc).isoformat()}')
+-    if len(found) != 1:
+-        if len(found) > 1:
+-            raise ValueError('BWIN_KICKOFF_CONFLICT: multiple visible times for one Event ID')
++
++        utc_val = value.astimezone(timezone.utc)
++        candidates.append({
++            'kickoff_utc': utc_val,
++            'method': method,
++            'observed_at_utc': observed.astimezone(timezone.utc).isoformat(),
++            'raw_text': text[:240],
++            'countdown_minutes': countdown_mins,
++            'tolerance_minutes': tolerance_mins,
++            'metadata_json_path': row.get('metadata_json_path'),
++            'metadata_json_sha256': row.get('metadata_json_sha256'),
++            'metadata_html_sha256': row.get('metadata_html_sha256'),
++        })
++        LOG.info(
++            f'BWIN_KICKOFF_CANDIDATE source=SINGLE_EVENT_TILE method={method} '
++            f'event_id={event_id} raw={text!r} observed={observed.isoformat()} '
++            f'timezone=Europe/Madrid utc={utc_val.isoformat()}'
++        )
++
++    if not candidates:
+         return None
+-    return next(iter(found))
++
++    # Contradiction detection across multiple observations of the same event_id
++    for i in range(len(candidates)):
++        for j in range(i + 1, len(candidates)):
++            a, b = candidates[i], candidates[j]
++            diff_sec = abs((a['kickoff_utc'] - b['kickoff_utc']).total_seconds())
++            if a['countdown_minutes'] is None and b['countdown_minutes'] is None:
++                if diff_sec > 0:
++                    raise ValueError('BWIN_KICKOFF_CONFLICT: multiple visible times for one Event ID')
++            else:
++                tol = max(a['tolerance_minutes'], b['tolerance_minutes']) * 60.0
++                if diff_sec > tol:
++                    raise ValueError('BWIN_KICKOFF_CONFLICT: multiple visible times for one Event ID')
++
++    # Prefer exact calendar clock if corroborated, otherwise latest countdown observation
++    candidates.sort(key=lambda c: (c['countdown_minutes'] is not None, c['observed_at_utc']))
++    return candidates[0]
++
++
++def browser_event_datetime_utc(catalog, event_id):
++    """Use only timestamped, single-event tiles from a Madrid browser context."""
++    info = resolve_browser_event_kickoff(catalog, event_id)
++    return info['kickoff_utc'] if info else None
+ 
+ 
+ def fetch_bwin_html(url: str, *, catalog_out=None) -> str:
+@@ -1330,8 +1450,17 @@ def fetch_bwin_html(url: str, *, catalog_out=None) -> str:
+                 output = context_output_dir()
+                 output.mkdir(parents=True, exist_ok=True)
+                 stamp = datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%S%fZ')
+-                (output / f'bwin_metadata_{stamp}.html').write_text(html, encoding='utf-8')
+-                (output / f'bwin_metadata_{stamp}.json').write_text(json.dumps(catalog_out, ensure_ascii=False, indent=2), encoding='utf-8')
++                html_path = output / f'bwin_metadata_{stamp}.html'
++                json_path = output / f'bwin_metadata_{stamp}.json'
++                html_path.write_text(html, encoding='utf-8')
++                json_path.write_text(json.dumps(catalog_out, ensure_ascii=False, indent=2), encoding='utf-8')
++                html_sha = hashlib.sha256(html_path.read_bytes()).hexdigest()
++                json_sha = hashlib.sha256(json_path.read_bytes()).hexdigest()
++                for row in catalog_out:
++                    if isinstance(row, dict):
++                        row['metadata_json_path'] = str(json_path.resolve())
++                        row['metadata_json_sha256'] = json_sha
++                        row['metadata_html_sha256'] = html_sha
+             browser.close()
+             # No modificar HTML globalmente: las colas de competición se
+             # recortan solo del nombre extraído en clean_team_name().
+@@ -2125,45 +2254,116 @@ class DeepHistoryCollector:
+     def __init__(self, api: APIFootballClient) -> None:
+         self.api = api
+ 
+-    def collect_team_history(self, team: APITeam, limit: int) -> dict[str, Any]:
+-        LOG.info(f"Construyendo historial profundo de {team.name}...")
++    def collect_team_history(
++        self,
++        team: APITeam,
++        limit: int,
++        asof: Optional[datetime] = None,
++        *,
++        detail_limit: Optional[int] = None,
++    ) -> dict[str, Any]:
++        asof = asof or getattr(self.api, "asof", None)
++        eff_limit = max(1, min(20, int(limit)))
++        eff_detail = eff_limit if detail_limit is None else max(0, min(eff_limit, int(detail_limit)))
++        LOG.info(f"Construyendo historial profundo de {team.name} (limit={eff_limit}, detail_limit={eff_detail})...")
++
++        basic_data = (
++            self.api.get("fixtures", {"team": team.id, "last": eff_limit}, asof=asof)
++            if asof is not None
++            else self.api.get("fixtures", {"team": team.id, "last": eff_limit})
++        )
++        cutoff = asof or datetime.now(timezone.utc)
++        from prematch_cache_record import historical_available, acquisition_before
+ 
+-        basic_data = self.api.get("fixtures", {"team": team.id, "last": limit})
++        if asof is not None and not acquisition_before(basic_data.get("_acquired_at_utc"), cutoff):
++            raise ValueError("HISTORY_ACQUISITION_UNVERIFIED_OR_AFTER_CUTOFF")
+         basic_fixtures = basic_data.get("response", []) or []
+ 
+         def fid(item: dict[str, Any]) -> Any:
+             return (item.get("fixture", {}) or {}).get("id")
+ 
+         historical = [
+-            it for it in basic_fixtures
+-            if fid(it) and (it["fixture"].get("status", {}) or {}).get("short") in COMPLETED_STATUSES
++            it
++            for it in basic_fixtures
++            if fid(it)
++            and historical_available(it, cutoff)
++            and (it["fixture"].get("status", {}) or {}).get("short") in COMPLETED_STATUSES
+         ]
+-        if not historical:
+-            historical = [it for it in basic_fixtures if fid(it)]
++        historical.sort(key=lambda it: (it.get("fixture", {}) or {}).get("date") or "", reverse=True)
++
++        dedup_basic: dict[int, dict[str, Any]] = {}
++        fixture_ids: list[int] = []
++        for it in historical:
++            f_val = int(fid(it))
++            if f_val not in dedup_basic:
++                dedup_basic[f_val] = it
++                fixture_ids.append(f_val)
++            if len(fixture_ids) >= eff_limit:
++                break
+ 
+-        fixture_ids = list(dict.fromkeys(int(fid(it)) for it in historical))
+-        LOG.ok(f"{team.name}: {len(fixture_ids)} IDs históricos seleccionados.")
++        detail_target_ids = fixture_ids[:eff_detail]
++        LOG.ok(
++            f"{team.name}: {len(fixture_ids)} IDs históricos seleccionados "
++            f"({len(detail_target_ids)} con detalle completo solicitado)."
++        )
+ 
+-        detailed: list[dict[str, Any]] = []
+-        batches = chunked(fixture_ids, FIXTURE_IDS_BATCH_SIZE)
++        detailed_by_id: dict[int, dict[str, Any]] = {}
++        batches = chunked(detail_target_ids, FIXTURE_IDS_BATCH_SIZE)
+ 
+         for index, batch in enumerate(batches, start=1):
+             LOG.debug(f"{team.name}: detalle histórico batch {index}/{len(batches)} ({len(batch)} fixtures)")
+-            data = self.api.get("fixtures", {"ids": "-".join(str(v) for v in batch)})
+-            response = data.get("response", []) or []
+-            detailed.extend(response)
++            params = {"ids": "-".join(str(v) for v in batch)}
++            data = self.api.get("fixtures", params, asof=asof) if asof is not None else self.api.get("fixtures", params)
++            if asof is not None and not acquisition_before(data.get("_acquired_at_utc"), cutoff):
++                raise ValueError("HISTORY_DETAIL_AFTER_CUTOFF")
++            response = [
++                r
++                for r in data.get("response", []) or []
++                if fid(r) in batch
++                and historical_available(r, cutoff)
++                and (r.get("fixture", {}).get("status") or {}).get("short") in COMPLETED_STATUSES
++            ]
++            for r in response:
++                rfid = int(fid(r))
++                if rfid not in detailed_by_id:
++                    detailed_by_id[rfid] = r
+             LOG.debug(f"{team.name}: batch {index} -> {len(response)} fixtures detallados.")
+ 
+-        detailed.sort(key=lambda it: (it.get("fixture", {}) or {}).get("date") or "", reverse=True)
++        # Conservar fixtures básicos restantes (solo marcador/competición/fecha) cuando detail_limit < limit
++        # o cuando un batch devuelva parcial, diferenciando estadísticas completas vs parciales sin inventar partidos.
++        combined_fixtures: list[dict[str, Any]] = []
++        complete_stats_count = 0
++        partial_or_score_only_count = 0
++        for f_val in fixture_ids:
++            row = detailed_by_id.get(f_val)
++            if row is None:
++                row = dict(dedup_basic[f_val])
++                row["_history_detail_tier"] = "SCORE_ONLY_NO_STATS"
++                partial_or_score_only_count += 1
++            else:
++                has_stats = bool(row.get("statistics"))
++                row_copy = dict(row)
++                row_copy["_history_detail_tier"] = "COMPLETE_DETAILED" if has_stats else "SCORE_ONLY_NO_STATS"
++                row = row_copy
++                if has_stats:
++                    complete_stats_count += 1
++                else:
++                    partial_or_score_only_count += 1
++            combined_fixtures.append(row)
++
++        combined_fixtures.sort(key=lambda it: (it.get("fixture", {}) or {}).get("date") or "", reverse=True)
+ 
+         return {
+             "team": asdict(team),
+-            "requested_limit": limit,
++            "requested_limit": eff_limit,
++            "requested_detail_limit": eff_detail,
+             "basic_fixtures_count": len(basic_fixtures),
+-            "completed_fixtures_count": len(historical),
++            "completed_fixtures_count": len(fixture_ids),
++            "complete_stats_count": complete_stats_count,
++            "partial_or_score_only_count": partial_or_score_only_count,
+             "fixture_ids": fixture_ids,
+             "batches": len(batches),
+-            "detailed_fixtures": detailed,
++            "detailed_fixtures": combined_fixtures,
+         }
+ 
+ 
+@@ -2492,10 +2692,20 @@ class RefereeHistoryCollector:
+ 
+ class ContextCollector:
+ 
+-    def __init__(self, api: APIFootballClient) -> None:
++    def __init__(
++        self,
++        api: APIFootballClient,
++        *,
++        history_limit: Optional[int] = None,
++        detail_limit: Optional[int] = None,
++    ) -> None:
+         self.api = api
+         self.history = DeepHistoryCollector(api)
+         self.referee_history = RefereeHistoryCollector(api)
++        self.history_limit = resolve_deep_history_limit(history_limit)
++        self.detail_limit = resolve_deep_history_detail_limit(
++            detail_limit, history_limit=self.history_limit
++        )
+ 
+     def _safe_get(self, label: str, endpoint: str, params: dict[str, Any]) -> dict[str, Any]:
+         try:
+@@ -2517,9 +2727,25 @@ class ContextCollector:
+             futures = {key: pool.submit(self._guard, key, fn) for key, fn in tasks.items()}
+             return {key: future.result() for key, future in futures.items()}  # orden estable
+ 
+-    def collect(self, fixture: ResolvedFixture, home_team: APITeam, away_team: APITeam) -> dict[str, Any]:
++    def collect(
++        self,
++        fixture: ResolvedFixture,
++        home_team: APITeam,
++        away_team: APITeam,
++        *,
++        history_limit: Optional[int] = None,
++        detail_limit: Optional[int] = None,
++    ) -> dict[str, Any]:
+         fixture_id = fixture.fixture_id
+-        LOG.info(f"Recolectando contexto profundo del fixture {fixture_id}...")
++        eff_history_limit = resolve_deep_history_limit(
++            history_limit if history_limit is not None else self.history_limit
++        )
++        eff_detail_limit = (
++            resolve_deep_history_detail_limit(detail_limit, history_limit=eff_history_limit)
++            if detail_limit is not None
++            else (min(eff_history_limit, self.detail_limit) if self.detail_limit is not None else None)
++        )
++        LOG.info(f"Recolectando contexto profundo del fixture {fixture_id} (history_limit={eff_history_limit})...")
+ 
+         sides = (("home", home_team), ("away", away_team))
+         get = self._safe_get
+@@ -2532,7 +2758,11 @@ class ContextCollector:
+             if GET_DEEP_HISTORY:
+                 for side, team in sides:
+                     tasks[f"{side}_history_deep"] = partial(
+-                        self.history.collect_team_history, team, DEEP_HISTORY_LIMIT)
++                        self.history.collect_team_history,
++                        team,
++                        eff_history_limit,
++                        detail_limit=eff_detail_limit,
++                    )
+             else:
+                 for side, team in sides:
+                     tasks[f"{side}_last_10"] = partial(
+@@ -2599,7 +2829,9 @@ class ContextCollector:
+                 "generator_version": VERSION,
+                 "generated_at": datetime.now(timezone.utc).isoformat(),
+                 "deep_history_enabled": GET_DEEP_HISTORY,
+-                "history_limit": DEEP_HISTORY_LIMIT,
++                "history_limit": eff_history_limit,
++                "detail_limit": eff_detail_limit if eff_detail_limit is not None else eff_history_limit,
++                "legacy_txt_limit": MICRO_HISTORY_LIMIT,
+                 "fixture_ids_batch_size": FIXTURE_IDS_BATCH_SIZE,
+             },
+             "fixture": asdict(fixture),
+@@ -2955,6 +3187,7 @@ class MicroHistoryFormatter:
+                              }
+         ]
+         fixtures.sort(key=lambda x: x.get("fixture", {}).get("date") or "", reverse=True)
++        all_count = len(fixtures)
+         fixtures = fixtures[:MICRO_HISTORY_LIMIT]
+         records = [cls._match_record(item, team, i) for i, item in enumerate(fixtures, 1)]
+ 
+@@ -2964,6 +3197,11 @@ class MicroHistoryFormatter:
+             f"MICROCONTEXTO HISTÓRICO — {team.name}",
+             "#" * 100,
+             f"Partidos utilizados: {len(records)}",
++            *(
++                [f"Partidos adicionales en JSON histórico: {all_count - len(records)} (total={all_count})"]
++                if all_count > len(records)
++                else []
++            ),
+             "Regla: P-1 = último partido; P-2/P-3 = contexto reciente; P-4..P-6 = contexto evolutivo.",
+             "Todos los jugadores disponibles en la API se conservan por fixture.",
+             "",
+@@ -4681,6 +4919,177 @@ def verify_initial_pair_fixture(match: BwinMatch, home: APITeam, away: APITeam,
+ # =============================================================================
+ 
+ 
++def _load_persisted_category_evidence(selected: dict, fid: int) -> tuple[Optional[dict], Optional[str]]:
++    """Recupera evidencia de categoría sénior corroborada previamente (selección o preselección)."""
++    def _extract_from_doc(doc: dict, origin: str) -> tuple[Optional[dict], Optional[str]]:
++        if not isinstance(doc, dict):
++            return None, None
++        nte = doc.get('national_team_evidence')
++        if isinstance(nte, dict) and nte.get('source') and nte.get('level') == 'SENIOR' and nte.get('gender') in ('M', 'F'):
++            return dict(nte), origin
++        prov = doc.get('category_provenance')
++        if (
++            isinstance(prov, dict)
++            and doc.get('category_evidence_status') == 'CORROBORATED'
++            and doc.get('category_level') == 'SENIOR'
++        ):
++            fev = prov.get('fixture_evidence')
++            if isinstance(fev, dict) and fev.get('source') and fev.get('level') == 'SENIOR' and fev.get('gender') in ('M', 'F'):
++                return dict(fev), origin
++        return None, None
++
++    ev, origin = _extract_from_doc(selected, 'selected_match')
++    if ev is not None:
++        return ev, origin
++
++    handoff_raw = selected.get('source_handoff')
++    if not handoff_raw:
++        return None, None
++    handoff_path = Path(str(handoff_raw))
++    if not handoff_path.is_file():
++        return None, None
++    try:
++        handoff_doc = json.loads(handoff_path.read_text(encoding='utf-8-sig'))
++    except (OSError, json.JSONDecodeError):
++        return None, None
++    pre_raw = handoff_doc.get('preselection_path') or ((handoff_doc.get('preselection') or {}).get('path') if isinstance(handoff_doc.get('preselection'), dict) else None)
++    if not pre_raw:
++        return None, None
++    pre_path = Path(str(pre_raw))
++    if not pre_path.is_file():
++        return None, None
++    try:
++        pre_doc = json.loads(pre_path.read_text(encoding='utf-8-sig'))
++    except (OSError, json.JSONDecodeError):
++        return None, None
++    for row in pre_doc.get('matches') or []:
++        if not isinstance(row, dict):
++            continue
++        try:
++            row_fid = int(row.get('fixture_id') or 0)
++        except (TypeError, ValueError):
++            continue
++        if row_fid != fid:
++            continue
++        if (
++            row.get('home_id') != selected.get('home_api_id')
++            or row.get('away_id') != selected.get('away_api_id')
++            or str(row.get('league_id')) != str(selected.get('league_id'))
++            or str(row.get('season')) != str(selected.get('season'))
++        ):
++            continue
++        ev, origin = _extract_from_doc(row, 'preselection')
++        if ev is not None:
++            return ev, origin
++    return None, None
++
++
++def resolve_selected_fixture(match, api, ctx, fixture_id=None):
++    """Resolve by pinned IDs, never by a second nominal team search.
++
++    The caller validates the selected temporal/source contract first. A provider
++    conflict is terminal; falling back to fuzzy search would change the event.
++    """
++    selected = ctx['selection']
++    fid = int(fixture_id or ctx['fixture_id'])
++    if fid != ctx['fixture_id']:
++        raise ValueError('EXPLICIT_FIXTURE_SELECTION_CONFLICT')
++    required = ('home_api_id', 'away_api_id', 'league_id', 'season')
++    if any(selected.get(k) is None for k in required):
++        raise ValueError('PINNED_FIXTURE_METADATA_MISSING')
++    payload = api.get('fixtures', {'id': fid}, use_cache=False)
++    rows = payload.get('response') or []
++    if payload.get('errors') or len(rows) != 1:
++        raise ValueError('PINNED_FIXTURE_RESPONSE_NOT_UNIQUE')
++    row = rows[0]; teams = row.get('teams') or {}; league = row.get('league') or {}
++    if (row.get('fixture') or {}).get('id') != fid:
++        raise ValueError('PINNED_FIXTURE_ID_CONFLICT')
++    for side in ('home', 'away'):
++        if (teams.get(side) or {}).get('id') != selected[side + '_api_id']:
++            raise ValueError('PINNED_FIXTURE_TEAM_ORDER_CONFLICT: ' + side)
++    for field in ('league_id', 'season'):
++        if str(league.get('id' if field == 'league_id' else field)) != str(selected[field]):
++            raise ValueError('PINNED_FIXTURE_COMPETITION_CONFLICT: ' + field)
++    from competition_registry import _NON_SENIOR_ROUND_RE, _norm_team_base, category, lookup
++    from filter_major_leagues import RESERVE_TEAM_PATTERN, YOUTH_PATTERN
++
++    home_api_name = (teams.get('home') or {}).get('name') or ''
++    away_api_name = (teams.get('away') or {}).get('name') or ''
++    round_name = str(league.get('round') or '')
++    for side_name in (home_api_name, away_api_name):
++        if YOUTH_PATTERN.search(side_name) or RESERVE_TEAM_PATTERN.search(side_name):
++            raise ValueError('PINNED_FIXTURE_NON_SENIOR_TEAM_CONFLICT')
++    if round_name and _NON_SENIOR_ROUND_RE.search(round_name):
++        raise ValueError('PINNED_FIXTURE_CATEGORY_UNCORROBORATED: NON_SENIOR_ROUND')
++
++    category_row = {
++        'league_id': league.get('id'),
++        'league': league.get('name'),
++        'country': league.get('country'),
++        'season': league.get('season'),
++        'round': round_name,
++        'home': home_api_name,
++        'away': away_api_name,
++    }
++    classification = category(category_row)
++    persisted_ev, persisted_origin = _load_persisted_category_evidence(selected, fid)
++
++    if classification and persisted_ev:
++        if persisted_ev.get('level') != classification.get('category_level') or persisted_ev.get('gender') != classification.get('gender'):
++            raise ValueError('PINNED_FIXTURE_CATEGORY_CONFLICT: PERSISTED_EVIDENCE_MISMATCH')
++        if persisted_ev.get('home_canonical') and persisted_ev['home_canonical'] != _norm_team_base(home_api_name):
++            raise ValueError('PINNED_FIXTURE_CATEGORY_CONFLICT: PERSISTED_HOME_MISMATCH')
++        if persisted_ev.get('away_canonical') and persisted_ev['away_canonical'] != _norm_team_base(away_api_name):
++            raise ValueError('PINNED_FIXTURE_CATEGORY_CONFLICT: PERSISTED_AWAY_MISMATCH')
++    elif not classification and persisted_ev:
++        if persisted_ev.get('home_canonical') and persisted_ev['home_canonical'] != _norm_team_base(home_api_name):
++            raise ValueError('PINNED_FIXTURE_CATEGORY_CONFLICT: PERSISTED_HOME_MISMATCH')
++        if persisted_ev.get('away_canonical') and persisted_ev['away_canonical'] != _norm_team_base(away_api_name):
++            raise ValueError('PINNED_FIXTURE_CATEGORY_CONFLICT: PERSISTED_AWAY_MISMATCH')
++        classification = category({**category_row, 'national_team_evidence': persisted_ev})
++
++    gender = classification.get('gender')
++    if gender not in ('M', 'F') or classification.get('category_level') != 'SENIOR':
++        reg_entry = lookup(category_row)
++        if not reg_entry:
++            diag = 'UNKNOWN_COMPETITION'
++        elif reg_entry.get('type') == 'NATIONAL_FRIENDLY':
++            diag = 'NATIONAL_FRIENDLY_TEAMS_UNCORROBORATED'
++        else:
++            diag = 'COMPETITION_CATEGORY_NOT_SENIOR'
++        raise ValueError(f'PINNED_FIXTURE_CATEGORY_UNCORROBORATED: {diag}')
++    if selected.get('gender') not in (None, 'UNKNOWN', gender):
++        raise ValueError('PINNED_FIXTURE_CATEGORY_CONFLICT')
++    for side in ('home', 'away'):
++        name = teams[side].get('name') or ''
++        if detect_gender(name) == 'female' and gender != 'F':
++            raise ValueError('PINNED_FIXTURE_CATEGORY_CONFLICT')
++    prov = classification.get('category_provenance') or {}
++    prov_source = (prov.get('fixture_evidence') or {}).get('source') or prov.get('method') or 'COMPETITION_REGISTRY'
++    if persisted_origin:
++        prov_source = f'{prov_source}+{persisted_origin}'
++    LOG.info(f"PINNED_CATEGORY_CORROBORATED fixture={fid} gender={gender} level={classification.get('category_level')} source={prov_source}")
++    when = parse_date((row.get('fixture') or {}).get('date'))
++    if when is None or abs((when - ctx['kickoff']).total_seconds()) > 180:
++        raise ValueError('PINNED_FIXTURE_KICKOFF_CONFLICT')
++    ok, status, reason, _ = fixture_temporal_eligibility(match, row)
++    if not ok:
++        raise ValueError('PINNED_FIXTURE_TEMPORAL_BLOCK: ' + reason)
++    match.verified_fixture_id = fid; match.identity_status = status
++    result = []
++    for side in ('home', 'away'):
++        team = parse_api_team({'team': teams[side]}, gender=gender)
++        if team is None:
++            raise ValueError('PINNED_FIXTURE_TEAM_DATA_MISSING')
++        setattr(match, side + '_name_raw', team.name)
++        setattr(match, side + '_name', team.name)
++        setattr(match, side + '_gender', gender)
++        result.append(team)
++    LOG.ok(f'IDENTITY_ORIGIN=VERIFIED_SELECTION_API_FIXTURE fixture={fid} '
++           f'home={result[0].id} away={result[1].id}')
++    return tuple(result)
++
++
+ def main() -> int:
+     from prematch_execution_control import require_external_confirmation
+     try:require_external_confirmation('--confirm-external' in sys.argv[1:])
+@@ -4702,6 +5111,36 @@ def main() -> int:
+         LOG.warn("Modo --force detectado: se ignorará el caché y se consultará la API en vivo.")
+         sys.argv.remove("--force")
+ 
++    def _pop_cli_int_flag(flag: str) -> Optional[int]:
++        raw_val: Optional[str] = None
++        cleaned = [sys.argv[0]]
++        skip_next = False
++        for idx, tok in enumerate(sys.argv[1:], 1):
++            if skip_next:
++                skip_next = False
++                continue
++            if tok == flag:
++                if idx + 1 >= len(sys.argv):
++                    raise ValueError(f"MISSING_FLAG_VALUE:{flag}")
++                raw_val = sys.argv[idx + 1]
++                skip_next = True
++                continue
++            if tok.startswith(f"{flag}="):
++                raw_val = tok.split("=", 1)[1]
++                continue
++            cleaned.append(tok)
++        sys.argv[:] = cleaned
++        return int(raw_val) if raw_val is not None else None
++
++    try:
++        req_history_limit = _pop_cli_int_flag("--history-limit")
++        req_detail_limit = _pop_cli_int_flag("--history-detail-limit")
++        history_limit = resolve_deep_history_limit(req_history_limit)
++        detail_limit = resolve_deep_history_detail_limit(req_detail_limit, history_limit=history_limit)
++    except ValueError as exc:
++        LOG.error(f"Parámetro histórico inválido: {exc}")
++        return 2
++
+     if len(sys.argv) > 1:
+         bwin_url = sys.argv[1].strip()
+         LOG.info("URL recibida por argumento de consola.")
+@@ -4716,24 +5155,47 @@ def main() -> int:
+     contextual_resolver = ContextualTeamResolver(api)
+     competition_discovery = CompetitionDiscovery(api)
+     fixture_resolver = FixtureResolver(api)
+-    context_collector = ContextCollector(api)
++    context_collector = ContextCollector(
++        api,
++        history_limit=history_limit,
++        detail_limit=detail_limit,
++    )
+ 
+     # ---------------------------------------------------------------- Bwin
+     html: Optional[str] = None
+     browser_catalog = []
+     try:
+-        html = fetch_bwin_html(bwin_url, catalog_out=browser_catalog)
++        if not os.environ.get('PREMATCH_TEMPORAL_IDENTITY_SELECTED', '').strip():
++            html = fetch_bwin_html(bwin_url, catalog_out=browser_catalog)
+     except Exception as exc:
+         # Parche: el HTML solo aporta metadatos; los equipos salen de la URL.
+         LOG.warn(f"No se pudo descargar el HTML de Bwin ({exc}). Se continúa solo con la URL.")
+ 
+     try:
+-        match = parser.parse(bwin_url, html, browser_catalog=browser_catalog)
++        pinned = os.environ.get('PREMATCH_TEMPORAL_IDENTITY_SELECTED', '').strip()
++        if pinned:
++            from prematch_single import load_context
++            from types import SimpleNamespace
++            pinned_ctx = load_context(SimpleNamespace(root=Path.cwd(), selected=Path(pinned), decision=None))
++            if bwin_url != pinned_ctx['url']: raise ValueError('PINNED_URL_CONFLICT')
++            match = BwinMatch(url=bwin_url, event_id=int(pinned_ctx['event_id']),
++                home_name_raw=pinned_ctx['home'], away_name_raw=pinned_ctx['away'],
++                home_name=pinned_ctx['home'], away_name=pinned_ctx['away'],
++                home_gender='UNKNOWN', away_gender='UNKNOWN')
++        else:
++            match = parser.parse(bwin_url, html, browser_catalog=browser_catalog)
+     except Exception as exc:
+         LOG.error(f"Error parseando Bwin: {exc}")
+         return 1
+ 
+     selected_contract=os.environ.get('PREMATCH_TEMPORAL_IDENTITY_SELECTED','').strip()
++    explicit_fixture = None
++    if '--fixture-id' in sys.argv:
++        try: explicit_fixture = int(sys.argv[sys.argv.index('--fixture-id') + 1])
++        except (IndexError, ValueError):
++            LOG.error('INVALID_EXPLICIT_FIXTURE_ID'); return 1
++        if not selected_contract:
++            LOG.error('EXPLICIT_FIXTURE_REQUIRES_VERIFIED_SELECTION'); return 1
+     if selected_contract:
+         try:
+             from prematch_single import load_context, validate_temporal_identity_evidence
+@@ -4767,7 +5229,12 @@ def main() -> int:
+                           and not female_pair_from_slug(slug_match.group(1)))
+     home_team: Optional[APITeam] = None
+     away_team: Optional[APITeam] = None
+-    if ambiguous_slug:
++    if selected_contract:
++        try:
++            home_team, away_team = resolve_selected_fixture(match, api, selected_ctx, explicit_fixture)
++        except Exception as exc:
++            LOG.error(f'PINNED_IDENTITY_REJECTED: {exc}'); return 1
++    elif ambiguous_slug:
+         resolved = resolve_compound_slug(match, html, api)
+         if resolved:
+             home_team, away_team, true_home, true_away = resolved
+@@ -4783,8 +5250,9 @@ def main() -> int:
+ 
+     # Verificar SIEMPRE la pareja, incluso cuando /teams?search= devolvió dos
+     # identidades nominalmente fuertes. Ese era el punto ciego de 5.7.8.
+-    initial_pair_verified = bool(home_team is not None and away_team is not None
+-                                 and verify_initial_pair_fixture(match, home_team, away_team, api))
++    initial_pair_verified = bool((selected_contract and match.verified_fixture_id) or
++                                (home_team is not None and away_team is not None
++                                 and verify_initial_pair_fixture(match, home_team, away_team, api)))
+     if not initial_pair_verified:
+         LOG.warn('La pareja inicial no quedó verificada: búsqueda por fixture y competición.')
+         home_team, away_team = resolve_full_pair_from_competition_fixture(
+@@ -4848,6 +5316,8 @@ def main() -> int:
+     try:
+         fixture = fixture_resolver.resolve(
+             match, home_team, away_team, home_competitions, away_competitions)
++        if selected_contract and fixture.fixture_id != selected_ctx['fixture_id']:
++            raise ValueError('PINNED_FIXTURE_CHANGED_DURING_RESOLUTION')
+     except Exception as exc:
+         LOG.error(f"No se pudo resolver el fixture: {exc}")
+         return 1
+@@ -4880,6 +5350,20 @@ def main() -> int:
+     if expected_dt.tzinfo is None:
+         expected_dt = expected_dt.replace(tzinfo=timezone.utc)
+     gap = (fixture_dt - expected_dt).total_seconds()
++    if match.event_date and isinstance(match.temporal_identity_evidence, dict):
++        tol_min = float(match.temporal_identity_evidence.get('tolerance_minutes') or 4)
++        diff_min = round(abs(gap) / 60.0, 2)
++        match.temporal_identity_evidence['api_kickoff_utc'] = fixture_dt.astimezone(timezone.utc).isoformat()
++        match.temporal_identity_evidence['difference_minutes'] = diff_min
++        if (match.temporal_identity_evidence.get('method') == 'BWIN_EVENT_COUNTDOWN_MINUTES'
++                and abs(gap) > tol_min * 60.0):
++            match.temporal_identity_evidence['corroborated'] = False
++            LOG.error(
++                f'BWIN_API_KICKOFF_CONFLICT: countdown Bwin difiere {diff_min:.2f} min '
++                f'del fixture API (tolerancia {tol_min:.0f} min).'
++            )
++            return 1
++        match.temporal_identity_evidence['corroborated'] = abs(gap) <= tol_min * 60.0
+     if match.event_date and abs(gap) > 36 * 3600:
+         LOG.error(f'FIXTURE_FECHA_INCORRECTA: diferencia {gap/3600:.1f} horas respecto a Bwin.')
+         return 1
+diff --git a/match_identity.py b/match_identity.py
+index c18dc3c7..269a9c0c 100644
+--- a/match_identity.py
++++ b/match_identity.py
+@@ -9,7 +9,7 @@ import json
+ import os
+ import re
+ import unicodedata
+-from datetime import datetime, timezone
++from datetime import datetime, timedelta, timezone
+ from pathlib import Path
+ from urllib.parse import unquote, urlsplit
+ 
+@@ -19,8 +19,64 @@ IDENTITY_API_ONLY='API_FIXTURE_VERIFIED_BWIN_TIME_UNKNOWN'
+ IDENTITY_UNVERIFIED='FIXTURE_UNVERIFIED'
+ LEGACY_IDENTITY='FIXTURE_VERIFIED_BY_GENERATOR'
+ LEGAL={'fc','cf','ec','sc','ac','afc','fk','bk','cd','ca','ss','ssc','club','de','del','do','da'}
+-FEMALE={'w','women','woman','f','femenino','femenina','feminino','feminina','frauen','damen'}
+-CATEGORY={'b','ii','iii','reserves','reserve',*FEMALE}
++FEMALE={'w','women','woman','f','femenino','femenina','feminino','feminina','frauen','damen','fem'}
++MALE_MARKERS={'men','man','masculino','masculina','masculinos','masculinas'}
++RESERVE_OR_B={'b','ii','iii','reserves','reserve','filial'}
++CATEGORY={*RESERVE_OR_B,*FEMALE}
++DISPLAY_PAREN={'local','visitante','home','away','titular','confirmado','probable','xi confirmado','xi oficial'}
++LINGUISTIC_TEAM_ALIASES={
++    'gales':'wales',
++    'espana':'spain',
++    'alemania':'germany',
++    'inglaterra':'england',
++    'escocia':'scotland',
++    'irlanda':'ireland',
++    'irlanda del norte':'northern ireland',
++    'francia':'france',
++    'italia':'italy',
++    'belgica':'belgium',
++    'suiza':'switzerland',
++    'paises bajos':'netherlands',
++    'holanda':'netherlands',
++    'dinamarca':'denmark',
++    'suecia':'sweden',
++    'noruega':'norway',
++    'polonia':'poland',
++    'ucrania':'ukraine',
++    'croacia':'croatia',
++    'grecia':'greece',
++    'turquia':'turkey',
++    'rumania':'romania',
++    'hungria':'hungary',
++    'eslovaquia':'slovakia',
++    'eslovenia':'slovenia',
++    'republica checa':'czech republic',
++    'chequia':'czech republic',
++    'estados unidos':'usa',
++    'eeuu':'usa',
++    'brasil':'brazil',
++    'japon':'japan',
++    'corea del sur':'south korea',
++    'marruecos':'morocco',
++    'argelia':'algeria',
++    'tunez':'tunisia',
++    'egipto':'egypt',
++    'sudafrica':'south africa',
++    'costa de marfil':'ivory coast',
++    'arabia saudi':'saudi arabia',
++    'arabia saudita':'saudi arabia',
++    'emiratos arabes unidos':'united arab emirates',
++    'nueva zelanda':'new zealand',
++    'islandia':'iceland',
++    'finlandia':'finland',
++    'lituania':'lithuania',
++    'letonia':'latvia',
++    'bielorrusia':'belarus',
++    'rusia':'russia',
++    'moldavia':'moldova',
++    'macedonia del norte':'north macedonia',
++    'bosnia y herzegovina':'bosnia herzegovina',
++}
+ 
+ def norm(value):
+     s=unicodedata.normalize('NFKD',str(value or '').casefold())
+@@ -28,31 +84,90 @@ def norm(value):
+     return re.sub(r'[^a-z0-9]+',' ',s).strip()
+ 
+ def category(value):
+-    t=norm(value).split()
+-    return {x for x in t if x in CATEGORY or re.fullmatch(r'u(?:1[5-9]|2[0-3])',x)}
+-
+-def keys(value):
+     text=norm(value)
+-    tokens=text.split()
+-    variants={text}
+-    while len(tokens)>1 and tokens[0] in LEGAL:
+-        tokens=tokens[1:]
+-    while len(tokens)>1 and tokens[-1] in LEGAL:
+-        tokens=tokens[:-1]
+-    variants.add(' '.join(tokens))
++    t=text.split()
++    out=set()
++    for idx,x in enumerate(t):
++        if x in CATEGORY or re.fullmatch(r'u(?:1[5-9]|2[0-3])',x):
++            out.add(x)
++        elif x=='sub' and idx+1<len(t) and re.fullmatch(r'(?:1[5-9]|2[0-3])',t[idx+1]):
++            out.add(f'u{t[idx+1]}')
++        elif x in {'juvenil','juveniles'}:
++            out.add('youth')
++    return out
++
++def split_team_descriptor(value):
++    """Separa nombre núcleo de equipo, paréntesis bilingües y sufijos descriptivos tras `;`."""
++    cleaned=re.sub(r'\[([^]]+)\]\([^)]*\)',r'\1',str(value or '')).strip(' `*.;,')
++    # Separa metadatos de competición/categoría tras ';' (ej. 'Portugal; selecciones absolutas masculinas')
++    base,descriptor=(cleaned.split(';',1)+[''])[:2]
++    base=base.strip(' `*;,.')
++    descriptor=descriptor.strip(' `*;,.')
++    primary=re.sub(r'\s*\([^)]*\)','',base).strip()
++    parens=[p.strip() for p in re.findall(r'\(([^()]*)\)',base) if p.strip()]
++    return {'raw':cleaned,'base':base,'primary':primary,'parens':parens,'descriptor':descriptor}
++
++def _canonical_variants(text):
++    k=norm(text)
++    if not k:
++        return set()
++    variants={k}
++    if k in LINGUISTIC_TEAM_ALIASES:
++        variants.add(LINGUISTIC_TEAM_ALIASES[k])
++    tokens=k.split()
++    t_front=list(tokens)
++    while len(t_front)>1 and t_front[0] in LEGAL:
++        t_front=t_front[1:]
++    while len(t_front)>1 and t_front[-1] in LEGAL:
++        t_front=t_front[:-1]
++    reduced=' '.join(t_front)
++    if reduced:
++        variants.add(reduced)
++        if reduced in LINGUISTIC_TEAM_ALIASES:
++            variants.add(LINGUISTIC_TEAM_ALIASES[reduced])
+     if tokens and tokens[0]=='deportivo' and len(tokens)>=2:
+         # Solo si núcleo completo coincide con el nombre canónico, nunca por una palabra común.
+-        variants.add(' '.join(tokens[1:]))
+-    return {x for x in variants if x and len(x)>=4}
++        dep=' '.join(tokens[1:])
++        variants.add(dep)
++        if dep in LINGUISTIC_TEAM_ALIASES:
++            variants.add(LINGUISTIC_TEAM_ALIASES[dep])
++    return {x for x in variants if x and len(x)>=3}
++
++def keys(value):
++    parts=split_team_descriptor(value)
++    out=set()
++    primary_vars=_canonical_variants(parts['primary'])
++    out.update(primary_vars)
++    # Solo incluye alias entre paréntesis si no es etiqueta genérica y comparte vínculo lingüístico o núcleo
++    for part in parts['parens']:
++        pk=norm(part)
++        if not pk or pk in DISPLAY_PAREN:
++            continue
++        p_vars=_canonical_variants(part)
++        if p_vars & primary_vars:
++            out.update(p_vars)
++        else:
++            main_tok=set(norm(parts['primary']).split())-LEGAL
++            part_tok=set(pk.split())-LEGAL
++            if main_tok & part_tok:
++                out.update(p_vars)
++    return {x for x in out if x and (len(x)>=4 or x in {'usa'})}
+ 
+ def compare_report_name(name, side, opposite):
+     """EXACT/ALIAS/AMBIGUOUS/MISMATCH. Nunca acepta una mera coincidencia parcial."""
++    parts=split_team_descriptor(name)
+     targets=[side.get('api_name'),side.get('bwin_name')]
+     other=[opposite.get('api_name'),opposite.get('bwin_name')]
+     report_categories=category(name)
+     expected=side.get('category','male')
++    full_tokens=set(norm(name).split())
++    if expected=='female' and (full_tokens & MALE_MARKERS):
++        return 'MISMATCH'
+     if (report_categories & FEMALE) and expected!='female': return 'MISMATCH'
+-    if (report_categories & {'b','ii','iii'}) and not (category(' '.join(t or '' for t in targets)) & report_categories):
++    target_cats=category(' '.join(t or '' for t in targets))
++    if (report_categories & {'b','ii','iii','youth'}) and not (target_cats & report_categories):
++        return 'MISMATCH'
++    if any(c.startswith('u') for c in report_categories) and not (target_cats & {c for c in report_categories if c.startswith('u')}):
+         return 'MISMATCH'
+     if expected=='female' and not report_categories:
+         # Un nombre sin W en informe femenino puede existir; no se certifica por ello.
+@@ -60,6 +175,10 @@ def compare_report_name(name, side, opposite):
+     k=keys(name)
+     theirs=set().union(*(keys(n) for n in targets if n))
+     others=set().union(*(keys(n) for n in other if n))
++    # Rechaza si un paréntesis explícito menciona al equipo rival (ej. 'Wales (Portugal)')
++    for part in parts['parens']:
++        if norm(part) not in DISPLAY_PAREN and (_canonical_variants(part) & others) and not (_canonical_variants(part) & theirs):
++            return 'MISMATCH'
+     if k & others and not k & theirs: return 'MISMATCH'
+     if k & theirs:
+         if k & others: return 'AMBIGUOUS'
+@@ -102,16 +221,39 @@ def identity_from_payload(payload):
+     if temporal is not None:
+         if source_status!=IDENTITY_TIME_VERIFIED or not isinstance(temporal,dict):
+             raise ValueError('Evidencia temporal incompatible con estado de identidad')
+-        for field in ('fixture_id','bwin_event_id','bwin_url','home','away','kickoff_utc',
+-                      'preflight_sha256','discovery_sha256'):
+-            if temporal.get(field) in (None,''):
+-                raise ValueError('Evidencia temporal incompleta: '+field)
+-        if (str(temporal['fixture_id'])!=str(fid) or str(temporal['bwin_event_id'])!=eid or
+-                temporal['bwin_url']!=url or norm(temporal['home'])!=norm(out['home']['api_name']) or
+-                norm(temporal['away'])!=norm(out['away']['api_name'])):
+-            raise ValueError('Evidencia temporal contradice la identidad del contexto')
++        if temporal.get('schema_version') in {'1.0-browser-event-time', '1.1-browser-event-time'}:
++            for field in ('source','kickoff_utc'):
++                if temporal.get(field) in (None,''):
++                    raise ValueError('Evidencia temporal incompleta: '+field)
++            obs=temporal.get('catalog_observations') or []
++            if not isinstance(obs,list) or not obs or not all(isinstance(r,dict) for r in obs):
++                raise ValueError('Evidencia temporal incompleta: catalog_observations')
++            if any(str(r.get('bwin_event_id'))!=eid or r.get('bwin_url')!=url for r in obs):
++                raise ValueError('Evidencia temporal contradice la identidad del contexto')
++            if temporal.get('method') == 'BWIN_EVENT_COUNTDOWN_MINUTES':
++                obs_raw = temporal.get('observed_at_utc')
++                cd_raw = temporal.get('countdown_minutes')
++                if not obs_raw or cd_raw is None:
++                    raise ValueError('Evidencia temporal countdown incompleta: observed_at_utc/countdown_minutes')
++                obs_dt = datetime.fromisoformat(str(obs_raw).replace('Z', '+00:00'))
++                ko_dt = datetime.fromisoformat(str(temporal['kickoff_utc']).replace('Z', '+00:00'))
++                cd_mins = int(cd_raw)
++                if obs_dt.tzinfo is None or ko_dt.tzinfo is None or cd_mins <= 0 or cd_mins > 180:
++                    raise ValueError('Evidencia temporal countdown inválida')
++                if abs(((obs_dt + timedelta(minutes=cd_mins)) - ko_dt).total_seconds()) > 1.0:
++                    raise ValueError('Evidencia temporal countdown inconsistente con kickoff_utc')
++        else:
++            for field in ('fixture_id','bwin_event_id','bwin_url','home','away','kickoff_utc',
++                          'preflight_sha256','discovery_sha256'):
++                if temporal.get(field) in (None,''):
++                    raise ValueError('Evidencia temporal incompleta: '+field)
++            if (str(temporal['fixture_id'])!=str(fid) or str(temporal['bwin_event_id'])!=eid or
++                    temporal['bwin_url']!=url or norm(temporal['home'])!=norm(out['home']['api_name']) or
++                    norm(temporal['away'])!=norm(out['away']['api_name'])):
++                raise ValueError('Evidencia temporal contradice la identidad del contexto')
+         temporal_kickoff=datetime.fromisoformat(str(temporal['kickoff_utc']).replace('Z','+00:00'))
+-        if temporal_kickoff.tzinfo is None or abs((temporal_kickoff-dt).total_seconds())>180:
++        tol_sec = min(240.0, float(temporal.get('tolerance_minutes') or 3) * 60.0)
++        if temporal_kickoff.tzinfo is None or abs((temporal_kickoff-dt).total_seconds())>tol_sec:
+             raise ValueError('Evidencia temporal contradice el kickoff API')
+         out['temporal_identity_evidence']=temporal
+     if not all(out[s]['api_name'] and out[s]['bwin_name'] for s in ('home','away')):
+diff --git a/prematch_multi.py b/prematch_multi.py
+index d17d3e7e..1aeb394e 100644
+--- a/prematch_multi.py
++++ b/prematch_multi.py
+@@ -127,6 +127,18 @@ def _kickoff_from_manifest(root: Path, event: str, state: dict) -> datetime:
+                 (obj.get('fixture') or {}).get('date'),
+                 (obj.get('match') or {}).get('kickoff_utc'),
+             ])
++    if not candidates and state.get('canonical_case'):
++        ref = state['canonical_case']; path = Path(ref.get('path') or '')
++        if not path.is_file() or sha(path) != ref.get('sha256'):
++            raise ValueError('CANONICAL_CASE_HASH_INVALID')
++        case = json.loads(path.read_text(encoding='utf-8'))
++        from prematch_single import load_context
++        from types import SimpleNamespace
++        ctx = load_context(SimpleNamespace(root=root, selected=Path(case['selected']['path']), decision=None))
++        if (ctx['event_id'] != event or ctx['url'] != state.get('url') or
++                sha(ctx['selected_path']) != case['selected']['sha256']):
++            raise ValueError('CANONICAL_CASE_IDENTITY_CONFLICT')
++        candidates.append(ctx['kickoff'].isoformat())
+     parsed = []
+     for raw in candidates:
+         try:
+@@ -370,6 +382,20 @@ def prepare_one(root: Path, url: str, python: str, shared_file: Path,
+             state['status']='ERROR_ARCHIVOS'
+             state['error']='Identidad: '+str(exc)
+     state['finished_at'] = utc_now()
++    case_path = location / 'case.json'
++    if case_path.is_file():
++        try:
++            case_doc = json.loads(case_path.read_text(encoding='utf-8-sig'))
++            if str(case_doc.get('event_id') or '') == event and case_doc.get('schema_version') == '2.0-canonical-prematch-case':
++                if isinstance(case_doc.get('selected'), dict) and Path(case_doc['selected'].get('path', '')).is_file():
++                    state['selected_match'] = case_doc['selected']
++                if isinstance(case_doc.get('source_handoff'), dict) and Path(case_doc['source_handoff'].get('path', '')).is_file():
++                    state['source_handoff'] = case_doc['source_handoff']
++                state['canonical_case'] = {'path': str(case_path.resolve()), 'sha256': sha(case_path), 'size': case_path.stat().st_size}
++                if case_doc.get('kickoff_madrid'):
++                    state['kickoff_madrid'] = case_doc['kickoff_madrid']
++        except (OSError, ValueError, TypeError, json.JSONDecodeError):
++            pass
+     save_manifest(root,event,state)
+     say(f'[{event}] PREPARACIÓN: {state["status"]}')
+     return state['status'] in {'PREPARADO', 'PREPARADO_PROVISIONAL'}
+@@ -395,7 +421,8 @@ def bind_identity(root: Path, event: str, state: dict) -> str:
+ 
+ 
+ def finish_one(root: Path, event: str, python: str, override_report: str | None = None,
+-               allow_no_odds: bool = False, historical: bool = False) -> bool:
++               allow_no_odds: bool = False, historical: bool = False,
++               shadow_mode: bool = False, lineup_cutoff_minutes: int = 15) -> bool:
+     state = load_manifest(root,event)
+     if not historical:
+         ensure_event_operation_window(root, event, state,
+@@ -494,9 +521,17 @@ def finish_one(root: Path, event: str, python: str, override_report: str | None
+         return False
+     validated=json.loads(valpath.read_text(encoding='utf-8'))
+     state['validation_state']=validated.get('status')
++    blocks = [item for item in validated.get('issues', []) if item.get('severity') == 'BLOCK']
++    reviews = [item for item in validated.get('issues', []) if item.get('severity') == 'REVIEW']
++    state['validation_summary'] = {
++        'status': validated.get('status'),
++        'exit_code': valcode,
++        'blocks': len(blocks),
++        'reviews': len(reviews),
++        'motor_allowed': valcode in (0, 1) and validated.get('status') != 'BLOQUEADO_PREPARTIDO',
++    }
+     if valcode not in (0,1) or validated.get('status')=='BLOQUEADO_PREPARTIDO':
+         state['status']='BLOQUEADO_VALIDACION';save_manifest(root,event,state)
+-        blocks = [item for item in validated.get('issues', []) if item.get('severity') == 'BLOCK']
+         for item in blocks:
+             say(f'[{event}] BLOCK {item.get("code", "SIN_CODIGO")}: {item.get("detail", "")[:300]}')
+         say(f'[{event}] Validación bloqueada: {valdir / ("validacion_" + event + ".md")}')
+@@ -543,7 +578,7 @@ No reejecutes scraper, generador, validador ni motor. No uses web.
+ - API-Football TXT: `{inputs['context']['path']}`
+ - API-Football JSON de la misma captura: `{inputs.get('context_json',{}).get('path','NO DISPONIBLE')}`
+ - Bwin: `{inputs.get('odds',{}).get('path','NO DISPONIBLE')}`
+-- Informe cualitativo (Gemini/Perplexity): `{pinned.resolve()}`
++- Informe cualitativo (consolidado): `{pinned.resolve()}`
+ - Matriz: `{(probdir/f'matriz_evidencia_{event}.json').resolve()}`
+ - Ranking: `{(probdir/f'ranking_probabilistico_{event}.json').resolve()}`
+ - Resumen: `{(probdir/f'resumen_codex_{event}.md').resolve()}`
+@@ -553,13 +588,126 @@ No reejecutes scraper, generador, validador ni motor. No uses web.
+ - Contexto competitivo: `{(probdir/f'contexto_competitivo_{event}.md').resolve()}`
+ - Contexto competitivo JSON: `{(probdir/f'contexto_competitivo_{event}.json').resolve()}`
+ 
+-Comprueba identities, timestamps, XI y mercado literal. Si el kickoff ya ocurrió,
+-solo auditoría retrospectiva basada en snapshots prepartido; NO apuestas live.
++Comprueba identidades, timestamps, XI y mercado literal. Mientras no haya pasado el kickoff
++(independientemente del control de XI en T-{lineup_cutoff_minutes}), la evaluación PREMATCH sigue vigente sujeta a frescura de cuotas y elegibilidad;
++solo si el kickoff ya ocurrió aplica auditoría retrospectiva basada en snapshots prepartido sin apuestas live.
+ Produce `outputs/matches/{event}/analysis/analisis_{event}.md` exclusivamente para este evento.
+ ''',encoding='utf-8')
+         state['codex_prompt']=str(prompt.resolve())
+         say(f'[{event}] LISTO PARA CODEX: {prompt.relative_to(root)}')
++    # Auditoría y reconciliación canónica P0 de XI confirmados en manifest y cierre Shadow
++    lineups_confirmed_22 = False
++    if code == 0:
++        from bet_engine.context.lineup_manager import evaluate_fixture_lineup_state, extract_fixture_team_identity
++        ctx_json_meta = (state.get('inputs') or {}).get('context_json') or {}
++        ctx_doc_lu = json.loads(Path(ctx_json_meta['path']).read_text(encoding='utf-8-sig')) if ctx_json_meta.get('path') and Path(ctx_json_meta['path']).is_file() else {}
++        ident_meta = (state.get('inputs') or {}).get('identity') or {}
++        ident_doc_lu = json.loads(Path(ident_meta['path']).read_text(encoding='utf-8-sig')) if ident_meta.get('path') and Path(ident_meta['path']).is_file() else {}
++        case_file_lu = event_dir(root, event) / 'case.json'
++        case_doc_lu = json.loads(case_file_lu.read_text(encoding='utf-8-sig')) if case_file_lu.is_file() else {}
++        team_ident = extract_fixture_team_identity(ctx_doc_lu, case_doc=case_doc_lu, identity_doc=ident_doc_lu)
++        ml_meta = (state.get('inputs') or {}).get('manual_lineups') or {}
++        ml_doc = json.loads(Path(ml_meta['path']).read_text(encoding='utf-8-sig')) if ml_meta.get('path') and Path(ml_meta['path']).is_file() else None
++        raw_lu_resp = ((ctx_doc_lu.get('context') or {}).get('lineups') or {}).get('response')
++        lu_prov = ((ctx_doc_lu.get('context') or {}).get('lineups') or {}).get('provenance') or {}
++        diff_meta = ctx_doc_lu.get('differential_refresh') or {}
++        api_acq_ts = (
++            diff_meta.get('acquired_at_utc')
++            or ((ctx_doc_lu.get('context') or {}).get('lineups') or {}).get('_acquired_at_utc')
++            or ctx_doc_lu.get('generated_at')
++        )
++        if ml_doc is None and lu_prov.get('lineup_status') in {'LINEUPS_MANUAL_VERIFIED', 'LINEUPS_EXTERNAL_CONFIRMED'}:
++            ml_doc = {
++                'lineup_status': lu_prov['lineup_status'],
++                'source': lu_prov.get('source'),
++                'source_url': lu_prov.get('source_url'),
++                'source_kind': lu_prov.get('source_kind'),
++                'primary_evidence_verified': lu_prov.get('primary_evidence_verified', False),
++                'captured_at_utc': lu_prov.get('captured_at_utc'),
++                'sides': {'home': {'starters_count': 11}, 'away': {'starters_count': 11}},
++            }
++            raw_lu_resp = None
++        if team_ident.get('kickoff_utc'):
++            lu_eval = evaluate_fixture_lineup_state(
++                api_lineups_response=raw_lu_resp,
++                manual_lineup=ml_doc,
++                qualitative_markdown=pinned.read_text(encoding='utf-8-sig', errors='replace'),
++                fixture_id=int(team_ident.get('fixture_id') or 0),
++                event_id=str(event),
++                home_id=team_ident.get('home_id'),
++                away_id=team_ident.get('away_id'),
++                home_name=str(team_ident.get('home_name') or ''),
++                away_name=str(team_ident.get('away_name') or ''),
++                home_aliases=team_ident.get('home_aliases'),
++                away_aliases=team_ident.get('away_aliases'),
++                is_national_team=bool(team_ident.get('is_national_team')),
++                kickoff_utc=team_ident['kickoff_utc'],
++                now_utc=state['finish_completed_at'],
++                lineup_cutoff_minutes=lineup_cutoff_minutes,
++                api_acquired_at_utc=api_acq_ts,
++                last_verified_state=state.get('lineup_state'),
++            )
++            state['lineup_state'] = {k: v for k, v in lu_eval.items() if k != 'extracted_manual_payload'}
++            lineups_confirmed_22 = bool(lu_eval['confirmed_complete_22'])
++        state['eligible_for_final_analysis'] = bool(code == 0 and not blocks)
++        state['eligible_for_actionable_pick'] = bool(lineups_confirmed_22 and not historical and (inputs.get('odds') is not None))
++        state['actionable_bet'] = False
++        if not lineups_confirmed_22:
++            state['final_eligibility'] = 'BLOCKED_MISSING_CONFIRMED_22_STARTERS'
++        elif historical:
++            state['final_eligibility'] = 'HISTORICAL_AUDIT_NO_LIVE_BET'
++        elif inputs.get('odds') is None:
++            state['final_eligibility'] = 'NO_ODDS_STATISTICAL_ONLY'
++        else:
++            state['final_eligibility'] = 'ELIGIBLE_PENDING_CLOSURE_CHECKS'
++        # Mantiene consistencia con lineups/lineup_audit_<E>.json si existe caso
++        lu_audit_path = event_dir(root, event) / 'lineups' / f'lineup_audit_{event}.json'
++        if state.get('lineup_state') and lu_audit_path.parent.is_dir():
++            prev_audit = {}
++            if lu_audit_path.is_file():
++                try:
++                    prev_audit = json.loads(lu_audit_path.read_text(encoding='utf-8'))
++                except (OSError, ValueError):
++                    prev_audit = {}
++            prev_audit.update({
++                'event_id': str(event),
++                'fixture_id': int(team_ident.get('fixture_id') or prev_audit.get('fixture_id') or 0),
++                'reconciled_at_finish_utc': state['finish_completed_at'],
++                'lineup_state': state['lineup_state'],
++                'original_inputs_untouched': True,
++            })
++            lu_audit_path.write_text(json.dumps(prev_audit, ensure_ascii=False, indent=2) + '\n', encoding='utf-8')
+     save_manifest(root,event,state)
++    if code == 0 and shadow_mode:
++        try:
++            from bet_engine.orchestration import run_shadow_for_event_dir
++            sh_res = run_shadow_for_event_dir(
++                root,
++                event,
++                historical=historical,
++                now_utc=(None if historical else utc_now()),
++                min_lead_minutes=(0 if historical else FINISH_MIN_LEAD_MINUTES),
++                lineup_cutoff_minutes=lineup_cutoff_minutes,
++            )
++            say(f'[{event}] SHADOW MODE ({sh_res.get("status", "ERR")}): {sh_res.get("path") or sh_res.get("error")} | {sh_res.get("elapsed_ms")} ms')
++            prompt_path = event_dir(root, event) / f'CODEX_{event}.md'
++            if not historical and sh_res.get('ok') and sh_res.get('path') and prompt_path.is_file():
++                try:
++                    sh_doc = json.loads(Path(sh_res['path']).read_text(encoding='utf-8'))
++                    ts_block = (
++                        f"\n## Timestamps de precios y probabilidades\n"
++                        f"- Captura de precios Bwin (UTC): `{sh_doc.get('odds_captured_utc')}` | "
++                        f"SHA-256: `{sh_doc.get('odds_sha256')}` | "
++                        f"Selecciones modeladas: `{sh_doc.get('odds_selection_count')}`\n"
++                        f"- Cálculo de probabilidades Shadow (UTC): `{sh_doc.get('probabilities_computed_at_utc')}`\n"
++                        f"- Evaluación de precios Shadow (UTC): `{sh_doc.get('prices_evaluated_at_utc')}`\n"
++                        f"- Shadow summary: `{sh_res['path']}`\n"
++                    )
++                    prompt_path.write_text(prompt_path.read_text(encoding='utf-8') + ts_block, encoding='utf-8')
++                except (OSError, ValueError, json.JSONDecodeError):
++                    pass
++        except Exception as exc:
++            say(f'[{event}] [SHADOW_WARN] fallo no bloqueante: {exc}')
+     return code==0
+ 
+ 
+@@ -587,6 +735,20 @@ def retry_context_one(root: Path, event: str, python: str, shared_file: Path,
+         raise ValueError(f'{event}: falta snapshot de cuotas intacto (ID/SHA256); '
+                          'no se permite retry-context.')
+ 
++    preserved = {}
++    archive = event_dir(root,event)/'archives'/('before_retry_context_'+datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%S%fZ'))
++    for kind in ('context', 'context_json', 'identity'):
++        ref = state.get('inputs', {}).get(kind) or {}
++        path = Path(ref.get('path') or '')
++        if path.is_file() and ref.get('sha256') == sha(path):
++            archive.mkdir(parents=True, exist_ok=True)
++            target = archive/path.name
++            shutil.copy2(path, target)
++            if sha(target) != ref['sha256']: raise ValueError('CONTEXT_ARCHIVE_HASH_MISMATCH')
++            preserved[kind] = {'path':str(target.resolve()), 'sha256':sha(target)}
++    if preserved:
++        state['previous_context_snapshot'] = {'inputs':preserved, 'current':False,
++            'status':'ARCHIVED_NOT_REFRESHED', 'archived_at_utc':utc_now()}
+     state['status'] = 'REINTENTANDO_CONTEXTO'
+     state['inputs'].pop('context', None)
+     state['inputs'].pop('context_json', None)
+@@ -777,6 +939,8 @@ def main(argv: list[str] | None = None) -> int:
+     f.add_argument('--workers',type=int,default=2)
+     f.add_argument('--allow-no-odds',action='store_true')
+     f.add_argument('--historical',action='store_true',help='Auditoría retrospectiva de snapshots prepartido; nunca apuestas en vivo')
++    f.add_argument('--shadow-mode',action='store_true',help='Opt-in: ejecuta Bet Engine en Shadow Mode paralelo sin alterar salidas operativas')
++    f.add_argument('--lineup-cutoff-minutes',type=int,default=15,help='Corte prepartido para exigir 22 titulares confirmados (default 15)')
+     s=sub.add_parser('status',help='Manifiestos multi, o el handoff diario con --date (sin manifest.json)')
+     s.add_argument('--event-id',action='append')
+     s.add_argument('--date',help='YYYY-MM-DD, hoy o mañana. Lee outputs/discovery de prematch_daily; no exige manifest')
+@@ -857,7 +1021,7 @@ def main(argv: list[str] | None = None) -> int:
+         ids=args.event_id
+         if len(set(ids))!=len(ids): parser.error('IDs duplicados')
+         with concurrent.futures.ThreadPoolExecutor(max_workers=args.workers) as pool:
+-            future_map={pool.submit(finish_one,root,event,python,args.report,args.allow_no_odds,args.historical):event
++            future_map={pool.submit(finish_one,root,event,python,args.report,args.allow_no_odds,args.historical,args.shadow_mode,args.lineup_cutoff_minutes):event
+                         for event in ids}
+             results=[]
+             for task in concurrent.futures.as_completed(future_map):
+diff --git a/prematch_single.py b/prematch_single.py
+index 3ee4d507..a0b614bf 100644
+--- a/prematch_single.py
++++ b/prematch_single.py
+@@ -420,7 +420,10 @@ def cmd_prepare(ctx,args):
+     cmd=[sys.executable,str(multi),'--root',str(ctx['root']),'prepare','--url',ctx['url'],
+          '--workers','1','--api-minute',str(args.api_minute),'--api-second',str(args.api_second)]
+     if args.reuse_odds:cmd+=['--reuse-odds-selected',str(ctx['selected_path'])]
+-    code=run(cmd,ctx['root'])
++    env=os.environ.copy()
++    env['PREMATCH_TEMPORAL_IDENTITY_SELECTED']=str(ctx['selected_path'])
++    validate_temporal_identity_evidence(ctx)
++    code=run(cmd,ctx['root'],env=env)
+     if code:raise ValueError(f'prepare devolvió código {code}; revisa outputs/matches/{ctx["event_id"]}/logs/')
+     manifest=match_manifest(ctx)
+     if manifest.get('status')!='PREPARADO':raise ValueError(f'prepare no terminó PREPARADO: {manifest.get("status")}')
+@@ -528,6 +531,24 @@ def cmd_verify_temporal_identity(ctx,args):
+     return 0
+ 
+ 
++def odds_changes(before, after, event):
++    """Compare exact contracts; absence in a capture is not suspension."""
++    from prematch_opportunity_scanner import parse_bwin_txt
++    old, _ = parse_bwin_txt(before, event)
++    new, _ = parse_bwin_txt(after, event)
++    a = {(r['market'], r['selection']): r['odd'] for r in old}
++    b = {(r['market'], r['selection']): r['odd'] for r in new}
++    def row(key): return {'market': key[0], 'selection': key[1]}
++    return {'added': [row(k) for k in sorted(b.keys()-a.keys())],
++            'not_observed_in_new_capture': [row(k) for k in sorted(a.keys()-b.keys())],
++            'price_changes': [{**row(k), 'before': a[k], 'after': b[k]}
++                              for k in sorted(a.keys() & b.keys()) if a[k] != b[k]],
++            'suspension_status': 'NOT_INFERRED_FROM_ABSENCE',
++            'affected_modules': ['market_mapping', 'price_evaluation', 'final_validation'],
++            'reusable_modules': ['historical_statistics'],
++            'reevaluation_status': 'PENDING_EXPLICIT_VALIDATION_NO_AUTOMATIC_PICKS'}
++
++
+ def cmd_refresh(ctx,args):
+     ensure_prematch(ctx,min_lead=args.min_refresh_lead_minutes)
+     ensure_root(ctx,args.multi)
+@@ -542,7 +563,7 @@ def cmd_refresh(ctx,args):
+     archive=ctx['directory']/'archives'/('refresh_'+datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%S%fZ'))
+     preserved=backup(path,archive)
+     backup(ctx['directory']/'manifest.json',archive)
+-    for folder in ('validation','probabilistic','analysis'):
++    for folder in ('validation','probabilistic','analysis','shadow'):
+         source=ctx['directory']/folder
+         if source.is_dir():shutil.copytree(source,archive/folder)
+     for name in (f'CODEX_{ctx["event_id"]}.md','analysis_input_binding.json','final_review.json'):
+@@ -572,22 +593,50 @@ def cmd_refresh(ctx,args):
+                     raise ValueError(f'{kind} cambió durante el refresco de cuotas')
+         if dt(snap['capture'],'capture')<=dt(previous['capture'],'old_capture'):
+             raise ValueError('La captura no es posterior a la anterior: no hay refresco verificable')
++        delta = odds_changes(preserved, path, ctx['event_id'])
++        atomic_json(archive/'odds_delta.json', delta)
+         # No se modifica la identidad, el contexto API ni sus hashes.
+         m['inputs']['odds']={'path':str(path.resolve()),'sha256':snap['sha256'],
+                              'generated_from':str(path.resolve()),'refreshed_at_utc':iso_utc()}
+         m.setdefault('steps',{})['scraper_refresh']=0
+         m['odds_refresh_at_utc']=iso_utc()
++        m['odds_delta']={'path':str((archive/'odds_delta.json').resolve()),
++                         'sha256':sha(archive/'odds_delta.json')}
+         m['invalidated_by_odds_refresh']={'previous_status':m.get('status'),'previous_sha256':previous['sha256'],
+-                                          'invalidated_at_utc':iso_utc(),'stages':['validation','probabilistic','codex_analysis','final_review']}
++                                          'invalidated_at_utc':iso_utc(),'stages':['validation','probabilistic','shadow','codex_analysis','final_review']}
+         m['status']='PREPARADO'
++        m['next_action']='finalize'
+         for step in ('validacion', 'motor'):
+             m.get('steps', {}).pop(step, None)
+         m.pop('codex_prompt',None)
+         m.pop('validation_state',None)
++        # Invalidate stale Shadow summary and Codex handoff (already archived above)
++        stale_shadow = ctx['directory'] / 'shadow' / f'shadow_summary_{ctx["event_id"]}.json'
++        if stale_shadow.is_file():
++            stale_shadow.unlink()
++        stale_codex = ctx['directory'] / f'CODEX_{ctx["event_id"]}.md'
++        if stale_codex.is_file():
++            stale_codex.unlink()
+         atomic_json(ctx['directory']/'manifest.json',m)
++        reeval = {'executed': False}
++        if (m.get('inputs') or {}).get('context_json'):
++            try:
++                from bet_engine.orchestration import run_shadow_for_event_dir
++                sh_res = run_shadow_for_event_dir(
++                    ctx['root'],
++                    ctx['event_id'],
++                    historical=False,
++                    now_utc=iso_utc(),
++                    max_odds_age_minutes=args.max_odds_age_minutes,
++                    min_lead_minutes=max(REFRESH_MIN_LEAD_MINUTES, int(args.min_refresh_lead_minutes)),
++                )
++                reeval = {'executed': True, 'shadow': sh_res}
++            except Exception as exc:
++                reeval = {'executed': False, 'error': str(exc)}
+         update_state(ctx,'refresh-odds','OK',{'odds':snap,'previous_sha256':previous['sha256'],
+-                                              'archived_previous':str(preserved),'log':str(log)})
+-        print(f'Cuotas actualizadas para {ctx["event_id"]}; contexto API NO repetido; SHA manifest actualizado.')
++                                              'archived_previous':str(preserved),'log':str(log),
++                                              'reevaluation':reeval})
++        print(f'Cuotas actualizadas para {ctx["event_id"]}; contexto API NO repetido; SHA manifest y Shadow actualizados.')
+         return 0
+     except Exception:
+         # Restaurar snapshot previo, excepto si ya se actualizó manifiesto.
+@@ -601,21 +650,159 @@ def cmd_refresh(ctx,args):
+         raise
+ 
+ 
++def cmd_acquire_lineups(ctx, args):
++    """Target-only fresh API acquisition, then the existing offline delta path."""
++    from bet_engine.context.lineup_manager import evaluate_fixture_lineup_state, extract_fixture_team_identity
++
++    cutoff_min = int(getattr(args, 'lineup_cutoff_minutes', 15))
++    ensure_prematch(ctx, min_lead=args.min_refresh_lead_minutes)
++    manifest = match_manifest(ctx)
++    if not all(k in manifest.get('inputs', {}) for k in ('context', 'context_json', 'identity')):
++        raise ValueError('LINEUPS_REQUIRE_PREPARED_CONTEXT')
++    from generate_context import APIFootballClient, API_KEY, BwinMatch, resolve_selected_fixture
++    from prematch_cache_record import store_acquisition
++    if not API_KEY: raise ValueError('API_CREDENTIALS_MISSING')
++    api = APIFootballClient(API_KEY)
++    match = BwinMatch(url=ctx['url'], event_id=int(ctx['event_id']),
++        home_name_raw=ctx['home'], away_name_raw=ctx['away'],
++        home_name=ctx['home'], away_name=ctx['away'], home_gender='UNKNOWN', away_gender='UNKNOWN',
++        event_date=ctx['kickoff'].isoformat())
++    resolve_selected_fixture(match, api, ctx)
++    payload = api.get('fixtures/lineups', {'fixture': ctx['fixture_id']}, use_cache=False)
++    snapshot = store_acquisition(ctx['directory']/'context_acquisitions', payload)
++    now = local_now()
++    ensure_prematch(ctx, min_lead=args.min_refresh_lead_minutes)
++    if payload.get('errors'): raise ValueError('LINEUPS_PROVIDER_ERROR: snapshot preserved')
++
++    ctx_json_path = Path((manifest.get('inputs') or {}).get('context_json', {}).get('path') or '')
++    ctx_doc = read_json(ctx_json_path) if ctx_json_path.is_file() else {}
++    id_path = Path((manifest.get('inputs') or {}).get('identity', {}).get('path') or '')
++    id_doc = read_json(id_path) if id_path.is_file() else {}
++    team_ident = extract_fixture_team_identity(ctx_doc, identity_doc=id_doc, selection_doc=ctx.get('selection'))
++    home_id = team_ident.get('home_id') if team_ident.get('home_id') is not None else ctx['selection'].get('home_api_id')
++    away_id = team_ident.get('away_id') if team_ident.get('away_id') is not None else ctx['selection'].get('away_api_id')
++    resp_list = payload.get('response') or []
++    qual_md = None
++    for qk in ('qualitative_research', 'report'):
++        qref = (manifest.get('inputs') or {}).get(qk) or {}
++        if qref.get('path') and Path(qref['path']).is_file():
++            qual_md = Path(qref['path']).read_text(encoding='utf-8-sig', errors='replace')
++            break
++
++    lu_eval = evaluate_fixture_lineup_state(
++        api_lineups_response=resp_list,
++        qualitative_markdown=qual_md,
++        fixture_id=int(ctx['fixture_id']),
++        event_id=str(ctx['event_id']),
++        home_id=home_id,
++        away_id=away_id,
++        home_name=str(team_ident.get('home_name') or ctx['home']),
++        away_name=str(team_ident.get('away_name') or ctx['away']),
++        home_aliases=team_ident.get('home_aliases'),
++        away_aliases=team_ident.get('away_aliases'),
++        is_national_team=bool(team_ident.get('is_national_team')),
++        kickoff_utc=ctx['kickoff'],
++        now_utc=now,
++        lineup_cutoff_minutes=cutoff_min,
++        api_acquired_at_utc=payload.get('_acquired_at_utc') or now.astimezone(timezone.utc),
++        last_verified_state=manifest.get('lineup_state'),
++    )
++    if not lu_eval['confirmed_complete_22']:
++        from bet_engine.context.lineup_manager import prepare_manual_lineup_inbox
++
++        inbox_info = prepare_manual_lineup_inbox(
++            ctx['directory'],
++            event_id=str(ctx['event_id']),
++            fixture_id=int(ctx['fixture_id']),
++            home_name=ctx['home'],
++            away_name=ctx['away'],
++            home_id=home_id,
++            away_id=away_id,
++            kickoff_iso=ctx['kickoff'].isoformat(),
++        )
++        manifest['lineup_state'] = {
++            'status': lu_eval['status'],
++            'confirmed_complete_22': False,
++            'confirmed_sides': lu_eval.get('confirmed_sides'),
++            'starter_counts': lu_eval.get('starter_counts'),
++            'lineup_cutoff_minutes': cutoff_min,
++            'minutes_to_kickoff': lu_eval.get('minutes_to_kickoff'),
++            'reason': lu_eval.get('reason'),
++            'absence_interpretation': 'NOT_INFERRED_AS_INJURY_OR_SUSPENSION',
++            'manual_inbox': inbox_info,
++            'snapshot': str(snapshot),
++            'sha256': sha(snapshot),
++        }
++        atomic_json(ctx['directory'] / 'manifest.json', manifest)
++        audit_path = ctx['directory'] / 'lineups' / f'lineup_audit_{ctx["event_id"]}.json'
++        atomic_json(audit_path, {
++            'event_id': str(ctx['event_id']),
++            'fixture_id': int(ctx['fixture_id']),
++            'checked_at_utc': now.astimezone(timezone.utc).isoformat(),
++            'lineup_evaluation': lu_eval,
++            'manual_inbox': inbox_info,
++            'snapshot': str(snapshot),
++            'sha256': sha(snapshot),
++            'context_unchanged': True,
++        })
++        update_state(ctx, 'acquire-lineups', lu_eval['status'],
++                     {'snapshot': str(snapshot), 'sha256': sha(snapshot), 'context_unchanged': True, 'manual_inbox': inbox_info['manual_dir']})
++        print(f'XI no confirmado completo ({lu_eval["status"]}: {lu_eval.get("reason")}); adquisición conservada y bandeja manual lista en {inbox_info["manual_dir"]}.')
++        return 0
++    args.snapshot = snapshot; args.snapshot_sha256 = sha(snapshot)
++    return cmd_refresh_context(ctx, args)
++
++
+ def cmd_refresh_context(ctx, args):
+     ensure_prematch(ctx, min_lead=args.min_refresh_lead_minutes)
+     manifest = match_manifest(ctx)
+     from prematch_context_delta import refresh_lineups
+-    updated, out = refresh_lineups(ctx, manifest, args.snapshot, args.snapshot_sha256, local_now())
++    now = local_now()
++    updated, out = refresh_lineups(ctx, manifest, args.snapshot, args.snapshot_sha256, now)
+     # Preserve every prior downstream artifact before any later finish rewrites it.
+-    for folder in ('validation', 'probabilistic', 'analysis'):
++    for folder in ('validation', 'probabilistic', 'analysis', 'shadow'):
+         source = ctx['directory'] / folder
+         if source.is_dir():
+             shutil.copytree(source, out / 'previous_outputs' / folder)
+     for name in (f'CODEX_{ctx["event_id"]}.md', 'analysis_input_binding.json', 'final_review.json'):
+         backup(ctx['directory'] / name, out / 'previous_outputs')
++    for stale_path in (
++        ctx['directory'] / 'shadow' / f'shadow_summary_{ctx["event_id"]}.json',
++        ctx['directory'] / f'CODEX_{ctx["event_id"]}.md',
++    ):
++        if stale_path.is_file():
++            stale_path.unlink()
+     atomic_json(ctx['directory'] / 'manifest.json', updated)
+-    update_state(ctx, 'refresh-context', 'REVALIDATION_REQUIRED', {'run': str(out)})
+-    print(f'Contexto diferencial local incorporado: {out}; finish y análisis pendientes.')
++
++    # Req 11: Re-ejecutar automáticamente las evaluaciones afectadas (Shadow sobre contexto actualizado)
++    reeval = {'executed': False}
++    try:
++        from bet_engine.orchestration import run_shadow_for_event_dir
++        cutoff_min = int(getattr(args, 'lineup_cutoff_minutes', 15))
++        sh_res = run_shadow_for_event_dir(
++            ctx['root'],
++            ctx['event_id'],
++            historical=False,
++            now_utc=now.astimezone(timezone.utc).isoformat(),
++            min_lead_minutes=0,
++            lineup_cutoff_minutes=cutoff_min,
++        )
++        reeval = {'executed': True, 'shadow': sh_res}
++    except Exception as exc:
++        reeval = {'executed': False, 'error': str(exc)}
++
++    audit_path = ctx['directory'] / 'lineups' / f'lineup_audit_{ctx["event_id"]}.json'
++    atomic_json(audit_path, {
++        'event_id': str(ctx['event_id']),
++        'fixture_id': int(ctx['fixture_id']),
++        'refreshed_at_utc': now.astimezone(timezone.utc).isoformat(),
++        'lineup_state': updated.get('lineup_state'),
++        'context_update_dir': str(out),
++        'reevaluation': reeval,
++        'original_inputs_untouched': True,
++    })
++    update_state(ctx, 'refresh-context', 'REVALIDATION_AND_SHADOW_UPDATED', {'run': str(out), 'reevaluation': reeval})
++    print(f'Contexto diferencial local incorporado: {out}; evaluación Shadow reejecutada y finish pendiente.')
+     return 0
+ 
+ 
+@@ -650,8 +837,19 @@ def cmd_finish(ctx,args):
+         ensure_prematch(ctx,min_lead=args.min_finish_lead_minutes)
+     multi=ensure_root(ctx,args.multi)
+     manifest=match_manifest(ctx)
+-    if manifest.get('status') not in {'PREPARADO','VALIDADO','BLOQUEADO_VALIDACION','ERROR_VALIDACION','ERROR_MOTOR'}:
++    allowed_statuses = {'PREPARADO','VALIDADO','FINALIZADO','BLOQUEADO_VALIDACION','ERROR_VALIDACION','ERROR_MOTOR'}
++    if manifest.get('status') not in allowed_statuses:
+         raise ValueError(f'No procede finish: manifest={manifest.get("status")}')
++    prelim_archive = None
++    is_preliminary_resume = False
++    if manifest.get('status') == 'FINALIZADO' and not args.historical:
++        from prematch_case import _evaluate_closure
++        case_file = ctx['directory'] / 'case.json'
++        case_like = read_json(case_file) if case_file.is_file() else {'event_id': ctx['event_id'], 'kickoff_madrid': ctx['kickoff'].isoformat()}
++        closure = _evaluate_closure(ctx['directory'], case_like, manifest)
++        if closure.get('final_prematch_valid'):
++            raise ValueError('FINAL_PREMATCH_CLOSURE_ALREADY_VALID: ya existe un cierre final PREMATCH válido; no se duplica ni sobrescribe')
++        is_preliminary_resume = True
+     odds=manifest.get('inputs',{}).get('odds') or {}
+     if not odds:raise ValueError('Sin cuotas en manifest: no se autoriza la fase final')
+     # Las cuotas deben ser recientes, incluso si el scraping acabó correctamente.
+@@ -671,20 +869,44 @@ def cmd_finish(ctx,args):
+         validate_external_inputs(ctx,report)
+     labels=re.findall(r'(?im)\b(?:event[_ ]id(?: bwin)?|evento bwin)\s*[:|]\s*(\d{6,})\b',report_head)
+     if any(x!=ctx['event_id'] for x in labels):raise ValueError('Informe cualitativo menciona otro Event ID')
++    if is_preliminary_resume:
++        prelim_archive = ctx['directory']/'archives'/('preliminary_closure_'+datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%S%fZ'))
++        backup(ctx['directory']/'manifest.json', prelim_archive)
++        backup(state_path(ctx), prelim_archive)
++        for folder in ('validation','probabilistic','analysis','shadow','dossier'):
++            source = ctx['directory']/folder
++            if source.is_dir():
++                shutil.copytree(source, prelim_archive/folder)
++        for name in (f'CODEX_{ctx["event_id"]}.md','analysis_input_binding.json','final_review.json'):
++            backup(ctx['directory']/name, prelim_archive)
++    cutoff_min = int(getattr(args, 'lineup_cutoff_minutes', 15))
++    if not args.historical and getattr(args, 'require_confirmed_lineups', False):
++        from prematch_case import _evaluate_closure
++        case_file = ctx['directory'] / 'case.json'
++        case_like = read_json(case_file) if case_file.is_file() else {'event_id': ctx['event_id'], 'kickoff_madrid': ctx['kickoff'].isoformat()}
++        closure = _evaluate_closure(ctx['directory'], case_like, manifest, lineup_cutoff_minutes=cutoff_min)
++        if not closure.get('lineups_confirmed_22'):
++            raise ValueError(f'LINEUPS_NOT_CONFIRMED_22:{closure["lineups_status"]}')
+     cmd=[sys.executable,str(multi),'--root',str(ctx['root']),'finish','--event-id',ctx['event_id'],
+-         '--report',str(report),'--workers','1']
++         '--report',str(report),'--workers','1','--lineup-cutoff-minutes',str(cutoff_min)]
+     if args.historical:cmd.append('--historical')
++    if getattr(args,'shadow_mode',False):cmd.append('--shadow-mode')
+     code=run(cmd,ctx['root'])
+     if code:raise ValueError(f'finish devolvió {code}; revisa logs/validacion.log y logs/motor.log')
+     m=match_manifest(ctx)
+     expected='AUDITORIA_HISTORICA' if args.historical else 'FINALIZADO'
+     if m.get('status')!=expected:raise ValueError(f'finish terminó {m.get("status")} y no {expected}')
++    m['next_action'] = 'historical-audit-only' if args.historical else 'export-handoff'
++    if prelim_archive is not None:
++        m.setdefault('preliminary_closures_archived', []).append(str(prelim_archive.resolve()))
++    atomic_json(ctx['directory']/'manifest.json', m)
+     pinned_report=(m.get('inputs') or {}).get('report') or {}
+     report_actual=Path(pinned_report.get('path') or report)
+     if not report_actual.is_file() or not pinned_report.get('sha256') or sha(report_actual)!=pinned_report['sha256']:
+         raise ValueError('Informe anclado tras finish no coincide con manifest')
+     update_state(ctx,'finish',expected,{'report':str(report_actual),'report_sha256':sha(report_actual),
+-                                        'codex_prompt':m.get('codex_prompt') if not args.historical else None})
++                                        'codex_prompt':m.get('codex_prompt') if not args.historical else None,
++                                        'preliminary_archive':str(prelim_archive) if prelim_archive else None})
+     if not args.historical:
+         if (ctx['kickoff']-local_now()).total_seconds()<=0:
+             update_state(ctx,'postfinish_clock','PREMATCH_EXPIRED',{'note':'Validación y motor finalizaron después del kickoff; no usar prompt para apuestas'})
+@@ -712,6 +934,11 @@ def cmd_status(ctx,args):
+             if odds:
+                 snap=snapshot_info(Path(odds['path']),ctx)
+                 print('Cuotas:',snap['capture'],'| edad:',snap['age_minutes'],'min')
++            if (ctx['directory'] / 'case.json').is_file():
++                from prematch_case import _evaluate_closure
++                closure = _evaluate_closure(ctx['directory'], read_json(ctx['directory'] / 'case.json'), m)
++                note = '; '.join(closure['closure_reasons']) if closure['closure_reasons'] else 'criterios T-60/T-15 cumplidos'
++                print('Cierre:', closure['closure_stage'], f"({note})", '| XI API:', closure['lineups_status'], '| Shadow:', closure['shadow_status'])
+             if m.get('codex_prompt'):print('Prompt Codex:',m['codex_prompt'])
+         except ValueError as exc:print('ADVERTENCIA MANIFEST:',exc)
+     else:print('Manifest: NO PREPARADO')
+@@ -731,6 +958,7 @@ def main(argv=None):
+     p.add_argument('--min-lead-minutes',type=int,default=PREPARE_MIN_LEAD_MINUTES,help='Margen mínimo para prepare/check')
+     p.add_argument('--min-refresh-lead-minutes',type=int,default=REFRESH_MIN_LEAD_MINUTES,help='Margen mínimo para actualizar cuotas/contexto')
+     p.add_argument('--min-finish-lead-minutes',type=int,default=FINISH_MIN_LEAD_MINUTES,help='Margen mínimo para iniciar finish (T-5 por defecto)')
++    p.add_argument('--lineup-cutoff-minutes',type=int,default=15,help='Corte prepartido para exigir 22 titulares confirmados (default 15)')
+     s=p.add_subparsers(dest='action',required=True)
+     check=s.add_parser('check',help='Validar selección y tiempo; no usar herramientas externas')
+     check.add_argument('--reuse-odds',action='store_true',help='Exigir también contrato, SHA y frescura para reutilizar el TXT')
+@@ -742,6 +970,7 @@ def main(argv=None):
+     pp.add_argument('--force-prepare',action='store_true',help='Rehacer desde cero; respaldar capturas y manifest')
+     pp.add_argument('--reuse-odds',action='store_true',help='Reutiliza cuotas seleccionadas por SHA y prepara únicamente el contexto completo')
+     s.add_parser('refresh-odds',help='Solo scraper Bwin, sin repetir API ni actualizar otros eventos')
++    s.add_parser('acquire-lineups',help='API por Fixture ID y delta XI; conserva históricos')
+     delta=s.add_parser('refresh-context',help='Incorpora XI de un registro local adquirido antes del kickoff; sin API')
+     delta.add_argument('--snapshot',type=Path,required=True)
+     delta.add_argument('--snapshot-sha256',required=True)
+@@ -753,8 +982,10 @@ def main(argv=None):
+     ff=s.add_parser('finish',help='Informe -> validador -> motor; genera prompt único Codex')
+     ff.add_argument('--report',type=Path,help='Reporte cualitativo del seleccionado')
+     ff.add_argument('--historical',action='store_true',help='Solo auditoría posterior al inicio: nunca Codex accionable')
++    ff.add_argument('--shadow-mode',action='store_true',help='Opt-in: ejecuta Bet Engine en Shadow Mode paralelo sin alterar el flujo anterior')
++    ff.add_argument('--require-confirmed-lineups',action='store_true',help='Falla cerrado si faltan 22 titulares confirmados')
+     args=p.parse_args(argv)
+-    if args.action in ('prepare','refresh-odds','retry-context','retry-scraper'):
++    if args.action in ('prepare','refresh-odds','retry-context','retry-scraper','acquire-lineups'):
+         from prematch_execution_control import require_external_confirmation
+         try:require_external_confirmation(args.confirm_external)
+         except ValueError as error:p.error(str(error))
+@@ -775,6 +1006,7 @@ def main(argv=None):
+         if args.action=='verify-temporal-identity':return cmd_verify_temporal_identity(ctx,args)
+         if args.action=='prepare':return cmd_prepare(ctx,args)
+         if args.action=='refresh-odds':return cmd_refresh(ctx,args)
++        if args.action=='acquire-lineups':return cmd_acquire_lineups(ctx,args)
+         if args.action=='refresh-context':return cmd_refresh_context(ctx,args)
+         if args.action in ('retry-context','retry-scraper'):return cmd_retry(ctx,args,args.action)
+         if args.action=='finish':return cmd_finish(ctx,args)
+diff --git a/validate_prematch.py b/validate_prematch.py
+index 7c9f55a8..00d9786b 100644
+--- a/validate_prematch.py
++++ b/validate_prematch.py
+@@ -90,35 +90,43 @@ DISPLAY_PARENTHESES = {'local', 'visitante', 'home', 'away', 'titular',
+ 
+ 
+ def clean_report_team(value: str) -> str:
+-    """Elimina formato Markdown y solo etiquetas de PRESENTACIÓN."""
++    """Elimina formato Markdown y solo etiquetas de PRESENTACIÓN y descriptor tras `;`."""
++    from match_identity import split_team_descriptor
++
+     value = re.sub(r'\[([^]]+)\]\([^)]*\)', r'\1', str(value))
+     value = re.sub(r'\s*\(\s*(?:local|visitante|home|away)\s*\)\s*$', '', value, flags=re.I)
+     value = re.split(r',\s*(?:kickoff_utc|analysis_cutoff_utc|report_generated_utc|fecha|estadio)\s*[:=]?\s*', value, maxsplit=1, flags=re.I)[0]
+-    return re.sub(r'\s+', ' ', value).strip(' `*.;,')
++    parts = split_team_descriptor(value)
++    return re.sub(r'\s+', ' ', parts['base']).strip(' `*.;,')
+ 
+ 
+ def _club_spelling_variants(value: str) -> set[str]:
+     """Crea claves conservadoras. Paréntesis descriptivos nunca sustituyen el nombre."""
++    from match_identity import LINGUISTIC_TEAM_ALIASES
++
+     cleaned = clean_report_team(value)
+     main = re.sub(r'\s*\([^)]*\)', '', cleaned).strip()
+     raw_variants = {cleaned, main}
+     main_key = normalize(main)
+-    # «Junior FC (Junior de Barranquilla)»: el nombre entre paréntesis debe
+-    # compartir el núcleo, nunca basta un alias completamente diferente.
++    main_canonical = LINGUISTIC_TEAM_ALIASES.get(main_key, main_key)
++    # «Junior FC (Junior de Barranquilla)» o «Wales (Gales)»: el paréntesis debe
++    # compartir núcleo o vínculo lingüístico explícito.
+     for part in re.findall(r'\(([^()]*)\)', cleaned):
+         part_key = normalize(part)
+         if part_key in DISPLAY_PARENTHESES:
+             continue
++        part_canonical = LINGUISTIC_TEAM_ALIASES.get(part_key, part_key)
+         main_tokens = set(main_key.split()) - CLUB_LEGAL_TOKENS - {'de','del','la','el'}
+         part_tokens = set(part_key.split()) - CLUB_LEGAL_TOKENS - {'de','del','la','el'}
+-        if main_tokens & part_tokens:
++        if (main_tokens & part_tokens) or (part_canonical == main_canonical):
+             raw_variants.add(part)
+     variants = set()
+     for candidate in raw_variants:
+         key = normalize(candidate)
+         if not key:
+             continue
+-        variants.add(KNOWN_CLUB_ALIASES.get(key, key))
++        variants.add(KNOWN_CLUB_ALIASES.get(key, LINGUISTIC_TEAM_ALIASES.get(key, key)))
++        variants.add(key)
+         parts = key.split()
+         # Solo en inicio y final; nunca suprimir palabras en medio.
+         while len(parts) > 1 and parts[0] in CLUB_LEGAL_TOKENS:
+@@ -126,37 +134,47 @@ def _club_spelling_variants(value: str) -> set[str]:
+         while len(parts) > 1 and parts[-1] in CLUB_LEGAL_TOKENS:
+             parts.pop()
+         reduced = ' '.join(parts)
+-        variants.add(KNOWN_CLUB_ALIASES.get(reduced, reduced))
++        variants.add(KNOWN_CLUB_ALIASES.get(reduced, LINGUISTIC_TEAM_ALIASES.get(reduced, reduced)))
+         # Casos «Instituto AC Córdoba» frente a «Instituto Córdoba»:
+         # eliminar siglas legales intercaladas, pero NUNCA topónimos.
+         without_legal = ' '.join(x for x in key.split() if x not in CLUB_LEGAL_TOKENS)
+         if without_legal:
+-            variants.add(KNOWN_CLUB_ALIASES.get(without_legal, without_legal))
++            variants.add(KNOWN_CLUB_ALIASES.get(without_legal, LINGUISTIC_TEAM_ALIASES.get(without_legal, without_legal)))
+     return {v for v in variants if v}
+ 
+ 
+ def same_club_report(report_name: str, api_name: str, bwin_name: str | None = None) -> bool:
+-    """Equivalencia exacta de alias legales y variantes Bwin del fixture.
++    """Equivalencia exacta de alias legales, lingüísticos y variantes Bwin del fixture.
+ 
+     Evita fuzzy matching: Real Sociedad no pasa por Real Madrid, ni Junior
+     Córdoba se convierte en Junior Barranquilla solo por compartir «Junior».
+-    La pertenencia del nombre Bwin al evento/fixture se audita por separado.
++    También rechaza contradicciones de categoría aunque tras `;` conste un descriptor.
+     """
++    from match_identity import category as identity_category, FEMALE as IDENT_FEMALE, MALE_MARKERS
++
++    raw_full = str(report_name or '')
++    full_norm = normalize(raw_full)
++    full_tokens = set(full_norm.split())
++    report_cats = identity_category(raw_full)
++    target_cats = identity_category(' '.join(x for x in (api_name, bwin_name) if x))
++    fixture_female = bool(target_cats & IDENT_FEMALE)
++    if fixture_female and (full_tokens & MALE_MARKERS):
++        return False
++    if (report_cats & IDENT_FEMALE) and not fixture_female:
++        return False
++    if (report_cats & {'b', 'ii', 'iii', 'youth'}) and not (target_cats & report_cats):
++        return False
++    if any(c.startswith('u') for c in report_cats) and not (target_cats & {c for c in report_cats if c.startswith('u')}):
++        return False
++
+     # Alias institucional específico: jamás equiparar el club de Rio con
+     # Botafogo-SP, Botafogo-PB, filiales, equipos femeninos o juveniles.
+-    # Se contrasta con el calificador Bwin disponible para ESTE fixture.
+     report_primary = normalize(re.sub(r'\s*\([^)]*\)', '', clean_report_team(report_name)))
+     if report_primary == 'botafogo de futebol e regatas' and bwin_name:
+         bwin_key = normalize(bwin_name)
+         if re.search(r'\bbotafogo\s+(?:sp|pb|sao paulo|paraiba|b|ii|u\d+|sub\s*\d+|femenino|femenina|feminino|women|fem)\b', bwin_key):
+             return False
+-    # Equivalencias femeninas controladas por la identidad del fixture.
+-    # No se elimina W/F indiscriminadamente: solo se admiten estas variantes
+-    # cuando API o Bwin identifican explícitamente el encuentro femenino.
+-    female_marker = re.compile(r'\b(?:w|women|woman|f|femenina|femenino|frauen|fem)\b', re.I)
+-    fixture_female = any(female_marker.search(normalize(n)) for n in (api_name, bwin_name) if n)
+-    report_key = normalize(clean_report_team(report_name))
+-    if fixture_female and not re.search(r'\b(?:men|masculino|masculina|hombres)\b', report_key):
++    if fixture_female and not re.search(r'\b(?:men|masculino|masculina|hombres)\b', full_norm):
+         def female_core(n):
+             tokens = [t for t in normalize(clean_report_team(n)).split()
+                       if t not in {'w','women','woman','f','femenina','femenino','frauen','fem','fc','fk','cf','club','de','del'}]
+@@ -178,9 +196,21 @@ def same_club_report(report_name: str, api_name: str, bwin_name: str | None = No
+     targets = set().union(*(_club_spelling_variants(n) for n in (api_name,bwin_name) if n))
+     if not (report_keys & targets):
+         return False
++    # Rechaza paréntesis no triviales con otro nombre sin vínculo con el equipo o alias del fixture (ej. 'Wales (Portugal)')
++    from match_identity import _canonical_variants
++    cleaned_full = clean_report_team(report_name)
++    primary_bare = re.sub(r'\s*\([^)]*\)', '', cleaned_full).strip()
++    primary_core_tokens = set(normalize(primary_bare).split()) - CLUB_LEGAL_TOKENS - {'de', 'del', 'do', 'da', 'la', 'el'}
++    for inner in re.findall(r'\(([^()]*)\)', cleaned_full):
++        inner_key = normalize(inner)
++        if not inner_key or inner_key in DISPLAY_PARENTHESES:
++            continue
++        inner_canon = _canonical_variants(inner)
++        inner_tokens = set(inner_key.split()) - CLUB_LEGAL_TOKENS - {'de', 'del', 'do', 'da', 'la', 'el'}
++        if not (inner_canon & targets) and not (inner_tokens & primary_core_tokens):
++            return False
+     # Si el reporte ADEMÁS da un nombre geográfico explícito en paréntesis,
+     # rechazar contradicciones con una ubicación que sí identifica Bwin.
+-    # Ej.: «Junior FC (Junior de Córdoba)» NO equivale a Bwin «Junior Barranquilla».
+     if bwin_name:
+         raw = clean_report_team(report_name)
+         primary = re.sub(r'\([^)]*\)', '', raw)
+@@ -196,8 +226,6 @@ def same_club_report(report_name: str, api_name: str, bwin_name: str | None = No
+             if not match:
+                 continue
+             named_place = set(match.group(1).split()) - {'la','el','los','las','the'}
+-            # Solo hay contradicción objetiva cuando Bwin dispone de un
+-            # calificador adicional y el mismo calificador no coincide.
+             if named_place and bwin_tokens and not (named_place & bwin_tokens):
+                 return False
+     return True
+@@ -260,19 +288,85 @@ def event_id_from_url(url: str) -> str:
+     return match.group(1)
+ 
+ 
++def _extract_txt_lineup_presence(
++    raw: str,
++    *,
++    home_id: str | None,
++    away_id: str | None,
++    home_api: str | None,
++    away_api: str | None,
++) -> dict:
++    """Inspecciona el bloque estructurado `LINEUPS DEL FIXTURE OBJETIVO` tras el resumen textual."""
++    header = re.search(r'^LINEUPS DEL FIXTURE OBJETIVO\s*\n=+\s*$', raw, re.M)
++    if not header:
++        return {'present': False, 'home_count': 0, 'away_count': 0, 'acquired_utc': None, 'source': 'NO_BLOCK'}
++    brace = raw.find('{', header.end())
++    if brace < 0:
++        return {'present': False, 'home_count': 0, 'away_count': 0, 'acquired_utc': None, 'source': 'NO_JSON'}
++    try:
++        obj, _ = json.JSONDecoder().raw_decode(raw[brace:])
++    except json.JSONDecodeError:
++        return {'present': False, 'home_count': 0, 'away_count': 0, 'acquired_utc': None, 'source': 'INVALID_JSON'}
++    if not isinstance(obj, dict):
++        return {'present': False, 'home_count': 0, 'away_count': 0, 'acquired_utc': None, 'source': 'INVALID_OBJECT'}
++
++    resp = obj.get('response') or []
++    home_count = 0
++    away_count = 0
++    for blk in resp if isinstance(resp, list) else []:
++        if not isinstance(blk, dict):
++            continue
++        team = blk.get('team') or {}
++        tid = str(team.get('id')) if team.get('id') is not None else None
++        tname = normalize(team.get('name') or '')
++        starters = blk.get('startXI') or []
++        cnt = len(starters) if isinstance(starters, list) else 0
++        if home_id and tid == str(home_id):
++            home_count = max(home_count, cnt)
++        elif away_id and tid == str(away_id):
++            away_count = max(away_count, cnt)
++        elif home_api and tname == normalize(home_api) and (not home_id or not tid):
++            home_count = max(home_count, cnt)
++        elif away_api and tname == normalize(away_api) and (not away_id or not tid):
++            away_count = max(away_count, cnt)
++    acq_utc = iso_dt(obj.get('_acquired_at_utc')) or iso_dt((obj.get('provenance') or {}).get('captured_at_utc'))
++    return {
++        'present': bool(resp),
++        'home_count': home_count,
++        'away_count': away_count,
++        'acquired_utc': acq_utc,
++        'source': 'DIFFERENTIAL_OR_CURRENT_BLOCK' if resp else 'EMPTY_BLOCK',
++    }
++
++
+ def api_meta(raw: str) -> dict:
+     # La cabecera termina antes del microcontexto histórico, evitando mezclar fixtures pasados.
+     head = raw[:min(len(raw), 25000)]
++    home_id = field(head, r'^Home:\s*.+?\s*\((\d+)\)\s*$')
++    away_id = field(head, r'^Away:\s*.+?\s*\((\d+)\)\s*$')
++    home_api = field(head, r'^Home:\s*(.+?)\s*\(\d+\)\s*$')
++    away_api = field(head, r'^Away:\s*(.+?)\s*\(\d+\)\s*$')
++    initial_home_missing = 'HOME: XI NO DISPONIBLE' in raw
++    initial_away_missing = 'AWAY: XI NO DISPONIBLE' in raw
++    block_info = _extract_txt_lineup_presence(
++        raw,
++        home_id=home_id,
++        away_id=away_id,
++        home_api=home_api,
++        away_api=away_api,
++    )
++    home_present = block_info['home_count'] == 11
++    away_present = block_info['away_count'] == 11
+     return {
+         'event_id':field(head,r'^Event ID:\s*(\d+)\s*$'),
+         'bwin_url':field(head,r'^Bwin URL:\s*(https?://\S+)'),
+         'home_bwin':field(head,r'^Home Bwin:\s*(.+)$'),
+         'away_bwin':field(head,r'^Away Bwin:\s*(.+)$'),
+         'fixture_id':field(head,r'^Fixture ID:\s*(\d+)\s*$'),
+-        'home_api':field(head,r'^Home:\s*(.+?)\s*\(\d+\)\s*$'),
+-        'home_id':field(head,r'^Home:\s*.+?\s*\((\d+)\)\s*$'),
+-        'away_api':field(head,r'^Away:\s*(.+?)\s*\(\d+\)\s*$'),
+-        'away_id':field(head,r'^Away:\s*.+?\s*\((\d+)\)\s*$'),
++        'home_api':home_api,
++        'home_id':home_id,
++        'away_api':away_api,
++        'away_id':away_id,
+         'identity_status':field(head,r'^Identity status:\s*(\S+)'),
+         'status':field(head,r'^Status:\s*(\S+)'),
+         'competition':field(head,r'^League:\s*(.+)$'),
+@@ -283,8 +377,12 @@ def api_meta(raw: str) -> dict:
+         'historical_statistics_ok':len(re.findall(r'^\s+statistics: OK\s*$',raw,re.M)),
+         'historical_players_ok':len(re.findall(r'^\s+players: OK\s*$',raw,re.M)),
+         'historical_players_nd':len(re.findall(r'^\s+players: N/D\s*$',raw,re.M)),
+-        'xi_api_home_missing':'HOME: XI NO DISPONIBLE' in raw,
+-        'xi_api_away_missing':'AWAY: XI NO DISPONIBLE' in raw,
++        'xi_api_initial_header_missing': {'home': initial_home_missing, 'away': initial_away_missing},
++        'xi_api_home_missing': not home_present if block_info['present'] else initial_home_missing,
++        'xi_api_away_missing': not away_present if block_info['present'] else initial_away_missing,
++        'xi_api_counts': {'home': block_info['home_count'], 'away': block_info['away_count']},
++        'xi_api_source': block_info['source'] if (home_present or away_present) else 'INITIAL_HEADER',
++        'xi_api_acquired_utc': block_info['acquired_utc'],
+     }
+ 
+ 
+@@ -765,6 +863,8 @@ def report_field_embedded(raw: str, name: str) -> str | None:
+ 
+ def report_meta(raw: str, home: str | None = None, away: str | None = None,
+                 home_bwin: str | None = None, away_bwin: str | None = None) -> dict:
++    from bet_engine.context.research_parser import parse_research_identity_and_metadata
++
+     # Intentar nombres canónicos API primero. Si la API abrevia «Boyaca Chico»
+     # como «Chico», una segunda lectura utiliza nombres Bwin ligados al fixture.
+     xi = press_xi(raw, home, away)
+@@ -777,23 +877,63 @@ def report_meta(raw: str, home: str | None = None, away: str | None = None,
+         for side in ('local', 'visitante'):
+             if not xi.get(side) and other.get(side):
+                 xi[side] = other[side]
+-    fields={name:scalar_from_report(raw,name) for name in ('kickoff_madrid','kickoff_utc','analysis_cutoff_utc','cutoff_madrid','report_generated_utc','report_completed_madrid','event_id_bwin','xi_local_estado','xi_visitante_estado','xi_local_fuente','xi_visitante_fuente','xi_local_publicado_madrid','xi_visitante_publicado_madrid','xi_local','xi_visitante')}
++
++    parsed = parse_research_identity_and_metadata(
++        raw,
++        home=home,
++        away=away,
++        home_bwin=home_bwin,
++        away_bwin=away_bwin,
++        club_matcher=same_club_report,
++    )
++    for side, entry in parsed['parallel_xi'].items():
++        if not xi.get(side):
++            xi[side] = entry['players']
++            classified.setdefault(side, entry)
++
++    fields={name:scalar_from_report(raw,name) for name in ('kickoff_madrid','kickoff_utc','analysis_cutoff_utc','cutoff_madrid','report_generated_utc','report_completed_madrid','event_id_bwin','fixture_id','xi_local_estado','xi_visitante_estado','xi_local_fuente','xi_visitante_fuente','xi_local_publicado_madrid','xi_visitante_publicado_madrid','xi_local','xi_visitante')}
++    for key, val in parsed['fields'].items():
++        if not fields.get(key):
++            fields[key] = val
+     for name in ('kickoff_utc', 'kickoff_madrid', 'analysis_cutoff_utc', 'report_generated_utc'):
+         if not fields.get(name):
+             fields[name] = report_field_embedded(raw, name)
+-    fields['event_id_bwin'] = (fields['event_id_bwin'] or scalar_from_report(raw,'Evento Bwin')
++    fields['event_id_bwin'] = (fields['event_id_bwin'] or parsed['event_id'] or scalar_from_report(raw,'Evento Bwin')
+                                or scalar_from_report(raw,'Event ID Bwin') or scalar_from_report(raw,'Event ID'))
++    if not fields.get('fixture_id') and parsed['fixture_id']:
++        fields['fixture_id'] = parsed['fixture_id']
++
++    ko_dt = iso_dt(fields.get('kickoff_utc')) or iso_dt(fields.get('kickoff_madrid')) or parsed['kickoff_utc'] or parsed['kickoff_madrid']
++    cut_dt = iso_dt(fields.get('analysis_cutoff_utc')) or iso_dt(fields.get('cutoff_madrid')) or parsed['cutoff_utc']
++    gen_raw = fields.get('report_generated_utc') or fields.get('report_completed_madrid')
++    gen_dt = None if (gen_raw and str(gen_raw).strip().lower().startswith('null')) else (iso_dt(gen_raw) or parsed['generated_utc'])
++
++    source_dates_found = sorted(set(re.findall(r'\b20\d{2}-\d{2}-\d{2}(?:T\d{2}:\d{2}(?::\d{2})?(?:Z|[+-]\d{2}:\d{2}))?\b', raw)))[:30]
++
+     return {
+         'fields':fields,
+         'teams':heading_teams(raw),
+-        'kickoff_utc':iso_dt(fields.get('kickoff_utc') or fields.get('kickoff_madrid')),
+-        'cutoff_utc':iso_dt(fields.get('analysis_cutoff_utc') or fields.get('cutoff_madrid')),
+-        'generated_utc':iso_dt(fields.get('report_generated_utc') or fields.get('report_completed_madrid')),
++        'event_ids_found': parsed['event_ids_found'],
++        'fixture_ids_found': parsed['fixture_ids_found'],
++        'event_id_conflict': parsed['event_id_conflict'],
++        'fixture_id_conflict': parsed['fixture_id_conflict'],
++        'sources_attributed': parsed['sources_attributed'],
++        'sha256_references': parsed['sha256_references'],
++        'kickoff_utc': ko_dt,
++        'cutoff_utc': cut_dt,
++        'generated_utc': gen_dt,
+         'xi':xi,
+         'xi_classification': {side:entry['classification'] for side,entry in classified.items()},
+         'declared_timestamps_verified': False,
++        'source_dates_found': source_dates_found,
++        'temporal_traceability': {
++            'cutoff_declared_utc': cut_dt.astimezone(UTC).isoformat() if cut_dt else None,
++            'completion_declared_utc': gen_dt.astimezone(UTC).isoformat() if gen_dt else None,
++            'runtime_completion_verified': False,
++            'mtime_or_import_is_not_creation_proof': True,
++        },
+         'url_count':len(set(re.findall(r'https?://[^\s\])>]+',raw))),
+-        'has_source_registry':bool(re.search(r'registro de fuentes|registro documental de fuentes|fuentes y enlaces|fuentes consultadas|fuentes relevantes',raw,re.I)),
++        'has_source_registry':bool(parsed['has_source_registry'] or re.search(r'registro de fuentes|registro documental de fuentes|fuentes y enlaces|fuentes consultadas|fuentes relevantes',raw,re.I)),
+     }
+ 
+ 
+@@ -842,6 +982,9 @@ def audit_api(meta: dict, out: dict, url_id: str):
+         issue(out,'INFO','HISTORICAL_PLAYER_NULLS',f"Faltan estadísticas de jugadores en {meta['historical_players_nd']} fixture(s) histórico(s). No imputar cero.")
+     if meta['xi_api_home_missing'] or meta['xi_api_away_missing']:
+         issue(out,'INFO','API_XI_ABSENT','Falta el XI objetivo en API; no equivale a ausencia de XI en prensa ni a error del script.')
++    else:
++        acq_note = f" (captura {meta['xi_api_acquired_utc'].astimezone(UTC).isoformat()})" if meta.get('xi_api_acquired_utc') else ''
++        issue(out,'INFO','API_XI_PRESENT_IN_CONTEXT',f"XI API de ambos equipos (11+11) presente en contexto estructurado{acq_note}; proveedor no equivale a certificación federativa.")
+ 
+ 
+ def audit_odds(meta:dict, out:dict, url_id:str, api:dict):
+@@ -877,9 +1020,17 @@ def audit_odds(meta:dict, out:dict, url_id:str, api:dict):
+ 
+ 
+ def audit_report(meta:dict, out:dict, api:dict, expected_id:str):
++    if meta.get('event_id_conflict'):
++        issue(out,'BLOCK','REPORT_CONFLICTING_EVENT_IDS',f'Reporte declara Event IDs duplicados y contradictorios: {meta.get("event_ids_found")}.')
++    if meta.get('fixture_id_conflict'):
++        issue(out,'BLOCK','REPORT_CONFLICTING_FIXTURE_IDS',f'Reporte declara Fixture IDs duplicados y contradictorios: {meta.get("fixture_ids_found")}.')
+     label=meta['fields'].get('event_id_bwin')
+     if label and re.fullmatch(r'\d+',label) and label!=expected_id:
+         issue(out,'BLOCK','REPORT_WRONG_EVENT',f'Reporte indica evento Bwin {label} distinto del configurado {expected_id}.')
++    rep_fix = meta['fields'].get('fixture_id')
++    api_fix = api.get('fixture_id')
++    if rep_fix and api_fix and re.fullmatch(r'\d+', str(rep_fix)) and str(rep_fix) != str(api_fix):
++        issue(out,'BLOCK','REPORT_WRONG_FIXTURE',f'Reporte indica Fixture ID {rep_fix} distinto del API {api_fix}.')
+     if meta['teams']:
+         for i,side in enumerate(('home','away')):
+             expected=api.get(side+'_api') or api.get(side+'_bwin')
+@@ -1072,7 +1223,26 @@ def main() -> int:
+                       'CANONICAL_IDENTITY_BWIN_TIME_UNKNOWN',
+                       'Fixture API identificado, pero la hora Bwin no está corroborada; no habilita cuotas ni picks finales.')
+             else:
+-                issue(output,'INFO','CANONICAL_IDENTITY_VERIFIED',f"Fixture {identity['api_fixture_id']} vinculado al evento Bwin {event_id}.")
++                te = identity.get('temporal_identity_evidence')
++                if isinstance(te, dict) and te.get('method') == 'BWIN_EVENT_COUNTDOWN_MINUTES':
++                    te_eid = str(te.get('bwin_event_id') or '')
++                    te_obs = iso_dt(te.get('observed_at_utc'))
++                    te_ko = iso_dt(te.get('kickoff_utc'))
++                    api_ko = iso_dt(identity.get('kickoff_utc'))
++                    tol = min(4.0, float(te.get('tolerance_minutes') or 4))
++                    cd_raw = te.get('countdown_minutes')
++                    if te_eid and te_eid != str(event_id):
++                        issue(output, 'BLOCK', 'IDENTITY_TEMPORAL_WRONG_EVENT', f'Evidencia temporal pertenece a {te_eid}, esperado {event_id}.')
++                    elif not te_obs or not te_ko or not api_ko or te_obs > te_ko:
++                        issue(output, 'BLOCK', 'IDENTITY_TEMPORAL_EVIDENCE_INCOMPLETE', 'Evidencia temporal Bwin incompleta o inconsistente.')
++                    elif cd_raw is not None and abs(((te_obs + timedelta(minutes=int(cd_raw))) - te_ko).total_seconds()) > 1.0:
++                        issue(output, 'BLOCK', 'IDENTITY_TEMPORAL_CONFLICT', 'Countdown Bwin no coincide con kickoff_utc declarado.')
++                    elif abs((te_ko - api_ko).total_seconds()) / 60.0 > tol:
++                        issue(output, 'BLOCK', 'IDENTITY_TEMPORAL_CONFLICT', f'Countdown Bwin difiere de API-Football más de {tol:.0f} min.')
++                    else:
++                        issue(output,'INFO','CANONICAL_IDENTITY_VERIFIED',f"Fixture {identity['api_fixture_id']} vinculado al evento Bwin {event_id}.")
++                else:
++                    issue(output,'INFO','CANONICAL_IDENTITY_VERIFIED',f"Fixture {identity['api_fixture_id']} vinculado al evento Bwin {event_id}.")
+         except (ValueError,TypeError,OSError,KeyError,json.JSONDecodeError) as err:
+             issue(output,'BLOCK','IDENTITY_INVALID',str(err))
+             identity=None
+@@ -1093,15 +1263,32 @@ def main() -> int:
+ 
+     if not api and (odds or report):
+         issue(output,'BLOCK','NO_API_TO_COMPARE','Imposible comparar archivos sin contexto API válido.')
++    def _serialize_checks(meta_dict: dict) -> dict:
++        out_checks = {}
++        for k, v in meta_dict.items():
++            if isinstance(v, datetime):
++                if k.endswith('_utc'):
++                    out_checks[k] = v.astimezone(UTC).isoformat()
++                    out_checks[k[:-4] + '_madrid'] = local(v)
++                else:
++                    out_checks[k] = local(v)
++            else:
++                out_checks[k] = v
++        return out_checks
++
+     if api:
+-        output['checks']['api']={k:(local(v) if isinstance(v,datetime) else v) for k,v in api.items()}
++        output['checks']['api']=_serialize_checks(api)
+     if odds:
+-        output['checks']['odds']={k:(local(v) if isinstance(v,datetime) else v) for k,v in odds.items()}
++        output['checks']['odds']=_serialize_checks(odds)
+     if report:
+-        output['checks']['report']={k:(local(v) if isinstance(v,datetime) else v) for k,v in report.items()}
++        output['checks']['report']=_serialize_checks(report)
++        init_missing = api.get('xi_api_initial_header_missing') or {} if api else {}
+         output['checks']['xi_reconciliation']={
+             side: {
+                 'api_xi_reported_missing': bool(api.get('xi_api_home_missing' if side=='local' else 'xi_api_away_missing')) if api else None,
++                'api_xi_initial_header_missing': bool(init_missing.get('home' if side=='local' else 'away')) if api else None,
++                'api_xi_source': api.get('xi_api_source') if api else None,
++                'api_xi_acquired_utc': api['xi_api_acquired_utc'].astimezone(UTC).isoformat() if api and api.get('xi_api_acquired_utc') else None,
+                 'press_player_count':len(report['xi'].get(side,[])),
+                 'press_names':report['xi'].get(side,[]),
+                 'press_claimed_status':report['fields'].get('xi_'+side+'_estado') or 'NO_CALIFICADO',
+
+# =============================================================================
+# CAMBIOS P0 EN ARCHIVOS UNTRACKED (no visibles en `git diff`):
+#   1) bet_engine/orchestration/adapters.py (run_shadow_for_event_dir)
+#   2) prematch_case.py (_evaluate_closure, refresh_odds_from_snapshot, export_handoff)
+#   3) test/test_p0_temporal_and_shadow_sync.py (nuevo fichero)
+# =============================================================================
+
+--- bet_engine/orchestration/adapters.py (L140-L270) ---
+ 140: 
+ 141:         # Verificación de frescura y hash de cuotas (no reutilizar cuotas caducadas ni desincronizadas)
+ 142:         import hashlib
+ 143:         import re
+ 144: 
+ 145:         ctx_json_sha256 = hashlib.sha256(ctx_json_path.read_bytes()).hexdigest()
+ 146:         odds_map: dict[str, float] = {}
+ 147:         odds_freshness_status = "NO_ODDS_FILE"
+ 148:         odds_sha256: str | None = None
+ 149:         odds_captured_utc: str | None = None
+ 150:         if odds_txt_path and odds_txt_path.is_file():
+ 151:             odds_sha256 = hashlib.sha256(odds_txt_path.read_bytes()).hexdigest()
+ 152:             manifest_odds_sha = (inputs.get("odds") or {}).get("sha256")
+ 153:             if manifest_odds_sha and manifest_odds_sha != odds_sha256:
+ 154:                 raise ValueError(f"ODDS_MANIFEST_SHA_MISMATCH:{odds_sha256}!={manifest_odds_sha}")
+ 155:             match_meta = payload.get("match") or {}
+ 156:             odds_map = parse_bwin_odds_txt(
+ 157:                 odds_txt_path,
+ 158:                 home_name=match_meta.get("home_name") or bundle.home_name,
+ 159:                 away_name=match_meta.get("away_name") or bundle.away_name,
+ 160:                 home_aliases=(bundle.home_name, match_meta.get("home_name_raw") or ""),
+ 161:                 away_aliases=(bundle.away_name, match_meta.get("away_name_raw") or ""),
+ 162:             )
+ 163:             odds_freshness_status = "LOADED"
+ 164:             txt_head = odds_txt_path.read_text(encoding="utf-8-sig", errors="replace")[:1500]
+ 165:             cap = re.search(r"(?:Fecha captura|Captura)[^:]*:\s*(\S+)", txt_head)
+ 166:             if cap:
+ 167:                 try:
+ 168:                     cap_dt = parse_utc_timestamp(cap.group(1))
+ 169:                     odds_captured_utc = cap_dt.astimezone(timezone.utc).isoformat()
+ 170:                     if not historical:
+ 171:                         bundle_ref_dt = parse_utc_timestamp(cutoff_override or bundle.cutoff_utc)
+ 172:                         ref_dt = bundle_ref_dt if cutoff_override is not None else max(bundle_ref_dt, cap_dt)
+ 173:                         age_min = (ref_dt - cap_dt).total_seconds() / 60.0
+ 174:                         if age_min > max_odds_age_minutes:
+ 175:                             odds_freshness_status = f"EXPIRED_ODDS_EXCLUDED(age={age_min:.1f}m>{max_odds_age_minutes}m)"
+ 176:                             odds_map = {}
+ 177:                 except Exception:
+ 178:                     pass
+ 179: 
+ 180:         # Leer investigación cualitativa y XI manual validado si están adjuntos en manifest
+ 181:         qualitative_md: str | None = None
+ 182:         for r_key in ("qualitative_research", "report"):
+ 183:             r_ref = inputs.get(r_key) or {}
+ 184:             if r_ref.get("path") and Path(r_ref["path"]).is_file():
+ 185:                 qualitative_md = Path(r_ref["path"]).read_text(encoding="utf-8-sig", errors="replace")
+ 186:                 break
+ 187:         manual_lu_doc: dict[str, Any] | None = None
+ 188:         ml_ref = inputs.get("manual_lineups") or {}
+ 189:         if ml_ref.get("path") and Path(ml_ref["path"]).is_file():
+ 190:             try:
+ 191:                 manual_lu_doc = json.loads(Path(ml_ref["path"]).read_text(encoding="utf-8-sig"))
+ 192:             except (OSError, ValueError, json.JSONDecodeError):
+ 193:                 manual_lu_doc = None
+ 194: 
+ 195:         # Si historical=True, usamos min_lead=0 en Shadow retrospectivo pero etiquetando histórico
+ 196:         effective_min_lead = 0 if historical else min_lead_minutes
+ 197:         target_status = "NS" if historical else str((payload.get("fixture") or {}).get("status") or "NS")
+ 198:         runner = ShadowPipelineRunner(
+ 199:             min_lead_minutes=effective_min_lead,
+ 200:             lineup_cutoff_minutes=lineup_cutoff_minutes,
+ 201:         )
+ 202:         report = runner.run_shadow_on_bundle(
+ 203:             bundle,
+ 204:             target_status=target_status,
+ 205:             odds_map=odds_map,
+ 206:             legacy_txt_path=ctx_txt_path if ctx_txt_path.is_file() else None,
+ 207:             output_dir=shadow_dir,
+ 208:             bwin_txt_path=odds_txt_path if (odds_txt_path and odds_txt_path.is_file()) else None,
+ 209:             qualitative_markdown=qualitative_md,
+ 210:             manual_lineup=manual_lu_doc,
+ 211:             lineup_cutoff_minutes=lineup_cutoff_minutes,
+ 212:             user_manual_absent=user_manual_absent,
+ 213:         )
+ 214: 
+ 215:         legacy_summary = _extract_legacy_motor_comparison(root, str(event_id))
+ 216:         evaluated_at_utc = datetime.now(timezone.utc).isoformat()
+ 217:         elapsed_ms = round((time.perf_counter() - t0) * 1000.0, 2)
+ 218:         summary_doc = {
+ 219:             "event_id": str(event_id),
+ 220:             "fixture_id": bundle.fixture_id,
+ 221:             "mode": "SHADOW_NON_INTRUSIVE",
+ 222:             "historical_retrospective": bool(historical),
+ 223:             "odds_freshness_status": odds_freshness_status,
+ 224:             "odds_sha256": odds_sha256,
+ 225:             "odds_captured_utc": odds_captured_utc,
+ 226:             "odds_selection_count": len(odds_map),
+ 227:             "context_json_sha256": ctx_json_sha256,
+ 228:             "probabilities_computed_at_utc": evaluated_at_utc,
+ 229:             "prices_evaluated_at_utc": evaluated_at_utc,
+ 230:             "snapshot_provenance": {
+ 231:                 "odds_path": str(odds_txt_path.resolve()) if odds_txt_path and odds_txt_path.is_file() else None,
+ 232:                 "odds_sha256": odds_sha256,
+ 233:                 "odds_captured_utc": odds_captured_utc,
+ 234:                 "odds_selection_count": len(odds_map),
+ 235:                 "context_json_path": str(ctx_json_path.resolve()),
+ 236:                 "context_json_sha256": ctx_json_sha256,
+ 237:                 "probabilities_computed_at_utc": evaluated_at_utc,
+ 238:                 "prices_evaluated_at_utc": evaluated_at_utc,
+ 239:             },
+ 240:             "lineup_gate": report.lineup_gate,
+ 241:             "eligible_for_final_action": report.eligible_for_final_action,
+ 242:             "elapsed_ms": elapsed_ms,
+ 243:             "legacy_motor_summary": legacy_summary,
+ 244:             "shadow_report": report.to_dict(),
+ 245:         }
+ 246:         shadow_dir.mkdir(parents=True, exist_ok=True)
+ 247:         out_path = shadow_dir / f"shadow_summary_{event_id}.json"
+ 248:         tmp_path = shadow_dir / f".shadow_summary_{event_id}.json.tmp"
+ 249:         tmp_path.write_text(json.dumps(summary_doc, ensure_ascii=False, indent=2), encoding="utf-8")
+ 250:         tmp_path.replace(out_path)
+ 251:         _append_shadow_log(
+ 252:             log_path,
+ 253:             f"SHADOW_OK event={event_id} status={report.status} decision={report.decision} elapsed_ms={elapsed_ms} out={out_path}",
+ 254:         )
+ 255:         return {"ok": True, "path": str(out_path), "elapsed_ms": elapsed_ms, "status": report.status}
+ 256:     except Exception as exc:
+ 257:         elapsed_ms = round((time.perf_counter() - t0) * 1000.0, 2)
+ 258:         stale_out = shadow_dir / f"shadow_summary_{event_id}.json"
+ 259:         if not historical and stale_out.is_file():
+ 260:             try:
+ 261:                 inv_dir = ev_dir / "archives" / f"invalidated_shadow_{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%S%fZ')}"
+ 262:                 inv_dir.mkdir(parents=True, exist_ok=True)
+ 263:                 (inv_dir / stale_out.name).write_bytes(stale_out.read_bytes())
+ 264:                 stale_out.unlink()
+ 265:             except OSError:
+ 266:                 pass
+ 267:         _append_shadow_log(log_path, f"SHADOW_FAILED_NON_BLOCKING event={event_id} err={type(exc).__name__}: {exc}")
+ 268:         return {"ok": False, "error": f"{type(exc).__name__}: {exc}", "elapsed_ms": elapsed_ms}
+ 269: 
+ 270: 
+
+--- prematch_case.py (L385-L480) ---
+ 385:     shadow_path = directory / "shadow" / f"shadow_summary_{case['event_id']}.json"
+ 386:     shadow_present = shadow_path.is_file()
+ 387:     shadow_status = "ABSENT"
+ 388:     shadow_odds_sha256 = None
+ 389:     shadow_odds_captured_utc = None
+ 390:     shadow_ctx_sha256 = None
+ 391:     shadow_prob_at_utc = None
+ 392:     shadow_prices_at_utc = None
+ 393:     shadow_selection_count = None
+ 394:     if shadow_present:
+ 395:         try:
+ 396:             sh_doc = read(shadow_path)
+ 397:             sh_report = sh_doc.get("shadow_report") or {}
+ 398:             shadow_status = str(sh_report.get("status") or "PRESENT")
+ 399:             shadow_odds_sha256 = sh_doc.get("odds_sha256")
+ 400:             shadow_odds_captured_utc = sh_doc.get("odds_captured_utc")
+ 401:             shadow_ctx_sha256 = sh_doc.get("context_json_sha256")
+ 402:             shadow_prob_at_utc = sh_doc.get("probabilities_computed_at_utc") or sh_report.get("cutoff_utc")
+ 403:             shadow_prices_at_utc = sh_doc.get("prices_evaluated_at_utc") or sh_report.get("cutoff_utc")
+ 404:             shadow_selection_count = sh_doc.get("odds_selection_count")
+ 405:         except (OSError, ValueError, TypeError):
+ 406:             shadow_status = "UNREADABLE"
+ 407:     manifest_odds_sha = (inputs.get("odds") or {}).get("sha256")
+ 408:     manifest_ctx_sha = (inputs.get("context_json") or {}).get("sha256")
+ 409:     shadow_stale = bool(
+ 410:         shadow_present
+ 411:         and (
+ 412:             (shadow_odds_sha256 and manifest_odds_sha and shadow_odds_sha256 != manifest_odds_sha)
+ 413:             or (shadow_ctx_sha256 and manifest_ctx_sha and shadow_ctx_sha256 != manifest_ctx_sha)
+ 414:         )
+ 415:     )
+ 416: 
+ 417:     lineup_gate_reasons = []
+ 418:     if not lineups_confirmed_22:
+ 419:         lineup_gate_reasons.append(f"MISSING_CONFIRMED_22_STARTERS:{lineups_status}")
+ 420:     reasons = []
+ 421:     if status_val == "AUDITORIA_HISTORICA":
+ 422:         stage = "HISTORICAL_AUDIT"
+ 423:         final_valid = False
+ 424:     elif status_val != "FINALIZADO":
+ 425:         stage = "PENDING_FINAL_VALIDATION"
+ 426:         final_valid = False
+ 427:         reasons.append(f"MANIFEST_STATUS_{status_val}")
+ 428:     else:
+ 429:         window_start = kickoff - timedelta(minutes=60)
+ 430:         if finish_at is None:
+ 431:             reasons.append("FINISH_TIMESTAMP_MISSING")
+ 432:         elif finish_at < window_start:
+ 433:             reasons.append(f"CLOSED_OUTSIDE_60M_FINAL_WINDOW (lead={round((kickoff - finish_at).total_seconds()/60.0, 1)}m)")
+ 434:         elif finish_at > kickoff - timedelta(minutes=prematch_single.FINISH_MIN_LEAD_MINUTES):
+ 435:             reasons.append("CLOSED_WITH_INSUFFICIENT_PREMATCH_LEAD")
+ 436:         if odds_capture is None:
+ 437:             reasons.append("ODDS_CAPTURE_TIMESTAMP_MISSING")
+ 438:         else:
+ 439:             if odds_capture < window_start:
+ 440:                 reasons.append(f"ODDS_NOT_CAPTURED_WITHIN_60M_OF_KICKOFF ({odds_capture.astimezone(tz).isoformat()})")
+ 441:             if finish_at is not None and (finish_at - odds_capture).total_seconds() > 15 * 60:
+ 442:                 reasons.append(f"ODDS_AGE_EXCEEDED_15M_AT_FINISH ({round((finish_at - odds_capture).total_seconds()/60.0, 1)}m)")
+ 443:         if odds_ref.get("path") and odds_ref.get("sha256"):
+ 444:             opath = Path(odds_ref["path"])
+ 445:             if not opath.is_file() or sha(opath) != odds_ref["sha256"]:
+ 446:                 reasons.append("ODDS_MANIFEST_HASH_MISMATCH")
+ 447:         if shadow_stale:
+ 448:             reasons.append("SHADOW_STALE_VS_MANIFEST")
+ 449:         stage = "PRELIMINARY_EVALUATION_ONLY" if reasons else "FINAL_PREMATCH_VALID"
+ 450:         final_valid = not reasons
+ 451: 
+ 452:     return {
+ 453:         "closure_stage": stage,
+ 454:         "final_prematch_valid": final_valid,
+ 455:         "closure_reasons": reasons,
+ 456:         "lineup_gate_reasons": lineup_gate_reasons,
+ 457:         "minutes_to_kickoff_now": remain_min,
+ 458:         "finish_completed_utc": finish_at.isoformat() if finish_at else None,
+ 459:         "odds_capture_madrid": odds_capture.astimezone(tz).isoformat() if odds_capture else None,
+ 460:         "odds_age_minutes_now": odds_age_now,
+ 461:         "lineups_status": lineups_status,
+ 462:         "lineups_confirmed_22": lineups_confirmed_22,
+ 463:         "eligible_for_actionable_pick": bool(
+ 464:             lineups_confirmed_22 and final_valid and lineup_eval.get("eligible_for_actionable_pick", True)
+ 465:         ),
+ 466:         "eligible_for_final_analysis": bool(lineups_confirmed_22),
+ 467:         "official_source_tier": lineup_eval.get("official_source_tier"),
+ 468:         "primary_official_verified": bool(lineup_eval.get("primary_official_verified", False)),
+ 469:         "absence_interpretation": lineup_eval.get("absence_interpretation"),
+ 470:         "lineup_evaluation": lineup_eval,
+ 471:         "shadow_present": shadow_present,
+ 472:         "shadow_status": shadow_status,
+ 473:         "shadow_stale": shadow_stale,
+ 474:         "shadow_odds_sha256": shadow_odds_sha256,
+ 475:         "shadow_odds_captured_utc": shadow_odds_captured_utc,
+ 476:         "shadow_odds_selection_count": shadow_selection_count,
+ 477:         "shadow_probabilities_computed_at_utc": shadow_prob_at_utc,
+ 478:         "shadow_prices_evaluated_at_utc": shadow_prices_at_utc,
+ 479:     }
+ 480: 
+
+--- prematch_case.py (L990-L1045) ---
+ 990:     odds_dest.write_bytes(src_path.read_bytes())
+ 991:     if preserved is not None:
+ 992:         delta = prematch_single.odds_changes(preserved, odds_dest, str(event))
+ 993:         atomic_json(archive / "odds_delta.json", delta)
+ 994: 
+ 995:     manifest.setdefault("inputs", {})["odds"] = {
+ 996:         **reference(odds_dest),
+ 997:         "generated_from": str(src_path),
+ 998:         "refreshed_at_utc": now_dt.isoformat(),
+ 999:         "simulated_offline": True,
+1000:     }
+1001:     manifest["odds_refresh_at_utc"] = now_dt.isoformat()
+1002:     if preserved is not None:
+1003:         manifest["odds_delta"] = reference(archive / "odds_delta.json")
+1004:     manifest["invalidated_by_odds_refresh"] = {
+1005:         "previous_sha256": prev_ref.get("sha256"),
+1006:         "invalidated_at_utc": now_dt.isoformat(),
+1007:         "stages": ["validation", "probabilistic", "shadow", "codex_analysis", "final_review"],
+1008:     }
+1009:     for step in ("validacion", "motor"):
+1010:         (manifest.get("steps") or {}).pop(step, None)
+1011:     manifest.pop("codex_prompt", None)
+1012:     manifest.pop("validation_state", None)
+1013:     for stale_path in (
+1014:         directory / "shadow" / f"shadow_summary_{event}.json",
+1015:         directory / f"CODEX_{event}.md",
+1016:     ):
+1017:         if stale_path.is_file():
+1018:             backup = archive / stale_path.name
+1019:             if not backup.exists():
+1020:                 backup.write_bytes(stale_path.read_bytes())
+1021:             stale_path.unlink()
+1022:     atomic_json(directory / "manifest.json", manifest)
+1023: 
+1024:     shadow_res: dict[str, Any] = {"executed": False}
+1025:     if reevaluate_shadow and (manifest.get("inputs") or {}).get("context_json"):
+1026:         from bet_engine.orchestration import run_shadow_for_event_dir
+1027: 
+1028:         shadow_res = {
+1029:             "executed": True,
+1030:             **run_shadow_for_event_dir(
+1031:                 root,
+1032:                 str(event),
+1033:                 historical=False,
+1034:                 now_utc=now_dt.isoformat(),
+1035:                 max_odds_age_minutes=max_odds_age_minutes,
+1036:                 min_lead_minutes=0,
+1037:             ),
+1038:         }
+1039:     return {
+1040:         "event_id": str(event),
+1041:         "odds_path": str(odds_dest.resolve()),
+1042:         "odds_sha256": sha(odds_dest),
+1043:         "capture_utc": cap_dt.astimezone(timezone.utc).isoformat(),
+1044:         "age_minutes": age_min,
+1045:         "preserved_previous": str(preserved.resolve()) if preserved else None,
+
+--- prematch_case.py (L1630-L1695) ---
+1630:     invalid = [name for name, ref in refs.items() if not ref["hash_valid"]]
+1631:     if invalid: raise ValueError("DOSSIER_INPUT_HASH_INVALID: " + ",".join(invalid))
+1632:     from bet_engine.context.quick_context import load_quick_context_bundle
+1633:     qc_evidences, qc_summaries = load_quick_context_bundle(directory)
+1634:     coverage = {"statistical": "AVAILABLE" if any(k in refs for k in ("context", "context_json")) else "PENDING_CONTEXT",
+1635:                 "manual_hypotheses": manifest.get("hypothesis_validation_status", "NOT_SUPPLIED"),
+1636:                 "qualitative": manifest.get("qualitative_research_status", "NOT_SUPPLIED"),
+1637:                 "quick_context": f"ATTACHED ({len(qc_summaries)} doc / {len(qc_evidences)} hechos)" if qc_summaries else "NOT_SUPPLIED",
+1638:                 "bwin": "AVAILABLE" if "odds" in refs else "NOT_AVAILABLE"}
+1639:     qc_contradictions = sorted({c for doc in qc_summaries for c in doc.get("contradictions", [])})
+1640:     qc_affected = [h for doc in qc_summaries for h in doc.get("affected_hypotheses", [])]
+1641:     closure = _evaluate_closure(directory, case, manifest)
+1642:     dossier = {
+1643:         "schema_version": "2.0-final-prematch-dossier", "generated_utc": datetime.now(timezone.utc).isoformat(),
+1644:         "identity": {k: case[k] for k in ("event_id", "fixture_id", "bwin_url", "home", "away", "competition", "kickoff_madrid")},
+1645:         "pipeline_version": SCHEMA, "manifest_status": manifest.get("status"),
+1646:         "closure_stage": closure["closure_stage"], "final_prematch_valid": closure["final_prematch_valid"],
+1647:         "closure_checks": closure,
+1648:         "timestamps": {
+1649:             "odds_captured_utc": closure.get("shadow_odds_captured_utc") or (
+1650:                 datetime.fromisoformat(closure["odds_capture_madrid"]).astimezone(timezone.utc).isoformat()
+1651:                 if closure.get("odds_capture_madrid") else None
+1652:             ),
+1653:             "odds_sha256": (refs.get("odds") or {}).get("sha256"),
+1654:             "probabilities_computed_at_utc": closure.get("shadow_probabilities_computed_at_utc"),
+1655:             "prices_evaluated_at_utc": closure.get("shadow_prices_evaluated_at_utc"),
+1656:             "shadow_odds_sha256": closure.get("shadow_odds_sha256"),
+1657:             "shadow_odds_selection_count": closure.get("shadow_odds_selection_count"),
+1658:             "shadow_stale": closure.get("shadow_stale"),
+1659:         },
+1660:         "coverage": coverage,
+1661:         "inputs": refs, "validation_state": manifest.get("validation_state"),
+1662:         "quick_context": {
+1663:             "count": len(qc_summaries),
+1664:             "evidences_count": len(qc_evidences),
+1665:             "contradictions": qc_contradictions,
+1666:             "affected_hypotheses": qc_affected,
+1667:             "sources": [{"sha256": d.get("sha256"), "urls": d.get("source_urls", []), "cutoff_utc": d.get("analysis_cutoff_utc")} for d in qc_summaries],
+1668:             "p_model_modified": False,
+1669:         },
+1670:         "codex_prompt": manifest.get("codex_prompt"), "actionable_bet": False,
+1671:         "limitations": ["Las cuotas son snapshots", "No se acredita valor financiero sin modelo validado",
+1672:                         "Las hipótesis manuales no son patrones validados hasta su contraste Python"],
+1673:     }
+1674:     folder = directory / "dossier"
+1675:     json_path = folder / f"dossier_{event}.json"
+1676:     md_path = folder / f"dossier_{event}.md"
+1677:     atomic_json(json_path, dossier)
+1678:     lines = [f"# Expediente PREMATCH canónico · {event}", "", "## Identidad", "",
+1679:              f"- Fixture ID: {case['fixture_id']}", f"- Partido: {case['home']['name']} – {case['away']['name']}",
+1680:              f"- Kickoff Madrid: {case['kickoff_madrid']}", f"- Estado manifest: {manifest.get('status')}",
+1681:              f"- Clasificación cierre: {closure['closure_stage']} (final_prematch_valid={closure['final_prematch_valid']})",
+1682:              f"- XI API: {closure['lineups_status']} | Shadow: {closure['shadow_status']} (stale={closure.get('shadow_stale')})",
+1683:              f"- Timestamp precios Bwin (UTC): {dossier['timestamps']['odds_captured_utc']} | SHA-256: `{dossier['timestamps']['odds_sha256']}`",
+1684:              f"- Timestamp probabilidades Shadow (UTC): {dossier['timestamps']['probabilities_computed_at_utc']} | Evaluación precios (UTC): {dossier['timestamps']['prices_evaluated_at_utc']}",
+1685:              "", "## Cobertura", ""]
+1686:     lines += [f"- {name}: {value}" for name, value in coverage.items()]
+1687:     if qc_summaries:
+1688:         lines += ["", "## Quick Context Cualitativo (No altera p_model)", ""]
+1689:         for d in qc_summaries:
+1690:             lines.append(f"- SHA `{str(d.get('sha256',''))[:12]}` · corte `{d.get('analysis_cutoff_utc')}` · fuentes: {', '.join(d.get('source_urls', [])[:5])}")
+1691:         if qc_contradictions:
+1692:             lines += ["", "### Contradicciones registradas", ""] + [f"- {c}" for c in qc_contradictions]
+1693:         if qc_affected:
+1694:             lines += ["", "### Hipótesis estadísticas afectadas", ""] + [f"- `{h['hypothesis_area']}`: {h['impact_note']}" for h in qc_affected]
+1695:     lines += ["", "## Fuentes verificadas", ""] + [f"- {name}: `{ref['path']}` · SHA-256 `{ref['sha256']}`" for name, ref in refs.items()]

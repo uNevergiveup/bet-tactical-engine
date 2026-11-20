@@ -1,0 +1,712 @@
+=== ITERACION 2.2B DIFF ===
+diff --git a/bet_engine/modeling/prospective_registry.py b/bet_engine/modeling/prospective_registry.py
+new file mode 100644
+index 00000000..8e0dff62
+--- /dev/null
++++ b/bet_engine/modeling/prospective_registry.py
+@@ -0,0 +1,448 @@
++"""Registro prospectivo PREMATCH inmutable y evaluador pareado (Iteración 2.2B).
++
++Totalmente independiente de las decisiones accionables de Shadow en producción.
++Garantiza:
++1. Congelación de predicciones M0, M0_plus_Elo, M4 y M4_plus_Elo estrictamente antes del kickoff.
++2. Prohibición explícita de registros retrospectivos (now_utc >= kickoff_utc, cutoff_utc >= kickoff_utc,
++   partidos ya iniciados/finalizados, o kickoffs <= fecha de corte del corpus de desarrollo).
++3. Inmutabilidad del bloque pre_kickoff mediante SHA-256 verificable antes de liquidar resultados.
++4. Separación entre alineaciones confirmadas y probables, cuotas Bwin y razones de exclusión.
++"""
++
++from __future__ import annotations
++
++import hashlib
++import json
++import math
++import statistics
++from datetime import datetime, timezone
++from pathlib import Path
++from typing import Any
++from zoneinfo import ZoneInfo
++
++from bet_engine.context.observation_store import MatchObservationBundle, ObservationStore
++from bet_engine.modeling.calibration import brier_score, log_loss, parse_utc_timestamp
++from bet_engine.modeling.distributions import _gamma_rate_bounds, dixon_coles_joint_grid
++from bet_engine.modeling.experimental_v2_1b import (
++    AsOfEloTracker,
++    ExperimentalConfig,
++    FINISHED_ELO_STATUSES,
++    predict_experimental_match,
++    resolve_elo_available_dt,
++)
++
++MADRID_TZ = ZoneInfo("Europe/Madrid")
++CORPUS_CUTOFF_UTC = "2026-11-14T19:45:00+00:00"
++PROSPECTIVE_MIN_SAMPLE = {"CLUB": 200, "NATIONAL_TEAM": 50}
++FROZEN_MODEL_NAMES = ("M0", "M0_plus_Elo", "M4", "M4_plus_Elo")
++LIVE_OR_FINISHED_STATUSES = frozenset({"1H", "HT", "2H", "ET", "BT", "P", "LIVE", "INT", "FT", "AET", "PEN"})
++
++
++class ProspectiveRegistryError(ValueError):
++    """Error de integridad temporal, retrospectiva o de inmutabilidad en registro prospectivo."""
++
++
++def _canonical_sha256(obj: Any) -> str:
++    payload = json.dumps(obj, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
++    return hashlib.sha256(payload).hexdigest()
++
++
++def load_frozen_configs(manifest_path: Path) -> tuple[dict[str, ExperimentalConfig], str]:
++    raw = json.loads(manifest_path.read_text(encoding="utf-8"))
++    version = str(raw.get("schema_version") or "2.2A-frozen-models")
++    base_rates = {
++        str(k): (float(v[0]), float(v[1]))
++        for k, v in (raw.get("train_fit_base_rates") or {}).items()
++    }
++    cfgs: dict[str, ExperimentalConfig] = {}
++    for key in FROZEN_MODEL_NAMES:
++        spec = (raw.get("frozen_candidates") or {})[key]
++        cfgs[key] = ExperimentalConfig(
++            name=str(spec["name"]),
++            multiplicative=bool(spec["multiplicative"]),
++            use_sos_opp_rates=bool(spec["use_sos_opp_rates"]),
++            sos_alpha=float(spec["sos_alpha"]),
++            use_elo=bool(spec["use_elo"]),
++            elo_weight=float(spec["elo_weight"]),
++            half_life_days=spec["half_life_days"],
++            venue_blend=float(spec["venue_blend"]),
++            shrink_k=float(spec["shrink_k"]),
++            rho=float(spec["rho"]),
++            base_rates_by_stratum=base_rates or None,
++        )
++    return cfgs, version
++
++
++def _classify_lineup_state(bundle: MatchObservationBundle, payload: dict[str, Any]) -> dict[str, Any]:
++    """Diferencia explícitamente alineaciones confirmadas vs probables vs no disponibles."""
++    le = dict(getattr(bundle, "target_lineup_evaluation", None) or {})
++    st = str(le.get("status") or "").upper()
++    ctx = payload.get("context") or {}
++    api_lineups = ((ctx.get("lineups") or {}).get("response") or [])
++    confirmed_teams = sum(1 for item in api_lineups if isinstance(item, dict) and len(item.get("startXI") or []) == 11)
++    if st == "LINEUPS_CONFIRMED_COMPLETE" or confirmed_teams == 2:
++        state = "CONFIRMED_COMPLETE_22"
++    elif confirmed_teams == 1 or le.get("partial_team_confirmed"):
++        state = "CONFIRMED_PARTIAL_11"
++    elif "PROBABLE" in st:
++        state = "PROBABLE_ONLY"
++    else:
++        state = "UNAVAILABLE"
++    return {
++        "lineup_state": state,
++        "confirmed_complete_22": state == "CONFIRMED_COMPLETE_22",
++        "api_confirmed_sides": confirmed_teams,
++        "raw_gate_status": st or "LINEUPS_PENDING",
++    }
++
++
++def _quantile_range_from_grid(grid: list[list[float]], q_lo: float = 0.10, q_hi: float = 0.90) -> list[int]:
++    mg = len(grid) - 1
++    tot_pmf = [0.0] * (2 * mg + 1)
++    for i in range(mg + 1):
++        for j in range(mg + 1):
++            tot_pmf[i + j] += grid[i][j]
++    cdf = 0.0
++    lo_k, hi_k = 0, len(tot_pmf) - 1
++    got_lo = False
++    for k, p in enumerate(tot_pmf):
++        cdf += p
++        if not got_lo and cdf >= q_lo:
++            lo_k = k
++            got_lo = True
++        if cdf >= q_hi:
++            hi_k = k
++            break
++    return [lo_k, hi_k]
++
++
++def record_prospective_prediction(
++    *,
++    match_engine_payload: dict[str, Any],
++    manifest_path: Path,
++    records_dir: Path,
++    elo_tracker: AsOfEloTracker | None = None,
++    team_ordered_by_id: dict[int, list[Any]] | None = None,
++    bwin_odds: dict[str, Any] | None = None,
++    odds_captured_utc: str | None = None,
++    odds_sha256: str | None = None,
++    now_utc: datetime | None = None,
++    min_corpus_cutoff_utc: str = CORPUS_CUTOFF_UTC,
++    allow_overwrite: bool = False,
++) -> Path:
++    """Genera y congela un registro prospectivo PREMATCH antes del kickoff."""
++    now_dt = now_utc or datetime.now(timezone.utc)
++    fx = match_engine_payload.get("fixture") or {}
++    match_meta = match_engine_payload.get("match") or {}
++    ctx = match_engine_payload.get("context") or {}
++
++    target_resp = ((ctx.get("target_fixture_full") or {}).get("response") or [])
++    target_fx_obj = (target_resp[0].get("fixture") or {}) if target_resp else {}
++    target_goals_obj = (target_resp[0].get("goals") or {}) if target_resp else {}
++    target_status = str((target_fx_obj.get("status") or {}).get("short") or fx.get("status") or "NS").strip().upper()
++
++    ko_raw = fx.get("date") or target_fx_obj.get("date")
++    if not ko_raw:
++        raise ProspectiveRegistryError("MISSING_KICKOFF_UTC")
++    ko_dt = parse_utc_timestamp(str(ko_raw))
++
++    if now_dt >= ko_dt:
++        raise ProspectiveRegistryError(f"RETROSPECTIVE_RECORD_FORBIDDEN:now({now_dt.isoformat()})>=kickoff({ko_dt.isoformat()})")
++    if target_status in LIVE_OR_FINISHED_STATUSES:
++        raise ProspectiveRegistryError(f"RETROSPECTIVE_RECORD_FORBIDDEN:status={target_status}")
++    if target_goals_obj.get("home") is not None or target_goals_obj.get("away") is not None:
++        raise ProspectiveRegistryError("RETROSPECTIVE_RECORD_FORBIDDEN:TARGET_GOALS_ALREADY_PRESENT")
++
++    corpus_cut_dt = parse_utc_timestamp(min_corpus_cutoff_utc)
++    if ko_dt <= corpus_cut_dt:
++        raise ProspectiveRegistryError(
++            f"NON_PROSPECTIVE_KICKOFF:kickoff({ko_dt.isoformat()})<=corpus_cutoff({corpus_cut_dt.isoformat()})"
++        )
++
++    cutoff_raw = match_engine_payload.get("generated_at") or now_dt.isoformat()
++    cutoff_dt = parse_utc_timestamp(str(cutoff_raw))
++    if cutoff_dt > now_dt:
++        raise ProspectiveRegistryError("FUTURE_CUTOFF_TIMESTAMP_INVALID")
++    if cutoff_dt >= ko_dt:
++        raise ProspectiveRegistryError("RETROSPECTIVE_RECORD_FORBIDDEN:cutoff>=kickoff")
++
++    bundle = ObservationStore.from_match_engine_json(match_engine_payload, cutoff_utc=cutoff_dt)
++    stratum = (
++        bundle.home_matches[0].competition_stratum
++        if bundle.home_matches
++        else (bundle.away_matches[0].competition_stratum if bundle.away_matches else "CLUB")
++    )
++    stratum_norm = "NATIONAL_TEAM" if stratum == "NATIONAL_TEAM" else "CLUB"
++
++    cfgs, manifest_version = load_frozen_configs(manifest_path)
++    predictions: dict[str, Any] = {}
++    for mname in FROZEN_MODEL_NAMES:
++        cfg = cfgs[mname]
++        res = predict_experimental_match(
++            bundle.home_matches,
++            bundle.away_matches,
++            home_id=bundle.home_id,
++            away_id=bundle.away_id,
++            target_ko_dt=ko_dt,
++            target_league_id=bundle.league_id,
++            target_season=bundle.season,
++            target_stratum=stratum_norm,
++            cfg=cfg,
++            team_ordered_by_id=team_ordered_by_id,
++            elo_tracker=elo_tracker,
++            history_limit=20,
++        )
++        lh, la = float(res["lambda_home"]), float(res["lambda_away"])
++        comp = res["components"]
++        nh_post = (float(comp["home_n_eff"]) + cfg.shrink_k) * 0.85
++        na_post = (float(comp["away_n_eff"]) + cfg.shrink_k) * 0.85
++        lh_lo, lh_hi = _gamma_rate_bounds(lh, nh_post, 1.18)
++        la_lo, la_hi = _gamma_rate_bounds(la, na_post, 1.18)
++        corners = [
++            sum(g[i][j] for i in range(13) for j in range(13) if i > j)
++            for g in [dixon_coles_joint_grid(a, b, rho=cfg.rho, max_goals=12) for a in (lh_lo, lh_hi) for b in (la_lo, la_hi)]
++        ]
++        grid = dixon_coles_joint_grid(lh, la, rho=cfg.rho, max_goals=12)
++        predictions[mname] = {
++            "lambda_home": lh,
++            "lambda_away": la,
++            "outcomes_1x2": {
++                "home_win": round(res["p_home"], 6),
++                "draw": round(res["p_draw"], 6),
++                "away_win": round(res["p_away"], 6),
++            },
++            "p_over_2_5": round(res["p_over_2_5"], 6),
++            "p_btts_yes": round(res["p_btts_yes"], 6),
++            "uncertainty": {
++                "p_home_epistemic_bounds": [round(min(corners), 4), round(max(corners), 4)],
++                "total_goals_q10_q90": _quantile_range_from_grid(grid, 0.10, 0.90),
++            },
++            "components": comp,
++        }
++
++    exclusions: list[str] = []
++    if len(bundle.home_matches) < 6 or len(bundle.away_matches) < 6:
++        exclusions.append(f"LOW_HISTORY_LT_6(home={len(bundle.home_matches)},away={len(bundle.away_matches)})")
++    if not bwin_odds:
++        exclusions.append("NO_BWIN_ODDS_CAPTURED")
++
++    red_unk_h = sum(1 for m in bundle.home_matches if (m.red_card_detail or {}).get("red_card_status") == "RED_CARD_UNKNOWN")
++    red_unk_a = sum(1 for m in bundle.away_matches if (m.red_card_detail or {}).get("red_card_status") == "RED_CARD_UNKNOWN")
++
++    pre_kickoff_block = {
++        "fixture_id": bundle.fixture_id,
++        "event_id": str(match_meta.get("event_id") or bundle.event_id or ""),
++        "competition": {
++            "league_id": bundle.league_id,
++            "league_name": str(fx.get("league_name") or ""),
++            "season": bundle.season,
++            "stratum": stratum_norm,
++        },
++        "teams": {
++            "home_id": bundle.home_id,
++            "home_name": bundle.home_name,
++            "away_id": bundle.away_id,
++            "away_name": bundle.away_name,
++        },
++        "timing": {
++            "kickoff_utc": ko_dt.isoformat(),
++            "kickoff_madrid": ko_dt.astimezone(MADRID_TZ).isoformat(),
++            "cutoff_utc": cutoff_dt.isoformat(),
++            "generated_utc": now_dt.isoformat(),
++            "lead_minutes_before_kickoff": round((ko_dt - now_dt).total_seconds() / 60.0, 2),
++            "temporal_integrity_status": "PREMATCH_VERIFIED",
++        },
++        "provenance": {
++            "input_sha256": bundle.source_sha256,
++            "odds_sha256": odds_sha256,
++            "manifest_sha256": _canonical_sha256(json.loads(manifest_path.read_text(encoding="utf-8"))),
++            "frozen_manifest_version": manifest_version,
++        },
++        "history_summary": {
++            "home_raw_n": len(bundle.home_matches),
++            "away_raw_n": len(bundle.away_matches),
++            "home_n_eff_m0": predictions["M0"]["components"]["home_n_eff"],
++            "away_n_eff_m0": predictions["M0"]["components"]["away_n_eff"],
++            "red_card_unknown_home_n": red_unk_h,
++            "red_card_unknown_away_n": red_unk_a,
++        },
++        "lineup_status": _classify_lineup_state(bundle, match_engine_payload),
++        "bwin_odds": {
++            "captured_utc": odds_captured_utc,
++            "quotes": dict(bwin_odds or {}),
++        },
++        "exclusion_reasons": exclusions,
++        "eligible_for_paired_eval": not any(e.startswith("LOW_HISTORY_LT_6") for e in exclusions),
++        "predictions": predictions,
++    }
++
++    records_dir.mkdir(parents=True, exist_ok=True)
++    slug = f"{bundle.fixture_id}_{pre_kickoff_block['event_id'] or 'noevent'}.json"
++    out_path = records_dir / slug
++    if out_path.exists() and not allow_overwrite:
++        raise ProspectiveRegistryError(f"IMMUTABLE_RECORD_ALREADY_EXISTS:{out_path}")
++
++    full_doc = {
++        "schema_version": "2.2B-prospective-record",
++        "pre_kickoff": pre_kickoff_block,
++        "pre_kickoff_sha256": _canonical_sha256(pre_kickoff_block),
++        "settlement": {
++            "status": "PENDING_RESULT",
++            "match_status": None,
++            "hg": None,
++            "ag": None,
++            "settled_at_utc": None,
++            "model_scores": {},
++        },
++    }
++    out_path.write_text(json.dumps(full_doc, indent=2, ensure_ascii=False), encoding="utf-8")
++    return out_path
++
++
++def settle_prospective_record(
++    record_path: Path,
++    *,
++    hg: int,
++    ag: int,
++    match_status: str = "FT",
++    settled_at_utc: datetime | None = None,
++) -> dict[str, Any]:
++    """Incorpora el resultado oficial verificado después del partido sin alterar pre_kickoff."""
++    doc = json.loads(record_path.read_text(encoding="utf-8"))
++    pre = doc["pre_kickoff"]
++    expected_sha = _canonical_sha256(pre)
++    if expected_sha != doc.get("pre_kickoff_sha256"):
++        raise ProspectiveRegistryError("PRE_KICKOFF_RECORD_TAMPERED")
++    if (doc.get("settlement") or {}).get("status") == "SETTLED":
++        raise ProspectiveRegistryError(f"RECORD_ALREADY_SETTLED:{record_path}")
++
++    st = str(match_status).strip().upper()
++    if st not in FINISHED_ELO_STATUSES:
++        raise ProspectiveRegistryError(f"NON_FINAL_SETTLEMENT_STATUS:{st}")
++
++    ko_dt = parse_utc_timestamp(pre["timing"]["kickoff_utc"])
++    now_dt = settled_at_utc or datetime.now(timezone.utc)
++    min_avail_dt, _ = resolve_elo_available_dt({"ko_dt": ko_dt, "status": st})
++    assert min_avail_dt is not None
++    if now_dt < min_avail_dt:
++        raise ProspectiveRegistryError(
++            f"PREMATURE_SETTLEMENT:settled_at({now_dt.isoformat()})<min_finish({min_avail_dt.isoformat()})"
++        )
++
++    y_1x2 = "HOME" if hg > ag else ("DRAW" if hg == ag else "AWAY")
++    y_hw = 1 if hg > ag else 0
++    y_dr = 1 if hg == ag else 0
++    y_aw = 1 if hg < ag else 0
++    y_o25 = 1 if (hg + ag) > 2.5 else 0
++    y_btts = 1 if (hg > 0 and ag > 0) else 0
++
++    scores: dict[str, Any] = {}
++    eps = 1e-6
++    for mname, pred in pre["predictions"].items():
++        p1 = float(pred["outcomes_1x2"]["home_win"])
++        px = float(pred["outcomes_1x2"]["draw"])
++        p2 = float(pred["outcomes_1x2"]["away_win"])
++        po25 = float(pred["p_over_2_5"])
++        pbtts = float(pred["p_btts_yes"])
++        rps = ((p1 - y_hw) ** 2 + ((p1 + px) - (y_hw + y_dr)) ** 2) / 2.0
++        ll_1x2 = -math.log(max(eps, p1 if y_1x2 == "HOME" else (px if y_1x2 == "DRAW" else p2)))
++        brier_1x2 = ((p1 - y_hw) ** 2 + (px - y_dr) ** 2 + (p2 - y_aw) ** 2) / 3.0
++        scores[mname] = {
++            "rps": round(rps, 6),
++            "ll_1x2": round(ll_1x2, 6),
++            "brier_1x2_per_out": round(brier_1x2, 6),
++            "brier_o25": round((po25 - y_o25) ** 2, 6),
++            "brier_btts": round((pbtts - y_btts) ** 2, 6),
++            "err_home": round(float(pred["lambda_home"]) - hg, 4),
++            "err_away": round(float(pred["lambda_away"]) - ag, 4),
++        }
++
++    doc["settlement"] = {
++        "status": "SETTLED",
++        "match_status": st,
++        "hg": int(hg),
++        "ag": int(ag),
++        "actual_1x2": y_1x2,
++        "actual_o25": y_o25,
++        "actual_btts": y_btts,
++        "settled_at_utc": now_dt.isoformat(),
++        "model_scores": scores,
++    }
++    record_path.write_text(json.dumps(doc, indent=2, ensure_ascii=False), encoding="utf-8")
++    return doc
++
++
++def evaluate_prospective_records(records_dir: Path) -> dict[str, Any]:
++    """Evalúa de forma pareada exactamente los mismos partidos liquidados para M0, M0+Elo, M4 y M4+Elo."""
++    settled_docs: list[dict[str, Any]] = []
++    pending_n = 0
++    excluded_n = 0
++    tampered: list[str] = []
++
++    for p in sorted(records_dir.glob("*.json")):
++        doc = json.loads(p.read_text(encoding="utf-8"))
++        pre = doc.get("pre_kickoff") or {}
++        if _canonical_sha256(pre) != doc.get("pre_kickoff_sha256"):
++            tampered.append(p.name)
++            continue
++        if not pre.get("eligible_for_paired_eval", True):
++            excluded_n += 1
++            continue
++        if (doc.get("settlement") or {}).get("status") != "SETTLED":
++            pending_n += 1
++            continue
++        if all(m in (pre.get("predictions") or {}) for m in FROZEN_MODEL_NAMES):
++            settled_docs.append(doc)
++
++    club_docs = [d for d in settled_docs if d["pre_kickoff"]["competition"]["stratum"] != "NATIONAL_TEAM"]
++    nat_docs = [d for d in settled_docs if d["pre_kickoff"]["competition"]["stratum"] == "NATIONAL_TEAM"]
++
++    def _agg(docs: list[dict[str, Any]]) -> dict[str, Any]:
++        if not docs:
++            return {"n_fixtures": 0}
++        out: dict[str, Any] = {"n_fixtures": len(docs), "models": {}}
++        for mname in FROZEN_MODEL_NAMES:
++            sc_list = [d["settlement"]["model_scores"][mname] for d in docs]
++            o25_pairs = [(float(d["pre_kickoff"]["predictions"][mname]["p_over_2_5"]), int(d["settlement"]["actual_o25"])) for d in docs]
++            btts_pairs = [(float(d["pre_kickoff"]["predictions"][mname]["p_btts_yes"]), int(d["settlement"]["actual_btts"])) for d in docs]
++            fav_obs = []
++            for d in docs:
++                pr = d["pre_kickoff"]["predictions"][mname]["outcomes_1x2"]
++                st = d["settlement"]
++                fav_obs.append((float(pr["home_win"]), 1 if st["actual_1x2"] == "HOME" else 0))
++                fav_obs.append((float(pr["away_win"]), 1 if st["actual_1x2"] == "AWAY" else 0))
++            fav_ge = [(p, y) for p, y in fav_obs if p >= 0.55]
++            out["models"][mname] = {
++                "rps": round(statistics.fmean(s["rps"] for s in sc_list), 5),
++                "log_loss_1x2": round(statistics.fmean(s["ll_1x2"] for s in sc_list), 5),
++                "brier_1x2": round(statistics.fmean(s["brier_1x2_per_out"] for s in sc_list), 5),
++                "brier_over_2_5": brier_score(o25_pairs),
++                "log_loss_over_2_5": log_loss(o25_pairs),
++                "brier_btts": brier_score(btts_pairs),
++                "log_loss_btts": log_loss(btts_pairs),
++                "bias_home_goals": round(statistics.fmean(s["err_home"] for s in sc_list), 4),
++                "bias_away_goals": round(statistics.fmean(s["err_away"] for s in sc_list), 4),
++                "mae_home": round(statistics.fmean(abs(s["err_home"]) for s in sc_list), 4),
++                "mae_away": round(statistics.fmean(abs(s["err_away"]) for s in sc_list), 4),
++                "favorite_ge_0_55": {
++                    "n": len(fav_ge),
++                    "bias": round(statistics.fmean(p for p, _ in fav_ge) - statistics.fmean(y for _, y in fav_ge), 4)
++                    if fav_ge
++                    else None,
++                },
++            }
++        return out
++
++    return {
++        "settled_paired_n": len(settled_docs),
++        "pending_n": pending_n,
++        "excluded_n": excluded_n,
++        "tampered_rejected": tampered,
++        "sample_sufficiency": {
++            "CLUB": {"n": len(club_docs), "target": PROSPECTIVE_MIN_SAMPLE["CLUB"], "sufficient": len(club_docs) >= PROSPECTIVE_MIN_SAMPLE["CLUB"]},
++            "NATIONAL_TEAM": {"n": len(nat_docs), "target": PROSPECTIVE_MIN_SAMPLE["NATIONAL_TEAM"], "sufficient": len(nat_docs) >= PROSPECTIVE_MIN_SAMPLE["NATIONAL_TEAM"]},
++        },
++        "ALL": _agg(settled_docs),
++        "CLUB": _agg(club_docs),
++        "NATIONAL_TEAM": _agg(nat_docs),
++    }
+diff --git a/tools/prospective_tracker.py b/tools/prospective_tracker.py
+new file mode 100644
+index 00000000..1dcc0021
+--- /dev/null
++++ b/tools/prospective_tracker.py
+@@ -0,0 +1,87 @@
++#!/usr/bin/env python3
++"""CLI de registro y evaluación prospectiva PREMATCH (Iteración 2.2B).
++
++Ejemplos:
++  # 1) Registrar predicciones congeladas ANTES del kickoff:
++  PYTHONPATH=. .venv/bin/python tools/prospective_tracker.py record \
++    --match-engine outputs/matches/<EVENT_ID>/inputs/match_engine_<EVENT_ID>.json \
++    --manifest audit/iteracion_2_2b/MANIFEST_MODELOS_CONGELADOS.json \
++    --records-dir outputs/prospective_records
++
++  # 2) Liquidar resultado oficial DESPUÉS del partido (FT/AET/PEN):
++  PYTHONPATH=. .venv/bin/python tools/prospective_tracker.py settle \
++    --record outputs/prospective_records/<FIXTURE_ID>_<EVENT_ID>.json \
++    --hg 2 --ag 1 --status FT
++
++  # 3) Evaluar comparativa pareada sobre todos los registros liquidados:
++  PYTHONPATH=. .venv/bin/python tools/prospective_tracker.py evaluate \
++    --records-dir outputs/prospective_records
++"""
++
++from __future__ import annotations
++
++import argparse
++import hashlib
++import json
++from pathlib import Path
++
++from bet_engine.modeling.prospective_registry import (
++    evaluate_prospective_records,
++    record_prospective_prediction,
++    settle_prospective_record,
++)
++from bet_engine.orchestration.shadow_pipeline import parse_bwin_odds_txt
++
++
++def main() -> int:
++    parser = argparse.ArgumentParser(description="Tracker prospectivo PREMATCH (Iteración 2.2B)")
++    sub = parser.add_subparsers(dest="cmd", required=True)
++
++    p_rec = sub.add_parser("record", help="Registra predicciones congeladas antes del kickoff")
++    p_rec.add_argument("--match-engine", type=Path, required=True)
++    p_rec.add_argument("--manifest", type=Path, default=Path("audit/iteracion_2_2b/MANIFEST_MODELOS_CONGELADOS.json"))
++    p_rec.add_argument("--records-dir", type=Path, default=Path("outputs/prospective_records"))
++    p_rec.add_argument("--bwin-txt", type=Path, default=None)
++
++    p_set = sub.add_parser("settle", help="Incorpora resultado final verificado post-partido")
++    p_set.add_argument("--record", type=Path, required=True)
++    p_set.add_argument("--hg", type=int, required=True)
++    p_set.add_argument("--ag", type=int, required=True)
++    p_set.add_argument("--status", type=str, default="FT")
++
++    p_eval = sub.add_parser("evaluate", help="Evalúa comparativa pareada M0/M0+Elo/M4/M4+Elo")
++    p_eval.add_argument("--records-dir", type=Path, default=Path("outputs/prospective_records"))
++
++    args = parser.parse_args()
++    if args.cmd == "record":
++        payload = json.loads(args.match_engine.read_text(encoding="utf-8"))
++        odds = None
++        odds_sha = None
++        if args.bwin_txt and args.bwin_txt.is_file():
++            fx = payload.get("fixture") or {}
++            odds = parse_bwin_odds_txt(args.bwin_txt, home_name=fx.get("home_name"), away_name=fx.get("away_name"))
++            odds_sha = hashlib.sha256(args.bwin_txt.read_bytes()).hexdigest()
++        out = record_prospective_prediction(
++            match_engine_payload=payload,
++            manifest_path=args.manifest,
++            records_dir=args.records_dir,
++            bwin_odds=odds,
++            odds_sha256=odds_sha,
++        )
++        print(str(out))
++        return 0
++
++    if args.cmd == "settle":
++        doc = settle_prospective_record(args.record, hg=args.hg, ag=args.ag, match_status=args.status)
++        print(json.dumps(doc["settlement"], indent=2))
++        return 0
++
++    if args.cmd == "evaluate":
++        rep = evaluate_prospective_records(args.records_dir)
++        print(json.dumps(rep, indent=2, ensure_ascii=False))
++        return 0
++    return 1
++
++
++if __name__ == "__main__":
++    raise SystemExit(main())
+diff --git a/test/test_iteracion_2_2b_prospective_and_elo.py b/test/test_iteracion_2_2b_prospective_and_elo.py
+new file mode 100644
+index 00000000..54c36e35
+--- /dev/null
++++ b/test/test_iteracion_2_2b_prospective_and_elo.py
+@@ -0,0 +1,155 @@
++#!/usr/bin/env python3
++"""Pruebas Iteración 2.2B:
++1. Trazabilidad temporal Elo (AET >=165m, PEN >=180m, exclusión no terminados, fallback +180m).
++2. Registro prospectivo PREMATCH inmutable (anti-retrospectivo, alineaciones confirmadas vs probables,
++   liquidación post-partido, detección de manipulación y evaluación pareada de 4 modelos).
++"""
++
++from __future__ import annotations
++
++import copy
++import json
++import tempfile
++import unittest
++from datetime import datetime, timedelta, timezone
++from pathlib import Path
++
++from bet_engine.modeling.experimental_v2_1b import AsOfEloTracker, resolve_elo_available_dt
++from bet_engine.modeling.prospective_registry import (
++    ProspectiveRegistryError,
++    evaluate_prospective_records,
++    record_prospective_prediction,
++    settle_prospective_record,
++)
++
++ROOT = Path(__file__).resolve().parent.parent
++
++
++class TestIteracion22BProspectiveAndElo(unittest.TestCase):
++    def test_elo_aet_pen_non_finished_and_conservative_fallback(self) -> None:
++        t0 = datetime(2026, 11, 15, 15, 0, tzinfo=timezone.utc)
++        fixtures = [
++            # Prórroga AET: NO debe estar disponible a ko + 130m, sí a ko + 165m
++            {"fixture_id": 1, "home_id": 10, "away_id": 20, "hg": 2, "ag": 1, "stratum": "CLUB", "ko_dt": t0, "status": "AET"},
++            # Penaltis PEN: NO debe estar disponible a ko + 170m, sí a ko + 180m
++            {"fixture_id": 2, "home_id": 30, "away_id": 40, "hg": 1, "ag": 1, "stratum": "CLUB", "ko_dt": t0, "status": "PEN"},
++            # Suspendido / En vivo: DEBE excluirse completamente
++            {"fixture_id": 3, "home_id": 50, "away_id": 60, "hg": 3, "ag": 0, "stratum": "CLUB", "ko_dt": t0, "status": "INT"},
++            {"fixture_id": 4, "home_id": 70, "away_id": 80, "hg": 1, "ag": 0, "stratum": "CLUB", "ko_dt": t0, "status": "2H"},
++            # Sin estado ni avail_dt explícito: fallback conservador +180m
++            {"fixture_id": 5, "home_id": 90, "away_id": 91, "hg": 2, "ag": 0, "stratum": "CLUB", "ko_dt": t0},
++        ]
++        tracker = AsOfEloTracker.build_from_fixtures(fixtures)
++        self.assertEqual(tracker.excluded_non_finished, 2)
++
++        # A ko + 130m: AET todavía NO entró
++        r10_130, n10_130 = tracker.get_rating_asof("CLUB", 10, t0 + timedelta(minutes=130))
++        self.assertEqual((r10_130, n10_130), (1500.0, 0))
++        # A ko + 165m: AET sí entró
++        r10_165, n10_165 = tracker.get_rating_asof("CLUB", 10, t0 + timedelta(minutes=165))
++        self.assertEqual(n10_165, 1)
++        self.assertGreater(r10_165, 1500.0)
++
++        # A ko + 170m: PEN y fallback desconocido todavía NO entraron
++        self.assertEqual(tracker.get_rating_asof("CLUB", 30, t0 + timedelta(minutes=170))[1], 0)
++        self.assertEqual(tracker.get_rating_asof("CLUB", 90, t0 + timedelta(minutes=170))[1], 0)
++        # A ko + 180m: ambos entran
++        self.assertEqual(tracker.get_rating_asof("CLUB", 30, t0 + timedelta(minutes=180))[1], 1)
++        self.assertEqual(tracker.get_rating_asof("CLUB", 90, t0 + timedelta(minutes=180))[1], 1)
++
++        # Suspendido/en vivo nunca entra ni mucho después
++        self.assertEqual(tracker.get_rating_asof("CLUB", 50, t0 + timedelta(days=5))[1], 0)
++        self.assertEqual(tracker.get_rating_asof("CLUB", 70, t0 + timedelta(days=5))[1], 0)
++
++        # Disponibilidad explícita posterior retrasa el punto de disponibilidad
++        avail_obs, prov_obs = resolve_elo_available_dt({
++            "ko_dt": t0,
++            "status": "FT",
++            "observed_available_at_utc": (t0 + timedelta(minutes=210)).isoformat(),
++        })
++        self.assertEqual(avail_obs, t0 + timedelta(minutes=210))
++        self.assertEqual(prov_obs, "VERIFIED_TIMESTAMP")
++
++    def test_prospective_record_settle_tamper_and_paired_eval(self) -> None:
++        me_path = ROOT / "outputs/matches/7905487/inputs/match_engine_7905487.json"
++        manifest_path = ROOT / "audit/iteracion_2_2b/MANIFEST_MODELOS_CONGELADOS.json"
++        if not (me_path.is_file() and manifest_path.is_file()):
++            self.skipTest("Fixtures o manifest no presentes")
++
++        base_payload = json.loads(me_path.read_text(encoding="utf-8"))
++        future_ko = datetime(2026, 11, 20, 20, 0, tzinfo=timezone.utc)
++        now_pre = future_ko - timedelta(hours=3)
++        payload = copy.deepcopy(base_payload)
++        payload["fixture"]["date"] = future_ko.isoformat()
++        payload["generated_at"] = (now_pre - timedelta(minutes=5)).isoformat()
++        payload["context"]["target_fixture_full"] = {"response": [{"fixture": {"date": future_ko.isoformat(), "status": {"short": "NS"}}, "goals": {"home": None, "away": None}}]}
++
++        with tempfile.TemporaryDirectory() as td:
++            rec_dir = Path(td) / "records"
++            # 1. Bloquear registro retrospectivo si now_utc >= kickoff
++            with self.assertRaises(ProspectiveRegistryError):
++                record_prospective_prediction(
++                    match_engine_payload=payload,
++                    manifest_path=manifest_path,
++                    records_dir=rec_dir,
++                    now_utc=future_ko + timedelta(minutes=10),
++                )
++            # 2. Bloquear si status == FT
++            ft_payload = copy.deepcopy(payload)
++            ft_payload["context"]["target_fixture_full"]["response"][0]["fixture"]["status"]["short"] = "FT"
++            with self.assertRaises(ProspectiveRegistryError):
++                record_prospective_prediction(
++                    match_engine_payload=ft_payload,
++                    manifest_path=manifest_path,
++                    records_dir=rec_dir,
++                    now_utc=now_pre,
++                )
++            # 3. Registro válido antes del kickoff
++            rec_path = record_prospective_prediction(
++                match_engine_payload=payload,
++                manifest_path=manifest_path,
++                records_dir=rec_dir,
++                bwin_odds={"home_win": 2.35, "draw": 3.20, "away_win": 3.10},
++                odds_captured_utc=now_pre.isoformat(),
++                now_utc=now_pre,
++            )
++            doc = json.loads(rec_path.read_text(encoding="utf-8"))
++            pre = doc["pre_kickoff"]
++            self.assertEqual(set(pre["predictions"].keys()), {"M0", "M0_plus_Elo", "M4", "M4_plus_Elo"})
++            self.assertEqual(pre["timing"]["temporal_integrity_status"], "PREMATCH_VERIFIED")
++            self.assertFalse(pre["lineup_status"]["confirmed_complete_22"])
++
++            # 4. Inmutabilidad: no permite sobrescribir registro existente
++            with self.assertRaises(ProspectiveRegistryError):
++                record_prospective_prediction(
++                    match_engine_payload=payload,
++                    manifest_path=manifest_path,
++                    records_dir=rec_dir,
++                    now_utc=now_pre,
++                )
++
++            # 5. Rechaza liquidación prematura antes de ko + 125m
++            with self.assertRaises(ProspectiveRegistryError):
++                settle_prospective_record(rec_path, hg=2, ag=1, match_status="FT", settled_at_utc=future_ko + timedelta(minutes=90))
++
++            # 6. Liquidación válida después de FT
++            settled = settle_prospective_record(rec_path, hg=2, ag=1, match_status="FT", settled_at_utc=future_ko + timedelta(minutes=140))
++            self.assertEqual(settled["settlement"]["status"], "SETTLED")
++            self.assertEqual(set(settled["settlement"]["model_scores"].keys()), {"M0", "M0_plus_Elo", "M4", "M4_plus_Elo"})
++
++            # 7. Evaluación pareada sobre exactamente el mismo partido
++            ev = evaluate_prospective_records(rec_dir)
++            self.assertEqual(ev["settled_paired_n"], 1)
++            self.assertFalse(ev["sample_sufficiency"]["CLUB"]["sufficient"])
++            self.assertEqual(set(ev["ALL"]["models"].keys()), {"M0", "M0_plus_Elo", "M4", "M4_plus_Elo"})
++
++            # 8. Detección de manipulación si se altera pre_kickoff
++            tampered = json.loads(rec_path.read_text(encoding="utf-8"))
++            tampered["pre_kickoff"]["predictions"]["M0"]["p_over_2_5"] = 0.99
++            rec_path.write_text(json.dumps(tampered), encoding="utf-8")
++            ev2 = evaluate_prospective_records(rec_dir)
++            self.assertEqual(len(ev2["tampered_rejected"]), 1)
++
++
++if __name__ == "__main__":
++    unittest.main()
+=== Modified existing untracked files in 2.2B ===
+-rw-r--r--@ 1 antonio  staff  58546 Nov 18 11:16 bet_engine/context/observation_store.py
+-rw-r--r--@ 1 antonio  staff  20148 Nov 18 11:16 bet_engine/modeling/experimental_v2_1b.py

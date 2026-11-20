@@ -85,13 +85,15 @@ def clean_observations(fixture,side,asof=None):
     cutoffs=[x for x in cutoffs if x is not None]
     if len(cutoffs)<3:return []
     cutoff=min(cutoffs)
+    from prematch_cache_record import historical_available, acquisition_before
     team_id=fixture.get(side+'_id');seen={}
     for row in (fixture.get('statistical_observations') or {}).get(side,[]):
         if not isinstance(row,dict):continue
         at=dt(row.get('kickoff_utc'));fid=row.get('fixture_id')
         if (str(row.get('team_id'))!=str(team_id) or not at or at>=cutoff or
             row.get('status')!='FT' or row.get('league_id')!=fixture.get('league_id') or
-            row.get('season')!=fixture.get('season') or fid is None):continue
+            row.get('season')!=fixture.get('season') or fid is None or not historical_available(row,cutoff) or
+            row.get('acquired_at_utc') and not acquisition_before(row['acquired_at_utc'],cutoff)):continue
         quality=sum(finite(v) for block in (row.get('own') or {},row.get('conceded') or {}) for v in block.values())
         old=seen.get(str(fid))
         if old is None or quality>old[0]:seen[str(fid)]=(quality,row)
@@ -342,6 +344,8 @@ def write_md(matrix,discovery,queue,out):
 
 def generate(preselection,output_dir,asof=None,min_n=4,min_effective=40.0):
     prepath=Path(preselection);pre=read(prepath);pre_sha=sha(prepath)
+    from preselect_matches import validate_temporal_sources
+    validate_temporal_sources(pre)
     asof=asof or parse_asof(pre.get('generated_at_utc'))
     if not asof:raise DiscoveryError('Preselection sin corte temporal verificable')
     if any(dt(f.get('kickoff_madrid')) and dt(f['kickoff_madrid'])<=asof for f in pre.get('matches',[])):
@@ -372,7 +376,6 @@ def commercial_link(queue_path,scanner_path,bwin_path,output_dir):
     discoveries={str(x.get('fixture_id')):x for x in bwin.get('matches',[]) if isinstance(x,dict)}
     scanner_asof=dt(scanner.get('asof_madrid'))
     queue_pre_sha=queue.get('preselection_sha256'); source_pre_sha=(scanner.get('sources') or {}).get('preselection_sha256')
-    bwin_source_sha=bwin.get('source_input_sha256')
     links=[]
     for item in queue.get('items',[]):
         fid=str(item['fixture_id']);audit=audits.get(fid);event=discoveries.get(fid);metric=item.get('metric')
@@ -382,17 +385,23 @@ def commercial_link(queue_path,scanner_path,bwin_path,output_dir):
         discovery_event=event.get('bwin_event_id') if event else None
         review_events={str(x.get('bwin_event_id')) for x in reviews[fid] if x.get('bwin_event_id')}
         expected_event=audit_event or discovery_event
-        kickoff_values=[dt((audit or {}).get('kickoff_madrid')),dt((event or {}).get('kickoff_madrid'))]
-        kickoff=kickoff_values[0] if all(x is not None for x in kickoff_values) and kickoff_values[0]==kickoff_values[1] else None
-        coherent_ids=bool(audit_event and discovery_event and str(audit_event)==str(discovery_event) and
-                          (not review_events or review_events=={str(audit_event)}))
-        sha_complete=bool(queue_pre_sha and source_pre_sha and bwin_source_sha and
-                          queue_pre_sha==source_pre_sha==bwin_source_sha)
+        audit_kickoff=dt((audit or {}).get('kickoff_madrid'));discovery_kickoff=dt((event or {}).get('kickoff_madrid'))
+        kickoff=(audit_kickoff if audit_kickoff and
+                 (discovery_kickoff is None or discovery_kickoff==audit_kickoff) else None)
+        coherent_ids=bool(audit_event and (not review_events or review_events=={str(audit_event)}) and
+                          (not discovery_event or str(audit_event)==str(discovery_event)))
+        # The discovery input is the canonical fixture inventory, not the
+        # enriched preselection. Requiring both hashes to be equal rejected
+        # every real run. The scanner is already bound to the exact queue
+        # preselection; discovery remains an optional, conflict-detecting source.
+        sha_complete=bool(queue_pre_sha and source_pre_sha and queue_pre_sha==source_pre_sha)
         matching=[x for x in reviews[fid] if x.get('metric')==metric and x.get('team_side')==item.get('team_side') and
                   x.get('status') not in ('DIAGNOSTIC_LOW_PRICE','LIVE_EXCLUDED') and x.get('market') and x.get('selection') and finite(x.get('odd')) and
                   x.get('capture_madrid') and x.get('bwin_event_id') and str(x.get('fixture_id'))==fid and str(x.get('bwin_event_id'))==str(expected_event) and
                   scanner_asof and kickoff and dt(x.get('capture_madrid')) and dt(x.get('capture_madrid'))<=scanner_asof and dt(x.get('capture_madrid'))<kickoff]
-        valid_event=bool(audit and audit.get('status')=='VERIFIED' and coherent_ids and sha_complete and scanner_asof and kickoff and scanner_asof<kickoff and matching)
+        source_verifiable=bool(audit and audit.get('status')=='VERIFIED' and coherent_ids and sha_complete
+                               and scanner_asof and kickoff and scanner_asof<kickoff)
+        valid_event=bool(source_verifiable and matching)
         reasons=set()
         present_ids={str(x) for x in (audit_event,discovery_event) if x} | review_events
         if len(present_ids)>1:reasons.add('EVENT_ID_CONFLICT')
@@ -409,8 +418,8 @@ def commercial_link(queue_path,scanner_path,bwin_path,output_dir):
         if rejected_captures and not matching:reasons.add('CAPTURE_TIME_INVALID')
         if audit and audit.get('status')!='VERIFIED':status='PREFLIGHT_INVALID'
         elif valid_event:status='BWIN_VERIFIED'
-        elif audit and audit.get('status')=='VERIFIED' and (reviews[fid] or event):status='COMMERCIAL_SOURCE_NOT_VERIFIABLE'
-        elif audit and audit.get('status')=='VERIFIED' and reviews[fid]:status='MARKET_NOT_SUPPORTED'
+        elif audit and audit.get('status')=='VERIFIED' and (not source_verifiable or 'CAPTURE_TIME_INVALID' in reasons):status='COMMERCIAL_SOURCE_NOT_VERIFIABLE'
+        elif audit and audit.get('status')=='VERIFIED':status='MARKET_NOT_SUPPORTED'
         elif event and event.get('bwin_event_id'):status='NO_PRICE'
         else:status='BWIN_NOT_FOUND'
         links.append({**item,'commercial_status':status,'scanner_diagnostic_status':(audit or {}).get('status','NOT_SCANNED'),

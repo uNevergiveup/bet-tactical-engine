@@ -21,6 +21,7 @@ import re
 import shutil
 import subprocess
 import sys
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 from urllib.parse import urlsplit, unquote
@@ -42,10 +43,16 @@ RE_URL = re.compile(r'(?im)^URL:\s*(https://\S+)\s*$')
 
 
 def local_now():
+    raw = os.getenv('PREMATCH_NOW_UTC')
+    if raw:
+        return dt(raw, 'PREMATCH_NOW_UTC').astimezone(TZ)
     return datetime.now(TZ)
 
 
 def iso_utc():
+    raw = os.getenv('PREMATCH_NOW_UTC')
+    if raw:
+        return dt(raw, 'PREMATCH_NOW_UTC').astimezone(timezone.utc).isoformat()
     return datetime.now(timezone.utc).isoformat()
 
 
@@ -173,6 +180,34 @@ def ensure_root(ctx, multi=None):
     if not (root/'generate_context.py').is_file():raise ValueError(f'Falta generate_context.py en {root}')
     if not (root/'config'/'constants.py').is_file():raise ValueError(f'Falta config/constants.py en {root}')
     return multi
+
+
+def resolve_qualitative_report_path(
+    root: Path,
+    directory: Path,
+    event_id: str,
+    explicit_report: Path | str | None = None,
+) -> Path:
+    """Resuelve la ruta del informe cualitativo conservando --report explícito."""
+    eid = str(event_id)
+    if explicit_report:
+        p = Path(explicit_report).expanduser()
+        if p.is_absolute():
+            return p
+        if (root / p).is_file():
+            return root / p
+        if (directory / p).is_file():
+            return directory / p
+        return root / p
+    candidates = [
+        directory / 'instructions' / f'reporte_cualitativo_{eid}.md',
+        directory / 'inputs' / f'reporte_cualitativo_{eid}.md',
+        root / 'instructions' / f'reporte_cualitativo_{eid}.md',
+    ]
+    for cand in candidates:
+        if cand.is_file() and cand.stat().st_size > 0:
+            return cand
+    return candidates[0]
 
 
 def match_manifest(ctx, *, check_files=True):
@@ -420,7 +455,10 @@ def cmd_prepare(ctx,args):
     cmd=[sys.executable,str(multi),'--root',str(ctx['root']),'prepare','--url',ctx['url'],
          '--workers','1','--api-minute',str(args.api_minute),'--api-second',str(args.api_second)]
     if args.reuse_odds:cmd+=['--reuse-odds-selected',str(ctx['selected_path'])]
-    code=run(cmd,ctx['root'])
+    env=os.environ.copy()
+    env['PREMATCH_TEMPORAL_IDENTITY_SELECTED']=str(ctx['selected_path'])
+    validate_temporal_identity_evidence(ctx)
+    code=run(cmd,ctx['root'],env=env)
     if code:raise ValueError(f'prepare devolvió código {code}; revisa outputs/matches/{ctx["event_id"]}/logs/')
     manifest=match_manifest(ctx)
     if manifest.get('status')!='PREPARADO':raise ValueError(f'prepare no terminó PREPARADO: {manifest.get("status")}')
@@ -528,6 +566,24 @@ def cmd_verify_temporal_identity(ctx,args):
     return 0
 
 
+def odds_changes(before, after, event):
+    """Compare exact contracts; absence in a capture is not suspension."""
+    from prematch_opportunity_scanner import parse_bwin_txt
+    old, _ = parse_bwin_txt(before, event)
+    new, _ = parse_bwin_txt(after, event)
+    a = {(r['market'], r['selection']): r['odd'] for r in old}
+    b = {(r['market'], r['selection']): r['odd'] for r in new}
+    def row(key): return {'market': key[0], 'selection': key[1]}
+    return {'added': [row(k) for k in sorted(b.keys()-a.keys())],
+            'not_observed_in_new_capture': [row(k) for k in sorted(a.keys()-b.keys())],
+            'price_changes': [{**row(k), 'before': a[k], 'after': b[k]}
+                              for k in sorted(a.keys() & b.keys()) if a[k] != b[k]],
+            'suspension_status': 'NOT_INFERRED_FROM_ABSENCE',
+            'affected_modules': ['market_mapping', 'price_evaluation', 'final_validation'],
+            'reusable_modules': ['historical_statistics'],
+            'reevaluation_status': 'PENDING_EXPLICIT_VALIDATION_NO_AUTOMATIC_PICKS'}
+
+
 def cmd_refresh(ctx,args):
     ensure_prematch(ctx,min_lead=args.min_refresh_lead_minutes)
     ensure_root(ctx,args.multi)
@@ -542,7 +598,7 @@ def cmd_refresh(ctx,args):
     archive=ctx['directory']/'archives'/('refresh_'+datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%S%fZ'))
     preserved=backup(path,archive)
     backup(ctx['directory']/'manifest.json',archive)
-    for folder in ('validation','probabilistic','analysis'):
+    for folder in ('validation','probabilistic','analysis','shadow'):
         source=ctx['directory']/folder
         if source.is_dir():shutil.copytree(source,archive/folder)
     for name in (f'CODEX_{ctx["event_id"]}.md','analysis_input_binding.json','final_review.json'):
@@ -572,22 +628,76 @@ def cmd_refresh(ctx,args):
                     raise ValueError(f'{kind} cambió durante el refresco de cuotas')
         if dt(snap['capture'],'capture')<=dt(previous['capture'],'old_capture'):
             raise ValueError('La captura no es posterior a la anterior: no hay refresco verificable')
+        delta = odds_changes(preserved, path, ctx['event_id'])
+        atomic_json(archive/'odds_delta.json', delta)
         # No se modifica la identidad, el contexto API ni sus hashes.
         m['inputs']['odds']={'path':str(path.resolve()),'sha256':snap['sha256'],
                              'generated_from':str(path.resolve()),'refreshed_at_utc':iso_utc()}
         m.setdefault('steps',{})['scraper_refresh']=0
         m['odds_refresh_at_utc']=iso_utc()
+        m['odds_delta']={'path':str((archive/'odds_delta.json').resolve()),
+                         'sha256':sha(archive/'odds_delta.json')}
         m['invalidated_by_odds_refresh']={'previous_status':m.get('status'),'previous_sha256':previous['sha256'],
-                                          'invalidated_at_utc':iso_utc(),'stages':['validation','probabilistic','codex_analysis','final_review']}
+                                          'invalidated_at_utc':iso_utc(),'stages':['validation','probabilistic','shadow','codex_analysis','final_review']}
         m['status']='PREPARADO'
+        m['next_action']='finalize'
         for step in ('validacion', 'motor'):
             m.get('steps', {}).pop(step, None)
         m.pop('codex_prompt',None)
         m.pop('validation_state',None)
+        # Invalidate stale Shadow summary and Codex handoff (already archived above)
+        stale_shadow = ctx['directory'] / 'shadow' / f'shadow_summary_{ctx["event_id"]}.json'
+        if stale_shadow.is_file():
+            stale_shadow.unlink()
+        stale_codex = ctx['directory'] / f'CODEX_{ctx["event_id"]}.md'
+        if stale_codex.is_file():
+            stale_codex.unlink()
         atomic_json(ctx['directory']/'manifest.json',m)
-        update_state(ctx,'refresh-odds','OK',{'odds':snap,'previous_sha256':previous['sha256'],
-                                              'archived_previous':str(preserved),'log':str(log)})
-        print(f'Cuotas actualizadas para {ctx["event_id"]}; contexto API NO repetido; SHA manifest actualizado.')
+        reeval = {'executed': False, 'reason': 'NO_CONTEXT_JSON'}
+        has_context_json = bool((m.get('inputs') or {}).get('context_json'))
+        if has_context_json:
+            try:
+                from bet_engine.orchestration import run_shadow_for_event_dir
+                sh_res = run_shadow_for_event_dir(
+                    ctx['root'],
+                    ctx['event_id'],
+                    historical=False,
+                    now_utc=iso_utc(),
+                    max_odds_age_minutes=args.max_odds_age_minutes,
+                    min_lead_minutes=max(REFRESH_MIN_LEAD_MINUTES, int(args.min_refresh_lead_minutes)),
+                )
+                reeval = {'executed': bool(sh_res.get('ok')), 'shadow': sh_res}
+            except Exception as exc:
+                reeval = {'executed': False, 'error': str(exc)}
+        if not has_context_json:
+            shadow_sync_state = 'SHADOW_PENDING_NO_CONTEXT'
+            step_result = 'ODDS_UPDATED_SHADOW_PENDING'
+            msg = (
+                f'Cuotas actualizadas para {ctx["event_id"]}; contexto API NO repetido; '
+                f'Shadow pendiente (sin context_json); pendiente de finalize.'
+            )
+        elif reeval.get('executed') and (reeval.get('shadow') or {}).get('ok'):
+            shadow_sync_state = 'SHADOW_UPDATED'
+            step_result = 'ODDS_UPDATED_SHADOW_UPDATED'
+            msg = (
+                f'Cuotas actualizadas para {ctx["event_id"]}; contexto API NO repetido; '
+                f'SHA manifest y Shadow reevaluados; pendiente de finalize.'
+            )
+        else:
+            shadow_sync_state = 'SHADOW_FAILED'
+            step_result = 'ODDS_UPDATED_SHADOW_FAILED'
+            err_detail = reeval.get('error') or (reeval.get('shadow') or {}).get('error') or 'UNKNOWN'
+            msg = (
+                f'[WARN] Cuotas actualizadas para {ctx["event_id"]}, pero Shadow falló '
+                f'({shadow_sync_state}: {err_detail}); sin resultados Shadow vigentes; pendiente de finalize.'
+            )
+        m['shadow_sync_state'] = shadow_sync_state
+        atomic_json(ctx['directory']/'manifest.json',m)
+        update_state(ctx,'refresh-odds',step_result,{'odds':snap,'previous_sha256':previous['sha256'],
+                                                     'archived_previous':str(preserved),'log':str(log),
+                                                     'shadow_sync_state':shadow_sync_state,
+                                                     'reevaluation':reeval})
+        print(msg)
         return 0
     except Exception:
         # Restaurar snapshot previo, excepto si ya se actualizó manifiesto.
@@ -601,21 +711,170 @@ def cmd_refresh(ctx,args):
         raise
 
 
+def cmd_acquire_lineups(ctx, args):
+    """Target-only fresh API acquisition, then the existing offline delta path."""
+    from bet_engine.context.lineup_manager import evaluate_fixture_lineup_state, extract_fixture_team_identity
+
+    cutoff_min = int(getattr(args, 'lineup_cutoff_minutes', 15))
+    ensure_prematch(ctx, min_lead=args.min_refresh_lead_minutes)
+    manifest = match_manifest(ctx)
+    if not all(k in manifest.get('inputs', {}) for k in ('context', 'context_json', 'identity')):
+        raise ValueError('LINEUPS_REQUIRE_PREPARED_CONTEXT')
+    from generate_context import APIFootballClient, API_KEY, BwinMatch, resolve_selected_fixture
+    from prematch_cache_record import store_acquisition
+    if not API_KEY: raise ValueError('API_CREDENTIALS_MISSING')
+    api = APIFootballClient(API_KEY)
+    match = BwinMatch(url=ctx['url'], event_id=int(ctx['event_id']),
+        home_name_raw=ctx['home'], away_name_raw=ctx['away'],
+        home_name=ctx['home'], away_name=ctx['away'], home_gender='UNKNOWN', away_gender='UNKNOWN',
+        event_date=ctx['kickoff'].isoformat())
+    resolve_selected_fixture(match, api, ctx)
+    payload = api.get('fixtures/lineups', {'fixture': ctx['fixture_id']}, use_cache=False)
+    snapshot = store_acquisition(ctx['directory']/'context_acquisitions', payload)
+    now = local_now()
+    ensure_prematch(ctx, min_lead=args.min_refresh_lead_minutes)
+    if payload.get('errors'): raise ValueError('LINEUPS_PROVIDER_ERROR: snapshot preserved')
+
+    ctx_json_path = Path((manifest.get('inputs') or {}).get('context_json', {}).get('path') or '')
+    ctx_doc = read_json(ctx_json_path) if ctx_json_path.is_file() else {}
+    id_path = Path((manifest.get('inputs') or {}).get('identity', {}).get('path') or '')
+    id_doc = read_json(id_path) if id_path.is_file() else {}
+    team_ident = extract_fixture_team_identity(ctx_doc, identity_doc=id_doc, selection_doc=ctx.get('selection'))
+    home_id = team_ident.get('home_id') if team_ident.get('home_id') is not None else ctx['selection'].get('home_api_id')
+    away_id = team_ident.get('away_id') if team_ident.get('away_id') is not None else ctx['selection'].get('away_api_id')
+    resp_list = payload.get('response') or []
+    qual_md = None
+    for qk in ('qualitative_research', 'report'):
+        qref = (manifest.get('inputs') or {}).get(qk) or {}
+        if qref.get('path') and Path(qref['path']).is_file():
+            qual_md = Path(qref['path']).read_text(encoding='utf-8-sig', errors='replace')
+            break
+
+    lu_eval = evaluate_fixture_lineup_state(
+        api_lineups_response=resp_list,
+        qualitative_markdown=qual_md,
+        fixture_id=int(ctx['fixture_id']),
+        event_id=str(ctx['event_id']),
+        home_id=home_id,
+        away_id=away_id,
+        home_name=str(team_ident.get('home_name') or ctx['home']),
+        away_name=str(team_ident.get('away_name') or ctx['away']),
+        home_aliases=team_ident.get('home_aliases'),
+        away_aliases=team_ident.get('away_aliases'),
+        is_national_team=bool(team_ident.get('is_national_team')),
+        kickoff_utc=ctx['kickoff'],
+        now_utc=now,
+        lineup_cutoff_minutes=cutoff_min,
+        api_acquired_at_utc=payload.get('_acquired_at_utc') or now.astimezone(timezone.utc),
+        last_verified_state=manifest.get('lineup_state'),
+    )
+    if not lu_eval['confirmed_complete_22']:
+        from bet_engine.context.lineup_manager import prepare_manual_lineup_inbox
+
+        inbox_info = prepare_manual_lineup_inbox(
+            ctx['directory'],
+            event_id=str(ctx['event_id']),
+            fixture_id=int(ctx['fixture_id']),
+            home_name=ctx['home'],
+            away_name=ctx['away'],
+            home_id=home_id,
+            away_id=away_id,
+            kickoff_iso=ctx['kickoff'].isoformat(),
+        )
+        manifest['lineup_state'] = {
+            'status': lu_eval['status'],
+            'confirmed_complete_22': False,
+            'confirmed_sides': lu_eval.get('confirmed_sides'),
+            'starter_counts': lu_eval.get('starter_counts'),
+            'lineup_cutoff_minutes': cutoff_min,
+            'minutes_to_kickoff': lu_eval.get('minutes_to_kickoff'),
+            'reason': lu_eval.get('reason'),
+            'absence_interpretation': 'NOT_INFERRED_AS_INJURY_OR_SUSPENSION',
+            'manual_inbox': inbox_info,
+            'snapshot': str(snapshot),
+            'sha256': sha(snapshot),
+        }
+        atomic_json(ctx['directory'] / 'manifest.json', manifest)
+        audit_path = ctx['directory'] / 'lineups' / f'lineup_audit_{ctx["event_id"]}.json'
+        atomic_json(audit_path, {
+            'event_id': str(ctx['event_id']),
+            'fixture_id': int(ctx['fixture_id']),
+            'checked_at_utc': now.astimezone(timezone.utc).isoformat(),
+            'lineup_evaluation': lu_eval,
+            'manual_inbox': inbox_info,
+            'snapshot': str(snapshot),
+            'sha256': sha(snapshot),
+            'context_unchanged': True,
+        })
+        update_state(ctx, 'acquire-lineups', lu_eval['status'],
+                     {'snapshot': str(snapshot), 'sha256': sha(snapshot), 'context_unchanged': True, 'manual_inbox': inbox_info['manual_dir']})
+        print(f'XI no confirmado completo ({lu_eval["status"]}: {lu_eval.get("reason")}); adquisición conservada y bandeja manual lista en {inbox_info["manual_dir"]}.')
+        return 0
+    args.snapshot = snapshot; args.snapshot_sha256 = sha(snapshot)
+    return cmd_refresh_context(ctx, args)
+
+
 def cmd_refresh_context(ctx, args):
     ensure_prematch(ctx, min_lead=args.min_refresh_lead_minutes)
     manifest = match_manifest(ctx)
     from prematch_context_delta import refresh_lineups
-    updated, out = refresh_lineups(ctx, manifest, args.snapshot, args.snapshot_sha256, local_now())
+    now = local_now()
+    updated, out = refresh_lineups(ctx, manifest, args.snapshot, args.snapshot_sha256, now)
     # Preserve every prior downstream artifact before any later finish rewrites it.
-    for folder in ('validation', 'probabilistic', 'analysis'):
+    for folder in ('validation', 'probabilistic', 'analysis', 'shadow'):
         source = ctx['directory'] / folder
         if source.is_dir():
             shutil.copytree(source, out / 'previous_outputs' / folder)
     for name in (f'CODEX_{ctx["event_id"]}.md', 'analysis_input_binding.json', 'final_review.json'):
         backup(ctx['directory'] / name, out / 'previous_outputs')
+    for stale_path in (
+        ctx['directory'] / 'shadow' / f'shadow_summary_{ctx["event_id"]}.json',
+        ctx['directory'] / f'CODEX_{ctx["event_id"]}.md',
+    ):
+        if stale_path.is_file():
+            stale_path.unlink()
     atomic_json(ctx['directory'] / 'manifest.json', updated)
-    update_state(ctx, 'refresh-context', 'REVALIDATION_REQUIRED', {'run': str(out)})
-    print(f'Contexto diferencial local incorporado: {out}; finish y análisis pendientes.')
+
+    # Req 11: Re-ejecutar automáticamente las evaluaciones afectadas (Shadow sobre contexto actualizado)
+    reeval = {'executed': False}
+    try:
+        from bet_engine.orchestration import run_shadow_for_event_dir
+        cutoff_min = int(getattr(args, 'lineup_cutoff_minutes', 15))
+        sh_res = run_shadow_for_event_dir(
+            ctx['root'],
+            ctx['event_id'],
+            historical=False,
+            now_utc=now.astimezone(timezone.utc).isoformat(),
+            min_lead_minutes=max(REFRESH_MIN_LEAD_MINUTES, int(args.min_refresh_lead_minutes)),
+            lineup_cutoff_minutes=cutoff_min,
+        )
+        reeval = {'executed': bool(sh_res.get('ok')), 'shadow': sh_res}
+    except Exception as exc:
+        reeval = {'executed': False, 'error': str(exc)}
+
+    shadow_ok = bool(reeval.get('executed') and (reeval.get('shadow') or {}).get('ok'))
+    shadow_sync_state = 'SHADOW_UPDATED' if shadow_ok else 'SHADOW_FAILED'
+    step_result = 'CONTEXT_UPDATED_SHADOW_UPDATED' if shadow_ok else 'CONTEXT_UPDATED_SHADOW_FAILED'
+    updated['shadow_sync_state'] = shadow_sync_state
+    atomic_json(ctx['directory'] / 'manifest.json', updated)
+
+    audit_path = ctx['directory'] / 'lineups' / f'lineup_audit_{ctx["event_id"]}.json'
+    atomic_json(audit_path, {
+        'event_id': str(ctx['event_id']),
+        'fixture_id': int(ctx['fixture_id']),
+        'refreshed_at_utc': now.astimezone(timezone.utc).isoformat(),
+        'lineup_state': updated.get('lineup_state'),
+        'context_update_dir': str(out),
+        'shadow_sync_state': shadow_sync_state,
+        'reevaluation': reeval,
+        'original_inputs_untouched': True,
+    })
+    update_state(ctx, 'refresh-context', step_result, {'run': str(out), 'shadow_sync_state': shadow_sync_state, 'reevaluation': reeval})
+    if shadow_ok:
+        print(f'Contexto diferencial local incorporado: {out}; evaluación Shadow reejecutada y finish pendiente.')
+    else:
+        err_detail = reeval.get('error') or (reeval.get('shadow') or {}).get('error') or 'UNKNOWN'
+        print(f'[WARN] Contexto diferencial incorporado: {out}, pero la reevaluación Shadow falló ({shadow_sync_state}: {err_detail}); sin resultados Shadow vigentes; finish pendiente.')
     return 0
 
 
@@ -650,8 +909,19 @@ def cmd_finish(ctx,args):
         ensure_prematch(ctx,min_lead=args.min_finish_lead_minutes)
     multi=ensure_root(ctx,args.multi)
     manifest=match_manifest(ctx)
-    if manifest.get('status') not in {'PREPARADO','VALIDADO','BLOQUEADO_VALIDACION','ERROR_VALIDACION','ERROR_MOTOR'}:
+    allowed_statuses = {'PREPARADO','VALIDADO','FINALIZADO','BLOQUEADO_VALIDACION','ERROR_VALIDACION','ERROR_MOTOR'}
+    if manifest.get('status') not in allowed_statuses:
         raise ValueError(f'No procede finish: manifest={manifest.get("status")}')
+    prelim_archive = None
+    is_preliminary_resume = False
+    if manifest.get('status') == 'FINALIZADO' and not args.historical:
+        from prematch_case import _evaluate_closure
+        case_file = ctx['directory'] / 'case.json'
+        case_like = read_json(case_file) if case_file.is_file() else {'event_id': ctx['event_id'], 'kickoff_madrid': ctx['kickoff'].isoformat()}
+        closure = _evaluate_closure(ctx['directory'], case_like, manifest)
+        if closure.get('final_prematch_valid'):
+            raise ValueError('FINAL_PREMATCH_CLOSURE_ALREADY_VALID: ya existe un cierre final PREMATCH válido; no se duplica ni sobrescribe')
+        is_preliminary_resume = True
     odds=manifest.get('inputs',{}).get('odds') or {}
     if not odds:raise ValueError('Sin cuotas en manifest: no se autoriza la fase final')
     # Las cuotas deben ser recientes, incluso si el scraping acabó correctamente.
@@ -659,10 +929,7 @@ def cmd_finish(ctx,args):
         snap=snapshot_info(Path(odds['path']),ctx,max_age=min(15,args.max_odds_age_minutes))
         from prematch_daily import final_odds_check
         final_odds_check({'kickoff_madrid':ctx['kickoff'].isoformat(),'capture_madrid':snap['capture']},local_now())
-    report=Path(args.report).expanduser() if args.report else ctx['root']/'instructions'/f'reporte_cualitativo_{ctx["event_id"]}.md'
-    if not report.is_absolute():report=ctx['root']/report
-    if not report.is_file() and not args.report:
-        report=ctx['directory']/'inputs'/f'reporte_cualitativo_{ctx["event_id"]}.md'
+    report=resolve_qualitative_report_path(ctx['root'], ctx['directory'], ctx['event_id'], args.report)
     if not report.is_file() or not report.stat().st_size:raise ValueError(f'Informe cualitativo ausente: {report}')
     report_head=report.read_text(encoding='utf-8-sig',errors='replace')[:12000]
     if 'STATUS: PENDIENTE_MANUAL' in report_head:raise ValueError('Informe cualitativo es una plantilla pendiente, no evidencia')
@@ -671,27 +938,452 @@ def cmd_finish(ctx,args):
         validate_external_inputs(ctx,report)
     labels=re.findall(r'(?im)\b(?:event[_ ]id(?: bwin)?|evento bwin)\s*[:|]\s*(\d{6,})\b',report_head)
     if any(x!=ctx['event_id'] for x in labels):raise ValueError('Informe cualitativo menciona otro Event ID')
+    if is_preliminary_resume:
+        prelim_archive = ctx['directory']/'archives'/('preliminary_closure_'+datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%S%fZ'))
+        backup(ctx['directory']/'manifest.json', prelim_archive)
+        backup(state_path(ctx), prelim_archive)
+        for folder in ('validation','probabilistic','analysis','shadow','dossier'):
+            source = ctx['directory']/folder
+            if source.is_dir():
+                shutil.copytree(source, prelim_archive/folder)
+        for name in (f'CODEX_{ctx["event_id"]}.md','analysis_input_binding.json','final_review.json'):
+            backup(ctx['directory']/name, prelim_archive)
+    cutoff_min = int(getattr(args, 'lineup_cutoff_minutes', 15))
+    if not args.historical and getattr(args, 'require_confirmed_lineups', False):
+        from prematch_case import _evaluate_closure
+        case_file = ctx['directory'] / 'case.json'
+        case_like = read_json(case_file) if case_file.is_file() else {'event_id': ctx['event_id'], 'kickoff_madrid': ctx['kickoff'].isoformat()}
+        closure = _evaluate_closure(ctx['directory'], case_like, manifest, lineup_cutoff_minutes=cutoff_min)
+        if not closure.get('lineups_confirmed_22'):
+            raise ValueError(f'LINEUPS_NOT_CONFIRMED_22:{closure["lineups_status"]}')
     cmd=[sys.executable,str(multi),'--root',str(ctx['root']),'finish','--event-id',ctx['event_id'],
-         '--report',str(report),'--workers','1']
+         '--report',str(report),'--workers','1','--lineup-cutoff-minutes',str(cutoff_min)]
     if args.historical:cmd.append('--historical')
+    if getattr(args,'shadow_mode',False):cmd.append('--shadow-mode')
     code=run(cmd,ctx['root'])
     if code:raise ValueError(f'finish devolvió {code}; revisa logs/validacion.log y logs/motor.log')
     m=match_manifest(ctx)
     expected='AUDITORIA_HISTORICA' if args.historical else 'FINALIZADO'
     if m.get('status')!=expected:raise ValueError(f'finish terminó {m.get("status")} y no {expected}')
+    m['next_action'] = 'historical-audit-only' if args.historical else 'export-handoff'
+    if prelim_archive is not None:
+        m.setdefault('preliminary_closures_archived', []).append(str(prelim_archive.resolve()))
+    if not args.historical and getattr(args, 'allow_unconfirmed_lineups', False):
+        from prematch_case import _evaluate_closure
+        case_file = ctx['directory'] / 'case.json'
+        case_like = read_json(case_file) if case_file.is_file() else {'event_id': ctx['event_id'], 'kickoff_madrid': ctx['kickoff'].isoformat()}
+        closure_now = _evaluate_closure(ctx['directory'], case_like, m, lineup_cutoff_minutes=cutoff_min)
+        if not closure_now.get('lineups_confirmed_22'):
+            m['eligible_for_actionable_pick'] = False
+            m['actionable_bet'] = False
+            m['closure_mode'] = 'RESEARCH_ONLY_UNCONFIRMED_LINEUPS'
+            m['final_eligibility'] = 'RESEARCH_ONLY_MISSING_CONFIRMED_22_STARTERS'
+    atomic_json(ctx['directory']/'manifest.json', m)
     pinned_report=(m.get('inputs') or {}).get('report') or {}
     report_actual=Path(pinned_report.get('path') or report)
     if not report_actual.is_file() or not pinned_report.get('sha256') or sha(report_actual)!=pinned_report['sha256']:
         raise ValueError('Informe anclado tras finish no coincide con manifest')
+    if not args.historical and (ctx['kickoff']-local_now()).total_seconds()<=0:
+        exp_archive = ctx['directory'] / 'archives' / ('expired_post_kickoff_' + datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%S%fZ'))
+        exp_archive.mkdir(parents=True, exist_ok=True)
+        codex_file = ctx['directory'] / f'CODEX_{ctx["event_id"]}.md'
+        if codex_file.is_file():
+            backup(codex_file, exp_archive)
+            codex_file.unlink(missing_ok=True)
+        handoff_file = ctx['directory'] / 'dossier' / f'handoff_codex_{ctx["event_id"]}.json'
+        if handoff_file.is_file():
+            backup(handoff_file, exp_archive)
+            handoff_file.unlink(missing_ok=True)
+        m['status'] = 'EXPIRADO_POST_KICKOFF'
+        m['codex_prompt'] = None
+        m['eligible_for_actionable_pick'] = False
+        m['actionable_bet'] = False
+        m['final_eligibility'] = 'EXPIRED_POST_KICKOFF_RETROSPECTIVE_ONLY'
+        m['next_action'] = 'retrospective-audit-only'
+        m['expired_post_kickoff_archive'] = str(exp_archive.resolve())
+        atomic_json(ctx['directory'] / 'manifest.json', m)
+        update_state(ctx, 'finish', 'PREMATCH_EXPIRED', {
+            'report': str(report_actual),
+            'report_sha256': sha(report_actual),
+            'codex_prompt': None,
+            'expired_archive': str(exp_archive),
+        })
+        update_state(ctx,'postfinish_clock','PREMATCH_EXPIRED',{'note':'Validación y motor finalizaron después del kickoff; prompt y estado accionable revocados'})
+        print('ALERTA: se alcanzó el kickoff durante finish. Salida archivada como solo retrospectiva; prompt Codex revocado.')
+        return 3
     update_state(ctx,'finish',expected,{'report':str(report_actual),'report_sha256':sha(report_actual),
-                                        'codex_prompt':m.get('codex_prompt') if not args.historical else None})
+                                        'codex_prompt':m.get('codex_prompt') if not args.historical else None,
+                                        'preliminary_archive':str(prelim_archive) if prelim_archive else None})
     if not args.historical:
-        if (ctx['kickoff']-local_now()).total_seconds()<=0:
-            update_state(ctx,'postfinish_clock','PREMATCH_EXPIRED',{'note':'Validación y motor finalizaron después del kickoff; no usar prompt para apuestas'})
-            print('ALERTA: se alcanzó el kickoff durante finish. La salida es solo documental, NO lanzar Codex para picks PREMATCH.')
-            return 3
         print('ÚNICO prompt para Codex:',m.get('codex_prompt') or '(ver manifest.json)')
         print('Codex NO se ha ejecutado automáticamente.')
+    return 0
+
+
+def _reconcile_latest_lineups_for_close(ctx, args, manifest: dict, cutoff_min: int) -> dict:
+    """Sincroniza XI manuales en bandeja o snapshots recientes antes de evaluar cierre."""
+    from bet_engine.context.lineup_manager import scan_manual_lineup_inbox, evaluate_fixture_lineup_state, extract_fixture_team_identity
+    from prematch_case import sync_manual_lineups
+
+    inbox = scan_manual_lineup_inbox(ctx['directory'], event_id=str(ctx['event_id']))
+    lu_state = manifest.get('lineup_state') or {}
+    if inbox.get('json_candidates') and lu_state.get('status') != 'LINEUPS_MANUAL_VERIFIED':
+        try:
+            sync_manual_lineups(
+                ctx['root'],
+                ctx['event_id'],
+                now_utc=iso_utc(),
+                lineup_cutoff_minutes=cutoff_min,
+                reevaluate=True,
+            )
+            manifest = match_manifest(ctx)
+        except Exception:
+            pass
+
+    # Comprobar si existe una adquisición API de 22 titulares en context_acquisitions más reciente no aplicada
+    acq_dir = ctx['directory'] / 'context_acquisitions'
+    if acq_dir.is_dir() and not (manifest.get('lineup_state') or {}).get('confirmed_complete_22'):
+        from prematch_cache_record import unpack_record
+        inputs = manifest.get('inputs') or {}
+        ctx_json_path = Path((inputs.get('context_json') or {}).get('path') or '')
+        ctx_doc = read_json(ctx_json_path) if ctx_json_path.is_file() else {}
+        id_path = Path((inputs.get('identity') or {}).get('path') or '')
+        id_doc = read_json(id_path) if id_path.is_file() else {}
+        team_ident = extract_fixture_team_identity(ctx_doc, identity_doc=id_doc, selection_doc=ctx.get('selection'))
+        for acq_file in sorted(acq_dir.glob('*.json'), key=lambda p: p.stat().st_mtime, reverse=True):
+            try:
+                raw_payload, acq_dt = unpack_record(read_json(acq_file))
+                resp_list = raw_payload.get('response') or []
+                if not resp_list:
+                    continue
+                lu_eval = evaluate_fixture_lineup_state(
+                    api_lineups_response=resp_list,
+                    fixture_id=int(ctx['fixture_id']),
+                    event_id=str(ctx['event_id']),
+                    home_id=team_ident.get('home_id') or ctx['selection'].get('home_api_id'),
+                    away_id=team_ident.get('away_id') or ctx['selection'].get('away_api_id'),
+                    home_name=str(team_ident.get('home_name') or ctx['home']),
+                    away_name=str(team_ident.get('away_name') or ctx['away']),
+                    kickoff_utc=ctx['kickoff'],
+                    now_utc=local_now(),
+                    lineup_cutoff_minutes=cutoff_min,
+                    api_acquired_at_utc=acq_dt,
+                )
+                if lu_eval.get('confirmed_complete_22'):
+                    args.snapshot = acq_file
+                    args.snapshot_sha256 = sha(acq_file)
+                    cmd_refresh_context(ctx, args)
+                    manifest = match_manifest(ctx)
+                    break
+            except Exception:
+                continue
+    return manifest
+
+
+def evaluate_close_prerequisites(ctx, args) -> dict:
+    """Evalúa todos los requisitos de cierre PREMATCH antes de refrescar cuotas."""
+    pending: list[dict] = []
+    details: dict = {'event_id': ctx['event_id'], 'fixture_id': ctx['fixture_id']}
+    now = local_now()
+    remain_min = (ctx['kickoff'] - now).total_seconds() / 60.0
+    details['minutes_to_kickoff'] = round(remain_min, 2)
+    min_refresh_lead = max(REFRESH_MIN_LEAD_MINUTES, int(getattr(args, 'min_refresh_lead_minutes', REFRESH_MIN_LEAD_MINUTES)))
+    min_finish_lead = max(FINISH_MIN_LEAD_MINUTES, int(getattr(args, 'min_finish_lead_minutes', FINISH_MIN_LEAD_MINUTES)))
+    if remain_min <= 0:
+        pending.append({'requirement': 'temporal_margin', 'code': 'POST_KICKOFF',
+                        'detail': f'Partido ya iniciado o en kickoff (margen={remain_min:.1f} min)'})
+    elif remain_min < min_refresh_lead or remain_min < min_finish_lead:
+        pending.append({'requirement': 'temporal_margin', 'code': 'INSUFFICIENT_PREMATCH_MARGIN',
+                        'detail': f'Margen insuficiente: {remain_min:.1f} min < {max(min_refresh_lead, min_finish_lead)} min'})
+
+    manifest = None
+    try:
+        manifest = match_manifest(ctx)
+        details['manifest_status'] = manifest.get('status')
+        allowed_statuses = {'PREPARADO', 'VALIDADO', 'FINALIZADO', 'BLOQUEADO_VALIDACION', 'ERROR_VALIDACION', 'ERROR_MOTOR'}
+        if manifest.get('status') not in allowed_statuses:
+            pending.append({'requirement': 'manifest', 'code': 'INVALID_MANIFEST_STATUS',
+                            'detail': f'Estado manifest no apto para cierre: {manifest.get("status")}'})
+    except ValueError as exc:
+        pending.append({'requirement': 'manifest', 'code': 'MANIFEST_INVALID_OR_MISSING', 'detail': str(exc)})
+
+    ident_doc = None
+    ctx_json_doc = None
+    if manifest is not None:
+        cutoff_min = int(getattr(args, 'lineup_cutoff_minutes', 15))
+        manifest = _reconcile_latest_lineups_for_close(ctx, args, manifest, cutoff_min)
+        from prematch_case import _evaluate_closure
+        case_file = ctx['directory'] / 'case.json'
+        case_like = read_json(case_file) if case_file.is_file() else {
+            'event_id': ctx['event_id'], 'kickoff_madrid': ctx['kickoff'].isoformat()
+        }
+        if manifest.get('status') == 'FINALIZADO':
+            closure_prev = _evaluate_closure(ctx['directory'], case_like, manifest)
+            if closure_prev.get('final_prematch_valid'):
+                pending.append({'requirement': 'closure', 'code': 'FINAL_PREMATCH_CLOSURE_ALREADY_VALID',
+                                'detail': 'Ya existe un cierre final PREMATCH válido; no se duplica ni sobrescribe'})
+
+        inputs = manifest.get('inputs') or {}
+        ctx_txt = inputs.get('context') or {}
+        ctx_json = inputs.get('context_json') or {}
+        if not ctx_txt.get('path') or not Path(ctx_txt['path']).is_file() or not ctx_json.get('path') or not Path(ctx_json['path']).is_file():
+            pending.append({'requirement': 'context', 'code': 'CONTEXT_MISSING',
+                            'detail': 'Falta context o context_json en manifest.json'})
+        else:
+            try:
+                ctx_json_doc = read_json(Path(ctx_json['path']))
+                fx_doc = ctx_json_doc.get('fixture') or {}
+                m_doc = ctx_json_doc.get('match') or {}
+                if int(fx_doc.get('fixture_id') or 0) != int(ctx['fixture_id']):
+                    pending.append({'requirement': 'context', 'code': 'CONTEXT_FIXTURE_ID_MISMATCH',
+                                    'detail': f'fixture_id en context_json ({fx_doc.get("fixture_id")}) != {ctx["fixture_id"]}'})
+                elif str(m_doc.get('event_id') or '') != str(ctx['event_id']):
+                    pending.append({'requirement': 'context', 'code': 'CONTEXT_EVENT_ID_MISMATCH',
+                                    'detail': f'event_id en context_json ({m_doc.get("event_id")}) != {ctx["event_id"]}'})
+                else:
+                    details['context_ok'] = True
+            except Exception as exc:
+                pending.append({'requirement': 'context', 'code': 'CONTEXT_JSON_INVALID', 'detail': str(exc)})
+
+        ident_ref = inputs.get('identity') or {}
+        ident_path = Path(ident_ref['path']) if ident_ref.get('path') else None
+        if not ident_path or not ident_path.is_file():
+            pending.append({'requirement': 'identity', 'code': 'IDENTITY_MISSING',
+                            'detail': 'Falta match_identity.json en manifest.json'})
+        elif manifest.get('identity_status') == 'API_FIXTURE_VERIFIED_BWIN_TIME_UNKNOWN':
+            pending.append({'requirement': 'identity', 'code': 'IDENTITY_BWIN_TIME_UNKNOWN',
+                            'detail': 'Identidad con hora Bwin no verificada'})
+        else:
+            try:
+                from match_identity import validate_identity
+                ident_doc = read_json(ident_path)
+                payload_for_id = ctx_json_doc if (ctx_json_doc and 'generated_at' in ctx_json_doc) else None
+                validate_identity(ident_doc, payload_for_id, ctx['event_id'], ctx['url'])
+                if int(ident_doc.get('api_fixture_id') or 0) != int(ctx['fixture_id']):
+                    raise ValueError(f'api_fixture_id en match_identity ({ident_doc.get("api_fixture_id")}) != {ctx["fixture_id"]}')
+                details['identity_ok'] = True
+            except Exception as exc:
+                pending.append({'requirement': 'identity', 'code': 'IDENTITY_VALIDATION_FAILED', 'detail': str(exc)})
+
+        closure = _evaluate_closure(ctx['directory'], case_like, manifest, lineup_cutoff_minutes=cutoff_min)
+        details['lineups_status'] = closure.get('lineups_status')
+        details['lineups_confirmed_22'] = bool(closure.get('lineups_confirmed_22'))
+        if not closure.get('lineups_confirmed_22') and not getattr(args, 'allow_unconfirmed_lineups', False):
+            pending.append({'requirement': 'lineups', 'code': 'LINEUPS_NOT_CONFIRMED_22',
+                            'detail': f'XI no confirmados (22 titulares requeridos): {closure.get("lineups_status")}'})
+
+        if not inputs.get('odds'):
+            pending.append({'requirement': 'odds', 'code': 'ODDS_MISSING_IN_MANIFEST',
+                            'detail': 'Sin snapshot inicial de cuotas en manifest.json'})
+
+    report = resolve_qualitative_report_path(ctx['root'], ctx['directory'], ctx['event_id'], getattr(args, 'report', None))
+    details['report_path'] = str(report)
+    if not report.is_file() or not report.stat().st_size:
+        pending.append({'requirement': 'report', 'code': 'REPORT_MISSING',
+                        'detail': f'Informe cualitativo ausente o vacío: {report}'})
+    else:
+        report_text = report.read_text(encoding='utf-8-sig', errors='replace')
+        report_head = report_text[:12000]
+        if 'STATUS: PENDIENTE_MANUAL' in report_head:
+            pending.append({'requirement': 'report', 'code': 'REPORT_PLACEHOLDER',
+                            'detail': 'Informe cualitativo es una plantilla pendiente (STATUS: PENDIENTE_MANUAL)'})
+        labels = re.findall(r'(?im)\b(?:event[_ ]id(?:[_ ]bwin)?|evento bwin)\s*[:|=]\s*`?(\d{6,})`?\b', report_head)
+        if any(x != ctx['event_id'] for x in labels):
+            pending.append({'requirement': 'report', 'code': 'REPORT_EVENT_ID_CONFLICT',
+                            'detail': f'Informe cualitativo menciona otro Event ID: {labels}'})
+        fx_labels = re.findall(r'(?im)\b(?:fixture[_ ]id(?:[_ ]api)?|api[_ ]fixture[_ ]id)\s*[:|=]\s*`?(\d{4,})`?\b', report_head)
+        if any(int(x) != int(ctx['fixture_id']) for x in fx_labels):
+            pending.append({'requirement': 'report', 'code': 'REPORT_FIXTURE_ID_CONFLICT',
+                            'detail': f'Informe cualitativo menciona otro Fixture ID: {fx_labels}'})
+        if ident_doc and isinstance(ident_doc.get('home'), dict) and isinstance(ident_doc.get('away'), dict):
+            try:
+                import validate_prematch as vp
+                from match_identity import compare_report_name
+                rmeta = vp.report_meta(
+                    report_text,
+                    ident_doc['home'].get('api_name'),
+                    ident_doc['away'].get('api_name'),
+                    ident_doc['home'].get('bwin_name'),
+                    ident_doc['away'].get('bwin_name'),
+                )
+                if rmeta.get('event_id_conflict'):
+                    pending.append({'requirement': 'report', 'code': 'REPORT_CONFLICTING_EVENT_IDS',
+                                    'detail': f'Event IDs contradictorios en informe: {rmeta.get("event_ids_found")}'})
+                if rmeta.get('fixture_id_conflict'):
+                    pending.append({'requirement': 'report', 'code': 'REPORT_CONFLICTING_FIXTURE_IDS',
+                                    'detail': f'Fixture IDs contradictorios en informe: {rmeta.get("fixture_ids_found")}'})
+                r_teams = rmeta.get('teams')
+                if r_teams and len(r_teams) == 2:
+                    for idx, side in enumerate(('home', 'away')):
+                        other = 'away' if side == 'home' else 'home'
+                        cmp_res = compare_report_name(r_teams[idx], ident_doc[side], ident_doc[other])
+                        if cmp_res not in {'EXACT', 'ALIAS'}:
+                            pending.append({'requirement': 'report', 'code': f'REPORT_TEAM_MISMATCH_{side.upper()}',
+                                            'detail': f'Equipo {side} en informe ({r_teams[idx]!r}) no coincide con fixture ({ident_doc[side].get("api_name")!r})'})
+            except Exception as exc:
+                pending.append({'requirement': 'report', 'code': 'REPORT_METADATA_ERROR', 'detail': str(exc)})
+        if (ctx['directory'] / 'release_state.json').is_file():
+            try:
+                from prematch_release import validate_external_inputs
+                validate_external_inputs(ctx, report)
+            except Exception as exc:
+                pending.append({'requirement': 'report', 'code': 'REPORT_EXTERNAL_VALIDATION_FAILED',
+                                'detail': str(exc)})
+
+    return {'ok': not pending, 'pending_requirements': pending, 'details': details}
+
+
+def cmd_close(ctx, args):
+    """Coordina el cierre PREMATCH: precheck -> refresh-odds -> verificación -> finish."""
+    ensure_root(ctx, args.multi)
+    args.historical = False
+    stage_records: dict = {}
+    t_start = time.perf_counter()
+
+    t_pre = time.perf_counter()
+    precheck = evaluate_close_prerequisites(ctx, args)
+    stage_records['precheck'] = {
+        'elapsed_seconds': round(time.perf_counter() - t_pre, 4),
+        'ok': precheck['ok'],
+        'pending_requirements': precheck['pending_requirements'],
+        'details': precheck['details'],
+    }
+    if not precheck['ok']:
+        update_state(ctx, 'close', 'BLOCKED_PRECHECK', {
+            'stages': stage_records,
+            'pending_requirements': precheck['pending_requirements'],
+            'total_elapsed_seconds': round(time.perf_counter() - t_start, 4),
+        })
+        print(json.dumps({
+            'status': 'BLOCKED_PRECHECK',
+            'event_id': ctx['event_id'],
+            'fixture_id': ctx['fixture_id'],
+            'pending_requirements': precheck['pending_requirements'],
+            'stages': stage_records,
+        }, ensure_ascii=False, indent=2), file=sys.stderr)
+        return 2
+
+    t_ref = time.perf_counter()
+    try:
+        ref_code = cmd_refresh(ctx, args)
+        if ref_code != 0:
+            raise ValueError(f'refresh-odds devolvió código {ref_code}')
+        m_after_refresh = match_manifest(ctx)
+        odds_ref = (m_after_refresh.get('inputs') or {}).get('odds') or {}
+        if not odds_ref.get('path'):
+            raise ValueError('Sin cuotas en manifest tras refresh-odds')
+        snap = snapshot_info(Path(odds_ref['path']), ctx, max_age=min(15, args.max_odds_age_minutes))
+        remain_after_refresh = (ctx['kickoff'] - local_now()).total_seconds() / 60.0
+        if remain_after_refresh <= 0 or remain_after_refresh < args.min_finish_lead_minutes:
+            raise ValueError(
+                f'Margen temporal insuficiente tras refresh-odds para ejecutar finish: '
+                f'{remain_after_refresh:.1f} min < {args.min_finish_lead_minutes} min'
+            )
+        stage_records['refresh_odds'] = {
+            'elapsed_seconds': round(time.perf_counter() - t_ref, 4),
+            'ok': True,
+            'odds_sha256': snap['sha256'],
+            'odds_capture': snap['capture'],
+            'odds_age_minutes': snap['age_minutes'],
+            'minutes_to_kickoff_after': round(remain_after_refresh, 2),
+        }
+    except Exception as exc:
+        stage_records['refresh_odds'] = {
+            'elapsed_seconds': round(time.perf_counter() - t_ref, 4),
+            'ok': False,
+            'block': str(exc),
+        }
+        update_state(ctx, 'close', 'BLOCKED_REFRESH_ODDS', {
+            'stages': stage_records,
+            'error': str(exc),
+            'total_elapsed_seconds': round(time.perf_counter() - t_start, 4),
+        })
+        print(f'BLOQUEADO en refresh-odds: {exc}', file=sys.stderr)
+        return 2
+
+    t_fin = time.perf_counter()
+    try:
+        fin_code = cmd_finish(ctx, args)
+        if fin_code != 0:
+            stage_records['finish'] = {
+                'elapsed_seconds': round(time.perf_counter() - t_fin, 4),
+                'ok': False,
+                'returncode': fin_code,
+                'block': 'POSTFINISH_KICKOFF_EXPIRED' if fin_code == 3 else f'FINISH_RETURNED_{fin_code}',
+            }
+            update_state(ctx, 'close', 'PREMATCH_EXPIRED' if fin_code == 3 else 'BLOCKED_FINISH', {
+                'stages': stage_records,
+                'total_elapsed_seconds': round(time.perf_counter() - t_start, 4),
+            })
+            return fin_code
+        m_final = match_manifest(ctx)
+        if m_final.get('status') != 'FINALIZADO':
+            raise ValueError(f'Estado final inesperado tras finish: {m_final.get("status")}')
+        final_odds_sha = ((m_final.get('inputs') or {}).get('odds') or {}).get('sha256')
+        if final_odds_sha != stage_records['refresh_odds']['odds_sha256']:
+            raise ValueError('SHA de cuotas cambió durante finish')
+        # Verificar salidas reales de validador y motor si fueron generadas
+        artifacts: dict = {}
+        val_json_path = ctx['directory'] / 'validation' / f'validacion_{ctx["event_id"]}.json'
+        if val_json_path.is_file():
+            val_doc = read_json(val_json_path)
+            val_blocks = [it for it in (val_doc.get('issues') or []) if it.get('severity') == 'BLOCK']
+            if val_doc.get('status') == 'BLOQUEADO_PREPARTIDO' or val_blocks:
+                raise ValueError(f'Validador reportó bloqueos: {[b.get("code") for b in val_blocks]}')
+            artifacts['validation_json'] = {'path': str(val_json_path), 'sha256': sha(val_json_path), 'status': val_doc.get('status')}
+        rank_json_path = ctx['directory'] / 'probabilistic' / f'ranking_probabilistico_{ctx["event_id"]}.json'
+        if rank_json_path.is_file():
+            rank_doc = read_json(rank_json_path)
+            if str(rank_doc.get('event_id') or '') != str(ctx['event_id']):
+                raise ValueError(f'Motor generó ranking para otro Event ID: {rank_doc.get("event_id")}')
+            motor_odds_sha = ((rank_doc.get('input_snapshots') or {}).get('odds') or {}).get('sha256')
+            if motor_odds_sha and motor_odds_sha != stage_records['refresh_odds']['odds_sha256']:
+                raise ValueError(f'Motor utilizó cuotas con SHA {motor_odds_sha} != {stage_records["refresh_odds"]["odds_sha256"]}')
+            artifacts['ranking_json'] = {'path': str(rank_json_path), 'sha256': sha(rank_json_path), 'odds_sha256': motor_odds_sha}
+        mat_json_path = ctx['directory'] / 'probabilistic' / f'matriz_evidencia_{ctx["event_id"]}.json'
+        if mat_json_path.is_file():
+            artifacts['matriz_json'] = {'path': str(mat_json_path), 'sha256': sha(mat_json_path)}
+        sh_json_path = ctx['directory'] / 'shadow' / f'shadow_summary_{ctx["event_id"]}.json'
+        if sh_json_path.is_file():
+            artifacts['shadow_summary_json'] = {'path': str(sh_json_path), 'sha256': sha(sh_json_path)}
+        if m_final.get('codex_prompt') and Path(m_final['codex_prompt']).is_file():
+            cp = Path(m_final['codex_prompt'])
+            artifacts['codex_prompt'] = {'path': str(cp), 'sha256': sha(cp)}
+
+        remain_final = (ctx['kickoff'] - local_now()).total_seconds() / 60.0
+        if remain_final <= 0:
+            update_state(ctx, 'close', 'PREMATCH_EXPIRED', {
+                'stages': stage_records,
+                'total_elapsed_seconds': round(time.perf_counter() - t_start, 4),
+            })
+            return 3
+        stage_records['finish'] = {
+            'elapsed_seconds': round(time.perf_counter() - t_fin, 4),
+            'ok': True,
+            'status': m_final.get('status'),
+            'minutes_to_kickoff_after': round(remain_final, 2),
+            'artifacts': artifacts,
+        }
+    except Exception as exc:
+        stage_records['finish'] = {
+            'elapsed_seconds': round(time.perf_counter() - t_fin, 4),
+            'ok': False,
+            'block': str(exc),
+        }
+        update_state(ctx, 'close', 'BLOCKED_FINISH', {
+            'stages': stage_records,
+            'error': str(exc),
+            'total_elapsed_seconds': round(time.perf_counter() - t_start, 4),
+        })
+        print(f'BLOQUEADO en finish: {exc}', file=sys.stderr)
+        return 2
+
+    update_state(ctx, 'close', 'FINALIZADO_COORDINADO', {
+        'stages': stage_records,
+        'total_elapsed_seconds': round(time.perf_counter() - t_start, 4),
+        'codex_prompt': m_final.get('codex_prompt'),
+        'eligible_for_actionable_pick': m_final.get('eligible_for_actionable_pick'),
+    })
     return 0
 
 
@@ -712,6 +1404,11 @@ def cmd_status(ctx,args):
             if odds:
                 snap=snapshot_info(Path(odds['path']),ctx)
                 print('Cuotas:',snap['capture'],'| edad:',snap['age_minutes'],'min')
+            if (ctx['directory'] / 'case.json').is_file():
+                from prematch_case import _evaluate_closure
+                closure = _evaluate_closure(ctx['directory'], read_json(ctx['directory'] / 'case.json'), m)
+                note = '; '.join(closure['closure_reasons']) if closure['closure_reasons'] else 'criterios T-60/T-15 cumplidos'
+                print('Cierre:', closure['closure_stage'], f"({note})", '| XI API:', closure['lineups_status'], '| Shadow:', closure['shadow_status'])
             if m.get('codex_prompt'):print('Prompt Codex:',m['codex_prompt'])
         except ValueError as exc:print('ADVERTENCIA MANIFEST:',exc)
     else:print('Manifest: NO PREPARADO')
@@ -731,6 +1428,8 @@ def main(argv=None):
     p.add_argument('--min-lead-minutes',type=int,default=PREPARE_MIN_LEAD_MINUTES,help='Margen mínimo para prepare/check')
     p.add_argument('--min-refresh-lead-minutes',type=int,default=REFRESH_MIN_LEAD_MINUTES,help='Margen mínimo para actualizar cuotas/contexto')
     p.add_argument('--min-finish-lead-minutes',type=int,default=FINISH_MIN_LEAD_MINUTES,help='Margen mínimo para iniciar finish (T-5 por defecto)')
+    p.add_argument('--lineup-cutoff-minutes',type=int,default=15,help='Corte prepartido para exigir 22 titulares confirmados (default 15)')
+    p.add_argument('--now-utc',help='Reloj ISO con timezone explícito para simulación PREMATCH reproducible')
     s=p.add_subparsers(dest='action',required=True)
     check=s.add_parser('check',help='Validar selección y tiempo; no usar herramientas externas')
     check.add_argument('--reuse-odds',action='store_true',help='Exigir también contrato, SHA y frescura para reutilizar el TXT')
@@ -742,6 +1441,7 @@ def main(argv=None):
     pp.add_argument('--force-prepare',action='store_true',help='Rehacer desde cero; respaldar capturas y manifest')
     pp.add_argument('--reuse-odds',action='store_true',help='Reutiliza cuotas seleccionadas por SHA y prepara únicamente el contexto completo')
     s.add_parser('refresh-odds',help='Solo scraper Bwin, sin repetir API ni actualizar otros eventos')
+    s.add_parser('acquire-lineups',help='API por Fixture ID y delta XI; conserva históricos')
     delta=s.add_parser('refresh-context',help='Incorpora XI de un registro local adquirido antes del kickoff; sin API')
     delta.add_argument('--snapshot',type=Path,required=True)
     delta.add_argument('--snapshot-sha256',required=True)
@@ -753,8 +1453,20 @@ def main(argv=None):
     ff=s.add_parser('finish',help='Informe -> validador -> motor; genera prompt único Codex')
     ff.add_argument('--report',type=Path,help='Reporte cualitativo del seleccionado')
     ff.add_argument('--historical',action='store_true',help='Solo auditoría posterior al inicio: nunca Codex accionable')
+    ff.add_argument('--shadow-mode',action='store_true',help='Opt-in: ejecuta Bet Engine en Shadow Mode paralelo sin alterar el flujo anterior')
+    ff_lu=ff.add_mutually_exclusive_group()
+    ff_lu.add_argument('--require-confirmed-lineups',action='store_true',help='Falla cerrado si faltan 22 titulares confirmados')
+    ff_lu.add_argument('--allow-unconfirmed-lineups',action='store_true',help='Permite investigación sin 22 titulares confirmados (no accionable)')
+    cl=s.add_parser('close',help='Coordinación segura PREMATCH: precheck -> refresh-odds -> finish')
+    cl.add_argument('--report',type=Path,help='Reporte cualitativo del seleccionado')
+    cl.add_argument('--shadow-mode',action='store_true',help='Opt-in: ejecuta Bet Engine en Shadow Mode paralelo')
+    cl_lu=cl.add_mutually_exclusive_group()
+    cl_lu.add_argument('--require-confirmed-lineups',action='store_true',default=True,help='Falla cerrado si faltan 22 titulares confirmados (default)')
+    cl_lu.add_argument('--allow-unconfirmed-lineups',action='store_true',help='Permite cierre de investigación sin 22 titulares confirmados (no accionable)')
     args=p.parse_args(argv)
-    if args.action in ('prepare','refresh-odds','retry-context','retry-scraper'):
+    if getattr(args, 'allow_unconfirmed_lineups', False):
+        args.require_confirmed_lineups = False
+    if args.action in ('prepare','refresh-odds','retry-context','retry-scraper','acquire-lineups','close'):
         from prematch_execution_control import require_external_confirmation
         try:require_external_confirmation(args.confirm_external)
         except ValueError as error:p.error(str(error))
@@ -762,6 +1474,9 @@ def main(argv=None):
             args.min_lead_minutes<45 or args.min_refresh_lead_minutes<5 or
             args.min_finish_lead_minutes<FINISH_MIN_LEAD_MINUTES):
         p.error('Límites de frescura inválidos: check/prepare >=45, refresh >=5 y finish >=5 minutos')
+    prev_now_env = os.environ.get('PREMATCH_NOW_UTC')
+    if getattr(args, 'now_utc', None):
+        os.environ['PREMATCH_NOW_UTC'] = str(args.now_utc)
     try:
         ctx=load_context(args)
         if args.action=='check':
@@ -775,12 +1490,20 @@ def main(argv=None):
         if args.action=='verify-temporal-identity':return cmd_verify_temporal_identity(ctx,args)
         if args.action=='prepare':return cmd_prepare(ctx,args)
         if args.action=='refresh-odds':return cmd_refresh(ctx,args)
+        if args.action=='acquire-lineups':return cmd_acquire_lineups(ctx,args)
         if args.action=='refresh-context':return cmd_refresh_context(ctx,args)
         if args.action in ('retry-context','retry-scraper'):return cmd_retry(ctx,args,args.action)
         if args.action=='finish':return cmd_finish(ctx,args)
+        if args.action=='close':return cmd_close(ctx,args)
     except (ValueError,KeyError,TypeError,OSError,TrialError) as exc:
         print('BLOQUEADO:',exc,file=sys.stderr)
         return 2
+    finally:
+        if getattr(args, 'now_utc', None):
+            if prev_now_env is None:
+                os.environ.pop('PREMATCH_NOW_UTC', None)
+            else:
+                os.environ['PREMATCH_NOW_UTC'] = prev_now_env
     return 2
 
 

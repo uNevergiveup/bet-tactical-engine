@@ -126,6 +126,15 @@ def identify_market(market: str, home: str, away: str) -> tuple[str, str | None,
         side = 'home'; base = base[len(norm(home)) + 3:]
     elif base.startswith(norm(away) + ' - '):
         side = 'away'; base = base[len(norm(away)) + 3:]
+    elif ' - ' in base:
+        from bwin_discovery import FEMALE_RE, resolve_verified_team_side
+        raw_base = str(market).split('|', 1)[0].strip()
+        prefix_raw = raw_base.split(' - ', 1)[0].strip() if ' - ' in raw_base else base.split(' - ', 1)[0].strip()
+        inferred_gender = 'F' if FEMALE_RE.search(f'{home} {away}') else None
+        resolved = resolve_verified_team_side(prefix_raw, {'home': home, 'away': away, 'gender': inferred_gender})
+        if resolved in ('home', 'away'):
+            side = resolved
+            base = base.split(' - ', 1)[1].strip()
     if base == 'total de goles':
         return 'goals', side, 'MODELABLE'
     if base in ('total de corners', 'total corners', 'total de saques de esquina'):
@@ -225,7 +234,7 @@ def preflight_for_fixture(root: dict, fixture_id: int):
     return m[0] if m else None
 
 
-def validate_snapshot(f, pf, pfroot, pfpath, prepath, override, asof, age_limit, lead_min, historical, project_root=None):
+def validate_snapshot(f, pf, pfroot, pfpath, prepath, override, asof, age_limit, lead_min, historical, project_root=None, exploration=False):
     from prematch_paths import local_reference, reference_root
     project = project_root or reference_root(prepath, pfpath)
     reasons=match_identity(f,pf)
@@ -234,7 +243,17 @@ def validate_snapshot(f, pf, pfroot, pfpath, prepath, override, asof, age_limit,
     if pfroot.get('source_preselection_sha256') != sha(prepath):
         reasons.append('PRESELECTION_SHA_MISMATCH')
     if (pf.get('time_evidence') or {}).get('status') not in ('DISPLAY_TIME_CORROBORATED', 'COUNTDOWN_TIME_CORROBORATED', 'ABSOLUTE_TIME_VERIFIED'):
-        reasons.append('BWIN_TIME_NOT_CORROBORATED')
+        if not exploration:reasons.append('BWIN_TIME_NOT_CORROBORATED')
+    if exploration:
+        from bwin_market_preflight import exploration_check
+        try:
+            source_path=local_reference(project,pfroot.get('source_discovery'),pfroot.get('source_sha256'))
+            source=load_json(source_path)
+            events=[m for m in source['matches'] if str(m['fixture_id'])==str(f['fixture_id'])]
+            if len(events)!=1:raise ValueError('DISCOVERY_FIXTURE_NOT_UNIQUE')
+            checked=exploration_check(events[0],source.get('catalog_observed',[]),asof,lead_min,180)
+            reasons.extend(checked['reasons'])
+        except (OSError,ValueError,KeyError,TypeError) as exc:reasons.append(str(exc))
     if (pf.get('time_evidence') or {}).get('status') in ('COUNTDOWN_TIME_CORROBORATED', 'ABSOLUTE_TIME_VERIFIED'):
         from bwin_market_preflight import validate_match
         try:
@@ -340,7 +359,8 @@ def evaluate_selection(quote, f, threshold_odd, min_n, sensitivity_g, sensitivit
 
 
 def produce(args):
-    now = datetime.now(MADRID)
+    now_override = dt(getattr(args, 'now_utc', None)) if getattr(args, 'now_utc', None) else None
+    now = now_override.astimezone(MADRID) if now_override is not None else datetime.now(MADRID)
     asof = dt(args.asof) if args.asof else now
     if asof is None:raise ValueError('--asof exige fecha ISO con zona horaria')
     historical = args.asof is not None
@@ -390,7 +410,8 @@ def produce(args):
             if any(a['fixture_id']==fid for a in audits):raise ValueError('DUPLICATE_FIXTURE_PREFLIGHT '+str(fid))
             f=fixtures[fid]
             reasons, quotes, meta = validate_snapshot(f,pf,root,pfpath,prepath,snapshots.get(str(pf.get('bwin_event_id'))),
-                                                      asof,args.max_age_minutes,args.min_lead_minutes,historical)
+                                                      asof,args.max_age_minutes,args.min_lead_minutes,historical,
+                                                      exploration=getattr(args,'exploration',False))
             cutoff=dt(f.get('analysis_cutoff_utc'))
             if cutoff is None or cutoff > asof:
                 reasons.append('FIXTURE_ANALYSIS_CUTOFF_AFTER_ASOF')
@@ -398,7 +419,9 @@ def produce(args):
                 reasons.append('PATTERN_AFTER_FIXTURE_KICKOFF')
             audit={'fixture_id':fid,'home':f['home'],'away':f['away'],
                    'kickoff_madrid':f['kickoff_madrid'], 'bwin_event_id':pf.get('bwin_event_id'),
-                   'preflight_path':str(pfpath), 'status':'VERIFIED' if not reasons else 'BLOCKED',
+                   'preflight_path':str(pfpath), 'status':('RESEARCH_ONLY' if getattr(args,'exploration',False) else 'VERIFIED') if not reasons else 'BLOCKED',
+                   'final_validation_pending':bool(pf.get('final_validation_pending')),
+                   'warnings':pf.get('warnings',[]),
                    'reasons':reasons, 'snapshot':meta, 'captured':len(quotes or []) if not reasons else 0}
             audits.append(audit)
             if reasons:continue
@@ -416,9 +439,11 @@ def produce(args):
     # Únicamente relaciona tendencias descriptivas con líneas DEL MISMO mercado y alcance.
     # Un equipo con más tiros a puerta NO avala props de un jugador.
     research_leads=[]
-    verified_ids={a['fixture_id'] for a in audits if a['status']=='VERIFIED'}
+    verified_ids={a['fixture_id'] for a in audits if a['status'] in {'VERIFIED','RESEARCH_ONLY'}}
     for pr in pattern_rows:
-        if not isinstance(pr,dict) or pr.get('pattern_flag')!='ASIMETRIA_RELATIVA_ALTA':
+        if (not isinstance(pr,dict) or
+                (pr.get('pattern_flag')!='ASIMETRIA_RELATIVA_ALTA'
+                 and pr.get('status')!='MUESTRA_DESCRIPTIVA_OK')):
             continue
         try: fid=int(pr.get('fixture_id'))
         except (ValueError,TypeError):continue
@@ -435,11 +460,13 @@ def produce(args):
                     r['odd']>=args.min_odd]
         if not applicable:continue
         direct=[r for r in applicable if r['team_side']==side]
+        directional = pr.get('pattern_flag') == 'ASIMETRIA_RELATIVA_ALTA'
         research_leads.append({'fixture_id':fid,'team':pr.get('team'),'team_side':side,
                                'metric':metric,'relative_asymmetry_pct':pr.get('relative_asymmetry_pct'),
                                'matching_market_lines':len(applicable),
                                'relation':'DIRECT_TEAM_MARKET' if direct else 'INDIRECT_TEAM_TREND_TO_MATCH_TOTAL',
-                               'status':'DESCRIPTIVE_PATTERN_WITH_MARKET_NO_VERIFIED_VALUE',
+                               'status':('DESCRIPTIVE_PATTERN_WITH_MARKET_NO_VERIFIED_VALUE' if directional
+                                         else 'DESCRIPTIVE_BASELINE_WITH_MARKET_NO_DIRECTION_OR_VALUE'),
                                'warning':'La asimetría NO prueba probabilidad, causalidad ni valor de cuota'})
     rank=[]
     for a in audits:
@@ -466,7 +493,9 @@ def produce(args):
         'mode':'RETROSPECTIVE_AUDIT' if historical else 'PREMATCH_SNAPSHOT_SCREEN',
         'deep_research_authorized':False,'selection_status':'NEEDS_CALIBRATED_MODEL_AND_CONTEXT',
         'sources':{'preselection':str(prepath),'preselection_sha256':sha(prepath),
-                   'pattern':patternref,'preflights':list(args.preflight)},
+                   'pattern':patternref,'preflights':list(args.preflight),
+                   'preflight_sha256':{str(p):sha(Path(p)) for p in args.preflight}},
+        'validation_level':'EXPLORATION' if getattr(args,'exploration',False) else 'STRICT',
         'parameters':{'min_odd':args.min_odd,'min_n_for_price_screen':args.min_n,
                       'sensitivity_goals_lambda_pct':100*args.sensitivity_goals,
                       'sensitivity_corners_lambda_pct':100*args.sensitivity_corners,
@@ -481,6 +510,7 @@ def produce(args):
             'profitability':'NO se calcula EV validado, stake ni pick; diferencias son señales exploratorias no apostables',
         },
         'counts':{'preflight_fixtures':len(audits),'verified_fixtures':snapshot_ready,
+                  'research_only_fixtures':sum(a['status']=='RESEARCH_ONLY' for a in audits),
                   'captured_selections':len(rows),
                   'price_eligible':sum(r['odd']>=args.min_odd for r in rows),
                   'diagnostics':sum(r['p_poisson_exploratory'] is not None for r in rows),
@@ -489,6 +519,8 @@ def produce(args):
         'audits':audits,'research_leads_descriptive_not_picks':research_leads,
         'ranking_for_followup_not_betting':rank,'selection_reviews':rows,
     }
+    payload['run_outcome'] = ('COMPLETED' if all(r['status']=='VERIFIED' for r in audits)
+                              else 'COMPLETED_WITH_BLOCKED_FIXTURES')
     out=Path(args.output_dir);out.mkdir(parents=True,exist_ok=True)
     (out/'opportunity_scan.json').write_text(json.dumps(payload,ensure_ascii=False,indent=2)+'\n',encoding='utf-8')
     keys=['fixture_id','home','away','bwin_event_id','capture_madrid','market','selection','odd','txt_line',
@@ -548,11 +580,13 @@ def produce(args):
 def main(argv=None):
     p=argparse.ArgumentParser(description='Explorador de mercados prepartido: sin scraping ni predicciones validadas')
     p.add_argument('--preselection',required=True)
+    p.add_argument('--exploration',action='store_true',help='Analizar capturas con identidad parcial; nunca acredita validación final')
     p.add_argument('--pattern',help='pattern_engine.json V0.1 opcional para trazabilidad')
     p.add_argument('--preflight',action='append',required=True,help='market_preflight.json; repetir por partido')
     p.add_argument('--snapshot',action='append',default=[],help='TXT existente si la ruta del preflight no existe en este equipo')
     p.add_argument('--fixture-id',type=int,action='append',default=[],help='Filtrar por fixture; repetir')
     p.add_argument('--asof',help='ISO con timezone; SOLO auditoría retrospectiva')
+    p.add_argument('--now-utc',help='Reloj explícito con timezone para simulación PREMATCH reproducible')
     p.add_argument('--output-dir',required=True)
     p.add_argument('--min-odd',type=float,default=1.20)
     p.add_argument('--min-n',type=int,default=15)
@@ -570,7 +604,9 @@ def main(argv=None):
     for r in result['audits']:
         print(f"[{r['fixture_id']}] {r['status']} "+(','.join(r['reasons']) if r['reasons'] else ''))
     print('Salida:',a.output_dir,'| Deep Research: NO AUTORIZADO por este módulo')
-    return 0 if all(r['status']=='VERIFIED' for r in result['audits']) else 1
+    # A blocked fixture is a domain result already recorded in the artifact,
+    # not a process failure. Exceptions above remain exit 2.
+    return 0
 
 
 if __name__=='__main__':

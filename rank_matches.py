@@ -93,6 +93,12 @@ def basic_signal(m: dict[str, Any]) -> tuple[float, list[str]]:
     score = 0.78 * pre + bonus + contrast + min(2., h2h * 0.65) + (PREFERRED_LEAGUE_BONUS if m.get('league_id') in PREFERRED_LEAGUE_IDS else 0.)
     if m.get('league_id') in PREFERRED_LEAGUE_IDS:
         reasons.append('Competición de prioridad operativa (no cobertura Bwin confirmada)')
+    from preselect_matches import validate_coverage_rules
+    rules=validate_coverage_rules(m.get('coverage_rules'))
+    contract=m.get('competition_coverage') or {}; caps=contract.get('capabilities') or {}
+    if rules['enabled'] and caps.get('statistics_fixtures')=='TRUE' and (caps.get('standings')=='TRUE' or contract.get('competition_type')=='Cup' or m.get('coverage_exception_reason')):
+        score+=rules['advanced_bonus']
+        reasons.append('Cobertura colectiva declarada; prioridad de adquisición, datos efectivos aún pendientes')
     return round(score, 2), reasons
 
 
@@ -202,9 +208,15 @@ def rank_report(input_report: dict[str, Any], next_detail: int = 24,
         m['_planning_reasons'] = why
         eligible.append(m)
     detailed = sorted([m for m in eligible if m.get('details_checked')], key=evidence_rank_key)
-    # No se mezclan 100/100 de cobertura con preliminares sin detalles.
-    validated = [m for m in detailed if m.get('research_priority_score') is not None
-                 and m.get('data_readiness_status') == 'DATOS_APROVECHABLES']
+    # Permite competir tanto con evidencia mínima en alguna familia como con evidencia rica,
+    # evitando excluir encuentros que cumplen goles por faltar córners o tarjetas.
+    validated = [
+        m for m in detailed
+        if (m.get('evidence_tier') in ('MINIMUM_EVIDENCE_MET', 'RICH_EVIDENCE_AVAILABLE')
+            or (m.get('evidence_tier') is None
+                and m.get('research_priority_score') is not None
+                and m.get('data_readiness_status') == 'DATOS_APROVECHABLES'))
+    ]
     detail_limited = [m for m in detailed if m not in validated]
     pending = [m for m in eligible if not m.get('details_checked')]
     pending = sorted(pending, key=pending_rank_key)
@@ -239,9 +251,11 @@ def rank_report(input_report: dict[str, Any], next_detail: int = 24,
 def compact(m: dict[str, Any]) -> dict[str, Any]:
     usable, weak = market_overview(m)
     return {key: m.get(key) for key in ('fixture_id', 'kickoff_madrid', 'country', 'region',
-       'league', 'league_id', 'season', 'home', 'away', 'gender', 'details_checked',
+       'league', 'league_id', 'season', 'home', 'away', 'gender', 'competition_category', 'details_checked',
        'initial_data_gate', 'preliminary_coverage_score', 'data_readiness_score',
-       'data_readiness_status', 'stability_score', 'research_priority_score',
+       'data_readiness_status', 'evidence_tier', 'family_evidence_tiers', 'eligible_market_families', 'rank_eligible',
+       'stability_score', 'research_priority_score',
+       'coverage_rules','competition_coverage','statistical_priority','legacy_research_priority_score','legacy_data_readiness_rank',
        'bwin_market_availability')} | {
        'next_detail_planning_score': m.get('_planning_score'),
        'planning_reasons': m.get('_planning_reasons', []),

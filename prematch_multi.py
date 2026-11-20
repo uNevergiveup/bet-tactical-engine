@@ -44,11 +44,16 @@ def identifier(url: str) -> str:
 
 
 def utc_now() -> str:
-    return datetime.now(timezone.utc).isoformat()
+    return utc_now_dt().isoformat()
 
 
 def utc_now_dt() -> datetime:
     """Injectable clock seam for operation-window checks and offline tests."""
+    raw = os.getenv('PREMATCH_NOW_UTC')
+    if raw:
+        parsed = datetime.fromisoformat(raw.replace('Z', '+00:00'))
+        if parsed.tzinfo is not None:
+            return parsed.astimezone(UTC)
     return datetime.now(UTC)
 
 
@@ -127,6 +132,18 @@ def _kickoff_from_manifest(root: Path, event: str, state: dict) -> datetime:
                 (obj.get('fixture') or {}).get('date'),
                 (obj.get('match') or {}).get('kickoff_utc'),
             ])
+    if not candidates and state.get('canonical_case'):
+        ref = state['canonical_case']; path = Path(ref.get('path') or '')
+        if not path.is_file() or sha(path) != ref.get('sha256'):
+            raise ValueError('CANONICAL_CASE_HASH_INVALID')
+        case = json.loads(path.read_text(encoding='utf-8'))
+        from prematch_single import load_context
+        from types import SimpleNamespace
+        ctx = load_context(SimpleNamespace(root=root, selected=Path(case['selected']['path']), decision=None))
+        if (ctx['event_id'] != event or ctx['url'] != state.get('url') or
+                sha(ctx['selected_path']) != case['selected']['sha256']):
+            raise ValueError('CANONICAL_CASE_IDENTITY_CONFLICT')
+        candidates.append(ctx['kickoff'].isoformat())
     parsed = []
     for raw in candidates:
         try:
@@ -370,6 +387,20 @@ def prepare_one(root: Path, url: str, python: str, shared_file: Path,
             state['status']='ERROR_ARCHIVOS'
             state['error']='Identidad: '+str(exc)
     state['finished_at'] = utc_now()
+    case_path = location / 'case.json'
+    if case_path.is_file():
+        try:
+            case_doc = json.loads(case_path.read_text(encoding='utf-8-sig'))
+            if str(case_doc.get('event_id') or '') == event and case_doc.get('schema_version') == '2.0-canonical-prematch-case':
+                if isinstance(case_doc.get('selected'), dict) and Path(case_doc['selected'].get('path', '')).is_file():
+                    state['selected_match'] = case_doc['selected']
+                if isinstance(case_doc.get('source_handoff'), dict) and Path(case_doc['source_handoff'].get('path', '')).is_file():
+                    state['source_handoff'] = case_doc['source_handoff']
+                state['canonical_case'] = {'path': str(case_path.resolve()), 'sha256': sha(case_path), 'size': case_path.stat().st_size}
+                if case_doc.get('kickoff_madrid'):
+                    state['kickoff_madrid'] = case_doc['kickoff_madrid']
+        except (OSError, ValueError, TypeError, json.JSONDecodeError):
+            pass
     save_manifest(root,event,state)
     say(f'[{event}] PREPARACIÓN: {state["status"]}')
     return state['status'] in {'PREPARADO', 'PREPARADO_PROVISIONAL'}
@@ -395,7 +426,8 @@ def bind_identity(root: Path, event: str, state: dict) -> str:
 
 
 def finish_one(root: Path, event: str, python: str, override_report: str | None = None,
-               allow_no_odds: bool = False, historical: bool = False) -> bool:
+               allow_no_odds: bool = False, historical: bool = False,
+               shadow_mode: bool = False, lineup_cutoff_minutes: int = 15) -> bool:
     state = load_manifest(root,event)
     if not historical:
         ensure_event_operation_window(root, event, state,
@@ -407,11 +439,9 @@ def finish_one(root: Path, event: str, python: str, override_report: str | None 
         raise ValueError(f'Evento {event}: preparación incompleta ({state.get("status")})')
     if state['status']=='PARCIAL_SIN_CUOTAS' and not allow_no_odds:
         raise ValueError(f'Evento {event}: faltan cuotas Bwin; usa --allow-no-odds para solo estadística')
-    incoming = root/'instructions'/f'reporte_cualitativo_{event}.md'
+    from prematch_single import resolve_qualitative_report_path
     pinned = event_dir(root,event)/'inputs'/f'reporte_cualitativo_{event}.md'
-    report = Path(override_report) if override_report else (incoming if incoming.is_file() else pinned)
-    if not report.is_absolute():
-        report = root/report
+    report = resolve_qualitative_report_path(root, event_dir(root, event), event, override_report)
     if not report.is_file() or not report.stat().st_size:
         raise ValueError(f'Reporte cualitativo del evento {event} ausente: {report}. '
                          f'Colócalo en instructions/ o en {pinned}')
@@ -494,9 +524,17 @@ def finish_one(root: Path, event: str, python: str, override_report: str | None 
         return False
     validated=json.loads(valpath.read_text(encoding='utf-8'))
     state['validation_state']=validated.get('status')
+    blocks = [item for item in validated.get('issues', []) if item.get('severity') == 'BLOCK']
+    reviews = [item for item in validated.get('issues', []) if item.get('severity') == 'REVIEW']
+    state['validation_summary'] = {
+        'status': validated.get('status'),
+        'exit_code': valcode,
+        'blocks': len(blocks),
+        'reviews': len(reviews),
+        'motor_allowed': valcode in (0, 1) and validated.get('status') != 'BLOQUEADO_PREPARTIDO',
+    }
     if valcode not in (0,1) or validated.get('status')=='BLOQUEADO_PREPARTIDO':
         state['status']='BLOQUEADO_VALIDACION';save_manifest(root,event,state)
-        blocks = [item for item in validated.get('issues', []) if item.get('severity') == 'BLOCK']
         for item in blocks:
             say(f'[{event}] BLOCK {item.get("code", "SIN_CODIGO")}: {item.get("detail", "")[:300]}')
         say(f'[{event}] Validación bloqueada: {valdir / ("validacion_" + event + ".md")}')
@@ -543,7 +581,7 @@ No reejecutes scraper, generador, validador ni motor. No uses web.
 - API-Football TXT: `{inputs['context']['path']}`
 - API-Football JSON de la misma captura: `{inputs.get('context_json',{}).get('path','NO DISPONIBLE')}`
 - Bwin: `{inputs.get('odds',{}).get('path','NO DISPONIBLE')}`
-- Informe cualitativo (Gemini/Perplexity): `{pinned.resolve()}`
+- Informe cualitativo (consolidado): `{pinned.resolve()}`
 - Matriz: `{(probdir/f'matriz_evidencia_{event}.json').resolve()}`
 - Ranking: `{(probdir/f'ranking_probabilistico_{event}.json').resolve()}`
 - Resumen: `{(probdir/f'resumen_codex_{event}.md').resolve()}`
@@ -553,13 +591,129 @@ No reejecutes scraper, generador, validador ni motor. No uses web.
 - Contexto competitivo: `{(probdir/f'contexto_competitivo_{event}.md').resolve()}`
 - Contexto competitivo JSON: `{(probdir/f'contexto_competitivo_{event}.json').resolve()}`
 
-Comprueba identities, timestamps, XI y mercado literal. Si el kickoff ya ocurrió,
-solo auditoría retrospectiva basada en snapshots prepartido; NO apuestas live.
+Comprueba identidades, timestamps, XI y mercado literal. Mientras no haya pasado el kickoff
+(independientemente del control de XI en T-{lineup_cutoff_minutes}), la evaluación PREMATCH sigue vigente sujeta a frescura de cuotas y elegibilidad;
+solo si el kickoff ya ocurrió aplica auditoría retrospectiva basada en snapshots prepartido sin apuestas live.
 Produce `outputs/matches/{event}/analysis/analisis_{event}.md` exclusivamente para este evento.
 ''',encoding='utf-8')
         state['codex_prompt']=str(prompt.resolve())
         say(f'[{event}] LISTO PARA CODEX: {prompt.relative_to(root)}')
+    # Auditoría y reconciliación canónica P0 de XI confirmados en manifest y cierre Shadow
+    lineups_confirmed_22 = False
+    if code == 0:
+        from bet_engine.context.lineup_manager import evaluate_fixture_lineup_state, extract_fixture_team_identity
+        ctx_json_meta = (state.get('inputs') or {}).get('context_json') or {}
+        ctx_doc_lu = json.loads(Path(ctx_json_meta['path']).read_text(encoding='utf-8-sig')) if ctx_json_meta.get('path') and Path(ctx_json_meta['path']).is_file() else {}
+        ident_meta = (state.get('inputs') or {}).get('identity') or {}
+        ident_doc_lu = json.loads(Path(ident_meta['path']).read_text(encoding='utf-8-sig')) if ident_meta.get('path') and Path(ident_meta['path']).is_file() else {}
+        case_file_lu = event_dir(root, event) / 'case.json'
+        case_doc_lu = json.loads(case_file_lu.read_text(encoding='utf-8-sig')) if case_file_lu.is_file() else {}
+        team_ident = extract_fixture_team_identity(ctx_doc_lu, case_doc=case_doc_lu, identity_doc=ident_doc_lu)
+        ml_meta = (state.get('inputs') or {}).get('manual_lineups') or {}
+        ml_doc = json.loads(Path(ml_meta['path']).read_text(encoding='utf-8-sig')) if ml_meta.get('path') and Path(ml_meta['path']).is_file() else None
+        raw_lu_resp = ((ctx_doc_lu.get('context') or {}).get('lineups') or {}).get('response')
+        lu_prov = ((ctx_doc_lu.get('context') or {}).get('lineups') or {}).get('provenance') or {}
+        diff_meta = ctx_doc_lu.get('differential_refresh') or {}
+        api_acq_ts = (
+            diff_meta.get('acquired_at_utc')
+            or ((ctx_doc_lu.get('context') or {}).get('lineups') or {}).get('_acquired_at_utc')
+            or ctx_doc_lu.get('generated_at')
+        )
+        if ml_doc is None and lu_prov.get('lineup_status') in {'LINEUPS_MANUAL_VERIFIED', 'LINEUPS_EXTERNAL_CONFIRMED'}:
+            ml_doc = {
+                'lineup_status': lu_prov['lineup_status'],
+                'source': lu_prov.get('source'),
+                'source_url': lu_prov.get('source_url'),
+                'source_kind': lu_prov.get('source_kind'),
+                'primary_evidence_verified': lu_prov.get('primary_evidence_verified', False),
+                'captured_at_utc': lu_prov.get('captured_at_utc'),
+                'sides': {'home': {'starters_count': 11}, 'away': {'starters_count': 11}},
+            }
+            raw_lu_resp = None
+        if team_ident.get('kickoff_utc'):
+            lu_eval = evaluate_fixture_lineup_state(
+                api_lineups_response=raw_lu_resp,
+                manual_lineup=ml_doc,
+                qualitative_markdown=pinned.read_text(encoding='utf-8-sig', errors='replace'),
+                fixture_id=int(team_ident.get('fixture_id') or 0),
+                event_id=str(event),
+                home_id=team_ident.get('home_id'),
+                away_id=team_ident.get('away_id'),
+                home_name=str(team_ident.get('home_name') or ''),
+                away_name=str(team_ident.get('away_name') or ''),
+                home_aliases=team_ident.get('home_aliases'),
+                away_aliases=team_ident.get('away_aliases'),
+                is_national_team=bool(team_ident.get('is_national_team')),
+                kickoff_utc=team_ident['kickoff_utc'],
+                now_utc=state['finish_completed_at'],
+                lineup_cutoff_minutes=lineup_cutoff_minutes,
+                api_acquired_at_utc=api_acq_ts,
+                last_verified_state=state.get('lineup_state'),
+            )
+            state['lineup_state'] = {k: v for k, v in lu_eval.items() if k != 'extracted_manual_payload'}
+            lineups_confirmed_22 = bool(lu_eval['confirmed_complete_22'])
+        state['eligible_for_final_analysis'] = bool(code == 0 and not blocks)
+        state['eligible_for_actionable_pick'] = bool(lineups_confirmed_22 and not historical and (inputs.get('odds') is not None))
+        state['actionable_bet'] = False
+        if not lineups_confirmed_22:
+            state['final_eligibility'] = 'BLOCKED_MISSING_CONFIRMED_22_STARTERS'
+        elif historical:
+            state['final_eligibility'] = 'HISTORICAL_AUDIT_NO_LIVE_BET'
+        elif inputs.get('odds') is None:
+            state['final_eligibility'] = 'NO_ODDS_STATISTICAL_ONLY'
+        else:
+            state['final_eligibility'] = 'ELIGIBLE_PENDING_CLOSURE_CHECKS'
+        # Mantiene consistencia con lineups/lineup_audit_<E>.json si existe caso
+        lu_audit_path = event_dir(root, event) / 'lineups' / f'lineup_audit_{event}.json'
+        if state.get('lineup_state') and lu_audit_path.parent.is_dir():
+            prev_audit = {}
+            if lu_audit_path.is_file():
+                try:
+                    prev_audit = json.loads(lu_audit_path.read_text(encoding='utf-8'))
+                except (OSError, ValueError):
+                    prev_audit = {}
+            prev_audit.update({
+                'event_id': str(event),
+                'fixture_id': int(team_ident.get('fixture_id') or prev_audit.get('fixture_id') or 0),
+                'reconciled_at_finish_utc': state['finish_completed_at'],
+                'lineup_state': state['lineup_state'],
+                'original_inputs_untouched': True,
+            })
+            lu_audit_path.write_text(json.dumps(prev_audit, ensure_ascii=False, indent=2) + '\n', encoding='utf-8')
     save_manifest(root,event,state)
+    if code == 0 and shadow_mode:
+        try:
+            from bet_engine.orchestration import run_shadow_for_event_dir
+            sh_res = run_shadow_for_event_dir(
+                root,
+                event,
+                historical=historical,
+                now_utc=(None if historical else utc_now()),
+                min_lead_minutes=(0 if historical else FINISH_MIN_LEAD_MINUTES),
+                lineup_cutoff_minutes=lineup_cutoff_minutes,
+            )
+            say(f'[{event}] SHADOW MODE ({sh_res.get("status", "ERR")}): {sh_res.get("path") or sh_res.get("error")} | {sh_res.get("elapsed_ms")} ms')
+            prompt_path = event_dir(root, event) / f'CODEX_{event}.md'
+            if not historical and sh_res.get('ok') and sh_res.get('path') and prompt_path.is_file():
+                try:
+                    sh_doc = json.loads(Path(sh_res['path']).read_text(encoding='utf-8'))
+                    ts_block = (
+                        f"\n## Timestamps de precios y probabilidades\n"
+                        f"- Captura de precios Bwin (UTC): `{sh_doc.get('odds_captured_utc')}` | "
+                        f"SHA-256: `{sh_doc.get('odds_sha256')}` | "
+                        f"Frescura: `{sh_doc.get('odds_freshness_status')}` | "
+                        f"Selecciones modeladas: `{sh_doc.get('odds_selection_count')}`\n"
+                        f"- Cálculo de probabilidades Shadow (UTC): `{sh_doc.get('probabilities_computed_at_utc')}`\n"
+                        f"- Evaluación de precios Shadow (UTC): `{sh_doc.get('prices_evaluated_at_utc')}` "
+                        f"(`{sh_doc.get('timestamp_granularity')}`)\n"
+                        f"- Cierre del expediente (UTC): `{state.get('finish_completed_at')}`\n"
+                        f"- Shadow summary: `{sh_res['path']}`\n"
+                    )
+                    prompt_path.write_text(prompt_path.read_text(encoding='utf-8') + ts_block, encoding='utf-8')
+                except (OSError, ValueError, json.JSONDecodeError):
+                    pass
+        except Exception as exc:
+            say(f'[{event}] [SHADOW_WARN] fallo no bloqueante: {exc}')
     return code==0
 
 
@@ -587,6 +741,20 @@ def retry_context_one(root: Path, event: str, python: str, shared_file: Path,
         raise ValueError(f'{event}: falta snapshot de cuotas intacto (ID/SHA256); '
                          'no se permite retry-context.')
 
+    preserved = {}
+    archive = event_dir(root,event)/'archives'/('before_retry_context_'+datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%S%fZ'))
+    for kind in ('context', 'context_json', 'identity'):
+        ref = state.get('inputs', {}).get(kind) or {}
+        path = Path(ref.get('path') or '')
+        if path.is_file() and ref.get('sha256') == sha(path):
+            archive.mkdir(parents=True, exist_ok=True)
+            target = archive/path.name
+            shutil.copy2(path, target)
+            if sha(target) != ref['sha256']: raise ValueError('CONTEXT_ARCHIVE_HASH_MISMATCH')
+            preserved[kind] = {'path':str(target.resolve()), 'sha256':sha(target)}
+    if preserved:
+        state['previous_context_snapshot'] = {'inputs':preserved, 'current':False,
+            'status':'ARCHIVED_NOT_REFRESHED', 'archived_at_utc':utc_now()}
     state['status'] = 'REINTENTANDO_CONTEXTO'
     state['inputs'].pop('context', None)
     state['inputs'].pop('context_json', None)
@@ -777,6 +945,8 @@ def main(argv: list[str] | None = None) -> int:
     f.add_argument('--workers',type=int,default=2)
     f.add_argument('--allow-no-odds',action='store_true')
     f.add_argument('--historical',action='store_true',help='Auditoría retrospectiva de snapshots prepartido; nunca apuestas en vivo')
+    f.add_argument('--shadow-mode',action='store_true',help='Opt-in: ejecuta Bet Engine en Shadow Mode paralelo sin alterar salidas operativas')
+    f.add_argument('--lineup-cutoff-minutes',type=int,default=15,help='Corte prepartido para exigir 22 titulares confirmados (default 15)')
     s=sub.add_parser('status',help='Manifiestos multi, o el handoff diario con --date (sin manifest.json)')
     s.add_argument('--event-id',action='append')
     s.add_argument('--date',help='YYYY-MM-DD, hoy o mañana. Lee outputs/discovery de prematch_daily; no exige manifest')
@@ -857,7 +1027,7 @@ def main(argv: list[str] | None = None) -> int:
         ids=args.event_id
         if len(set(ids))!=len(ids): parser.error('IDs duplicados')
         with concurrent.futures.ThreadPoolExecutor(max_workers=args.workers) as pool:
-            future_map={pool.submit(finish_one,root,event,python,args.report,args.allow_no_odds,args.historical):event
+            future_map={pool.submit(finish_one,root,event,python,args.report,args.allow_no_odds,args.historical,args.shadow_mode,args.lineup_cutoff_minutes):event
                         for event in ids}
             results=[]
             for task in concurrent.futures.as_completed(future_map):
@@ -884,10 +1054,10 @@ def main(argv: list[str] | None = None) -> int:
         return 2
     for event in sorted(ids):
         try:
+            from prematch_single import resolve_qualitative_report_path
             d=load_manifest(root,event)
-            report=(root/'instructions'/f'reporte_cualitativo_{event}.md')
-            pinned=event_dir(root,event)/'inputs'/f'reporte_cualitativo_{event}.md'
-            say(f'{event}: {d.get("status")} · informe={"LISTO" if (report.is_file() or pinned.is_file()) else "PENDIENTE"} '
+            report=resolve_qualitative_report_path(root, event_dir(root, event), event)
+            say(f'{event}: {d.get("status")} · informe={"LISTO" if (report.is_file() and report.stat().st_size > 0) else "PENDIENTE"} '
                 f'· validación={d.get("validation_state","sin ejecutar")}')
         except (ValueError,OSError) as exc:
             say(f'{event}: ERROR {exc}')

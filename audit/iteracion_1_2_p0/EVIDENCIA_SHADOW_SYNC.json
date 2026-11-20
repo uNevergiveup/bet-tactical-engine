@@ -1,0 +1,76 @@
+{
+  "generated_utc": "2026-11-18T02:05:02.991422+01:00",
+  "initial_capture": {
+    "odds_sha256": "05ba6221849b9b4383a7291eaa70f3bd69613ae5ba373846fa05ac21e121ecea",
+    "odds_captured_utc": "2026-11-17T21:10:00+00:00",
+    "home_odd": 1.07,
+    "p_model": 0.6372,
+    "ev_model": -0.3182,
+    "probabilities_computed_at_utc": "2026-11-18T01:05:02.830729+00:00",
+    "prices_evaluated_at_utc": "2026-11-18T01:05:02.857222+00:00",
+    "timestamp_granularity": "IN_PROCESS_SEQUENTIAL_SHADOW_RUN"
+  },
+  "after_refresh_odds": {
+    "cmd_refresh_rc": 0,
+    "odds_sha256": "ac694396c0b20b7bb822035b48c039c175196545577bf43bfd06beef02421950",
+    "odds_captured_utc": "2026-11-17T22:48:54+00:00",
+    "home_odd": 1.055,
+    "p_model": 0.6372,
+    "ev_model": -0.3278,
+    "probabilities_computed_at_utc": "2026-11-18T01:05:02.929976+00:00",
+    "prices_evaluated_at_utc": "2026-11-18T01:05:02.950255+00:00",
+    "timestamp_granularity": "IN_PROCESS_SEQUENTIAL_SHADOW_RUN",
+    "shadow_sync_state": "SHADOW_UPDATED",
+    "invalidated_by_odds_refresh": {
+      "previous_status": "PREPARADO",
+      "previous_sha256": "05ba6221849b9b4383a7291eaa70f3bd69613ae5ba373846fa05ac21e121ecea",
+      "invalidated_at_utc": "2026-11-17T22:49:00+00:00",
+      "stages": [
+        "validation",
+        "probabilistic",
+        "shadow",
+        "codex_analysis",
+        "final_review"
+      ]
+    },
+    "single_execution_refresh_step": {
+      "time_utc": "2026-11-17T22:49:00+00:00",
+      "result": "ODDS_UPDATED_SHADOW_UPDATED",
+      "odds": {
+        "capture": "2026-11-17T23:48:54+01:00",
+        "age_minutes": 0.1,
+        "sha256": "ac694396c0b20b7bb822035b48c039c175196545577bf43bfd06beef02421950",
+        "size": 7644
+      },
+      "previous_sha256": "05ba6221849b9b4383a7291eaa70f3bd69613ae5ba373846fa05ac21e121ecea",
+      "archived_previous": "/var/folders/9j/pb9rqv956b55bth56h9hyxhm0000gn/T/tmpjvd_cfj8/outputs/matches/7909713/archives/refresh_20261118T010502892982Z/cuotas_bwin_7909713.20261118T010502893105Z.05ba6221849b.txt",
+      "log": "/var/folders/9j/pb9rqv956b55bth56h9hyxhm0000gn/T/tmpjvd_cfj8/outputs/matches/7909713/logs/single_refresh_scraper.log",
+      "shadow_sync_state": "SHADOW_UPDATED",
+      "reevaluation": {
+        "executed": true,
+        "shadow": {
+          "ok": true,
+          "path": "/private/var/folders/9j/pb9rqv956b55bth56h9hyxhm0000gn/T/tmpjvd_cfj8/outputs/matches/7909713/shadow/shadow_summary_7909713.json",
+          "elapsed_ms": 73.17,
+          "status": "COMPLETED_SHADOW"
+        }
+      }
+    },
+    "dossier_timestamps": {
+      "odds_captured_utc": "2026-11-17T22:48:54+00:00",
+      "odds_sha256": "ac694396c0b20b7bb822035b48c039c175196545577bf43bfd06beef02421950",
+      "probabilities_computed_at_utc": "2026-11-18T01:05:02.929976+00:00",
+      "prices_evaluated_at_utc": "2026-11-18T01:05:02.950255+00:00",
+      "timestamp_granularity": "IN_PROCESS_SEQUENTIAL_SHADOW_RUN",
+      "finish_completed_utc": null,
+      "shadow_odds_sha256": "ac694396c0b20b7bb822035b48c039c175196545577bf43bfd06beef02421950",
+      "shadow_odds_selection_count": 356,
+      "shadow_stale": false,
+      "shadow_verified": true
+    },
+    "archived_original_odds_sha256": [
+      "05ba6221849b9b4383a7291eaa70f3bd69613ae5ba373846fa05ac21e121ecea"
+    ],
+    "archived_original_shadow_count": 1
+  }
+}

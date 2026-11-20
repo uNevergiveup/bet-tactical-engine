@@ -754,9 +754,6 @@ def identity_map(fixtures_doc: dict[str, Any], bwin_doc: dict[str, Any]) -> dict
         if event and len(event_usage[event]) > 1:
             base.update(identity_status="AMBIGUOUS", reason="BWIN_EVENT_REUSED_BY_MULTIPLE_API_FIXTURES")
             pending.append(base); continue
-        if fixture.get("category_status") == "REVIEW":
-            base.update(identity_status="AMBIGUOUS", reason="CATEGORY_REQUIRES_REVIEW")
-            pending.append(base); continue
         status = observed.get("status")
         identity = observed.get("identity_status")
         if status == "IDENTITY_VERIFIED_AUTOMATICALLY" and identity == "NAME_AND_ABSOLUTE_TIME_MATCH":
@@ -776,8 +773,7 @@ def identity_map(fixtures_doc: dict[str, Any], bwin_doc: dict[str, Any]) -> dict
                 "AWAY_HOME_CONFLICT", "AWAY_HOME_TOKEN_CONFLICT"}
             category_evidence = observed.get("category_compatibility")
             expected_gender = str(fixture.get("gender") or "UNKNOWN").upper()
-            category_ok = ((expected_gender == "F" and category_evidence == "FEMALE_CORROBORATED") or
-                           (expected_gender == "M" and category_evidence == "COMPATIBLE_OR_UNKNOWN"))
+            category_ok = category_evidence not in {"GENDER_CONFLICT", "NON_ADULT_CONFLICT"}
             competition_scores = [value for value in
                                   (observed.get("competition_similarity"),
                                    inspection.get("competition_match_score"))
@@ -791,8 +787,14 @@ def identity_map(fixtures_doc: dict[str, Any], bwin_doc: dict[str, Any]) -> dict
                                                 "category_compatible": category_ok,
                                                 "competition_match_score": competition_score,
                                                 "competition_compatible": competition_ok}
+            base["identity_warnings"] = list(observed.get("identity_warnings") or [])
+            if not competition_ok:
+                base["identity_warnings"].append("COMPETITION_METADATA_NOT_CORROBORATED")
+            if fixture.get("category_status") == "REVIEW":
+                base["identity_warnings"].append("CLASSIFICATION_PENDING")
+            base["identity_warnings"] = list(dict.fromkeys(base["identity_warnings"]))
             if (event_same and title_ok and time_diff is not None and time_diff <= 15 and
-                    order_ok and category_ok and competition_ok):
+                    order_ok and category_ok):
                 base.update(identity_status="IDENTITY_VERIFIED", reason="BWIN_EVENT_ID_NAMES_AND_ABSOLUTE_TIME",
                             bwin_binding_status="VERIFIED")
                 verified.append(base)
@@ -883,6 +885,9 @@ def final_historical_rows(rows: list[Any], target_kickoff: datetime, target_id: 
         if (not isinstance(fid, int) or fid == target_id or team_id not in ids or
                 started is None or started >= target_kickoff or status not in FINAL_STATES):
             continue
+        from prematch_cache_record import historical_available
+        if not historical_available(row, target_kickoff):
+            continue
         selected[fid] = row
     return sorted(selected.values(), key=lambda x: (str((x.get("fixture") or {}).get("date")),
                                                      int((x.get("fixture") or {}).get("id") or 0)), reverse=True)[:limit]
@@ -937,7 +942,8 @@ def player_metric_coverage(player_rows: list[Any]) -> dict[str, int]:
 
 
 class DeepCollector:
-    def __init__(self, client: Phase1ApiClient, *, history: int, cutoff: datetime, core_only: bool = False):
+    def __init__(self, client: Phase1ApiClient, *, history: int, cutoff: datetime, core_only: bool = False, live: bool = False):
+        self.live = live
         self.client = client
         self.core_only = core_only
         self.history = history
@@ -970,6 +976,13 @@ class DeepCollector:
                                  "completeness": result.completeness,
                                  "temporal_eligibility": temporal, "consumers": [dict(scope)],
                                  "reuse_count": 0, **scope}
+            from prematch_cache_record import acquisition_before
+            if self.live:
+                self.cutoff=max(self.cutoff, self.client.clock())
+            if not acquisition_before(result.fetched_at_utc, self.cutoff) or (target_kickoff and acquired and acquired>=target_kickoff):
+                self.records[key]['status'] = 'AFTER_ANALYSIS_CUTOFF'
+                self.records[key]['temporal_eligibility'] = 'EXCLUDED_FROM_EVALUATION'
+                return None
             self.results[key] = result
             return result
         except CacheMissOffline as exc:
@@ -988,6 +1001,9 @@ class DeepCollector:
 
     def adopt_embedded(self, endpoint, historical_id, batch, row, scope):
         """Reuse an actual /fixtures?ids response; never create a fake endpoint cache."""
+        from prematch_cache_record import acquisition_before
+        if not acquisition_before(batch.fetched_at_utc, self.cutoff):
+            return None
         field = endpoint.split('/')[-1]
         response = row.get(field)
         if not isinstance(response,list):return None
@@ -1041,6 +1057,11 @@ class DeepCollector:
         self._active_keys = []
         league = identity.get("league_id"); season = identity.get("season")
 
+        # Coverage is a planning contract, not evidence that a metric was returned.
+        from preselect_matches import competition_coverage
+        coverage_result = self.request('leagues', {'id':league,'season':season},
+                                       scope={**scope,'role':'coverage_contract'}) if league and season else None
+        contract = competition_coverage(coverage_result.response if coverage_result else [],league,season)
         # Prioritize historical detail so a small pilot spends its budget on
         # statistics, players, lineups and events before optional context.
         self.request("fixtures", {"id": fid}, scope={**scope, "role": "target_fixture"})
@@ -1051,7 +1072,7 @@ class DeepCollector:
             history_result = self.request("fixtures", {"team": team_id, "last": max(self.history, 1)},
                                           scope={**team_scope, "role": "team_history"})
             if history_result:
-                for row in final_historical_rows(history_result.response, target_kickoff, fid, team_id, self.history):
+                for row in final_historical_rows(history_result.response, min(self.cutoff, target_kickoff), fid, team_id, self.history):
                     historical_ids.add(int(row["fixture"]["id"]))
         ordered_historical_ids = sorted(historical_ids)
         embedded = {}
@@ -1068,6 +1089,14 @@ class DeepCollector:
         for historical_id in ordered_historical_ids:
             hist_scope = {**scope, "historical_fixture_id": historical_id, "role": "historical_detail"}
             for endpoint in ("fixtures/statistics", "fixtures/events", "fixtures/lineups", "fixtures/players"):
+                capability={'fixtures/statistics':'statistics_fixtures','fixtures/events':'events',
+                            'fixtures/lineups':'lineups','fixtures/players':'statistics_players'}[endpoint]
+                if contract['capabilities'][capability]=='FALSE' and not identity.get('coverage_probe_reason'):
+                    key=endpoint_key(endpoint, {'fixture':historical_id})
+                    self._active_keys.append(key)
+                    self.records[key]={'status':'NOT_REQUESTED_DECLARED_FALSE','endpoint':endpoint,
+                        'parameters':{'fixture':historical_id},'coverage_contract':contract,**hist_scope}
+                    continue
                 params = {"fixture": historical_id}
                 result = self.adopt_embedded(endpoint,historical_id,*embedded[historical_id],hist_scope) if historical_id in embedded else None
                 if result is None:result = self.request(endpoint, params, scope=hist_scope)
@@ -1145,13 +1174,13 @@ class DeepCollector:
             result_status = "INCOMPLETE_NO_HISTORICAL_FIXTURES"
         elif pending_detail:
             result_status = "INCOMPLETE_HISTORICAL_DETAIL"
-        elif any(k in statuses for k in ("CACHE_MISS_OFFLINE", "BUDGET_EXHAUSTED", "ERROR")):
+        elif any(k in statuses for k in ("CACHE_MISS_OFFLINE", "BUDGET_EXHAUSTED", "ERROR", "AFTER_ANALYSIS_CUTOFF")):
             result_status = "INCOMPLETE_CONTEXT"
         else:
             result_status = "COMPLETE"
         if self.core_only and result_status == 'COMPLETE':
             result_status = 'CORE_COMPLETE_OPTIONAL_PENDING'
-        return {"api_fixture_id": fid, "bwin_event_id": identity.get("bwin_event_id"),
+        return {"api_fixture_id": fid, "competition_coverage":contract, "analysis_cutoff_utc":self.cutoff.isoformat(), "bwin_event_id": identity.get("bwin_event_id"),
                 "bwin_binding_status": "VERIFIED" if bwin_bound else "UNVERIFIED",
                 "market_identity_ready": bwin_bound,
                 "status": result_status, "optional_context_status": "NOT_REQUESTED_CORE_PASS" if self.core_only else "ATTEMPTED",
@@ -1235,6 +1264,8 @@ def run_bwin_once(root: Path, fixtures_path: Path, output_dir: Path, args: argpa
                str(args.bwin_max_country_pages), "--timeout", str(args.bwin_timeout)]
     if args.bwin_headless:
         command.append("--headless")
+    if getattr(args, 'confirm_external', False):
+        command.append('--confirm-external')
     executable = getattr(args, 'bwin_browser_executable', None)
     if executable is not None:
         executable = Path(executable).expanduser().resolve(strict=True)
@@ -1484,7 +1515,7 @@ def main(argv: list[str] | None = None) -> int:
         progress["stages"]["identity"] = {"status": "COMPLETE", **identities["counts"]}
         atomic_json(progress_path, progress)
 
-        collector = DeepCollector(client, history=args.history, cutoff=now_utc(), core_only=args.core_only)
+        collector = DeepCollector(client, history=args.history, cutoff=now_utc(), core_only=args.core_only, live=args.online)
         # API fixture verification is sufficient for historical acquisition;
         # Bwin verification remains mandatory for any later market/odds stage.
         candidates = identities.get("api_verified", [])

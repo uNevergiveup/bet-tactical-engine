@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import argparse
 import csv
+import hashlib
 import json
 import re
 import sys
@@ -36,7 +37,7 @@ EVENT_RE = re.compile(r"(?:^|/)eventos/[^?#]*?(?:-2:|:)(\d{5,12})(?:[/?#]|$)", r
 COUNTDOWN_RE = re.compile(r"\b(?:comienza|empieza)\s+en\s+(?:(?P<h>\d{1,2})\s*h(?:oras?)?\s*)?(?P<m>\d{1,3})\s*min(?:utos?)?\b", re.I)
 LIVE_RE = re.compile(r"(?:\blive(?:1t|2t|descanso)?\b|\ben\s+vivo\b|\bdescanso\b|\bhalf\s*time\b|\b\d\s*[tT]\s*[•:])", re.I)
 FEMALE_RE = re.compile(r"(?:\bwomen(?:'s)?\b|\bwomens\b|\bfemenin[oa]\b|\bfeminin[ea]\b|\bfrauen\b|\bfemminile\b|\bdamen\b|\(w\)|\sw\b)", re.I)
-NON_ADULT_RE = re.compile(r"(?:\bu\s*[- ]?(?:1[0-9]|2[0-3])\b|\bunder\s*[- ]?(?:1[0-9]|2[0-3])\b|\byouth\b|\bjuvenil(?:es)?\b|\breserves?\b|\breservas?\b)", re.I)
+NON_ADULT_RE = re.compile(r"(?:\b(?:u|sub)\s*[- ]?(?:1[0-9]|2[0-3])\b|\bunder\s*[- ]?(?:1[0-9]|2[0-3])\b|\byouth\b|\bjuvenil(?:es)?\b|\breserves?\b|\breservas?\b)", re.I)
 CHROME_ERRORS = ("ERR_CONNECTION", "DNS", "Access Denied", "Forbidden", "403", "CAPTCHA", "captcha")
 STOP_TOKENS = {
     "fc", "cf", "sc", "ac", "cd", "sd", "afc", "club", "football", "soccer",
@@ -44,20 +45,118 @@ STOP_TOKENS = {
     "f", "w", "women", "femenino", "femenil", "fem", "femenina",
 }
 NATIONAL_TEAM_TRANSLATIONS = {
-    "finland": ("finlandia",),
-    "turkiye": ("turquia", "turkey"),
-    "turkey": ("turquia", "turkiye"),
+    "albania": ("albania",),
+    "algeria": ("argelia",),
+    "andorra": ("andorra",),
+    "armenia": ("armenia",),
+    "australia": ("australia",),
+    "austria": ("austria",),
+    "azerbaijan": ("azerbaiyan",),
+    "belarus": ("bielorrusia",),
     "belgium": ("belgica",),
-    "italy": ("italia",),
-    "france": ("francia",),
-    "czechia": ("chequia", "republica checa"),
-    "spain": ("espana",),
-    "england": ("inglaterra",),
+    "bosnia herzegovina": ("bosnia y herzegovina", "bosnia-herzegovina"),
+    "brazil": ("brasil",),
+    "bulgaria": ("bulgaria",),
+    "cameroon": ("camerun",),
+    "canada": ("canada",),
+    "cape verde": ("cabo verde",),
+    "chile": ("chile",),
+    "china": ("china",),
+    "colombia": ("colombia",),
+    "costa rica": ("costa rica",),
     "croatia": ("croacia",),
     "cyprus": ("chipre",),
-    "belarus": ("bielorrusia",),
+    "czech republic": ("chequia", "republica checa", "czechia"),
+    "czechia": ("chequia", "republica checa", "czech republic"),
+    "denmark": ("dinamarca",),
+    "ecuador": ("ecuador",),
+    "egypt": ("egipto",),
+    "england": ("inglaterra",),
+    "estonia": ("estonia",),
+    "faroe islands": ("islas feroe",),
+    "finland": ("finlandia",),
+    "france": ("francia",),
+    "fyr macedonia": ("macedonia del norte", "north macedonia"),
+    "georgia": ("georgia",),
+    "germany": ("alemania",),
+    "ghana": ("ghana",),
+    "gibraltar": ("gibraltar",),
+    "greece": ("grecia",),
+    "hungary": ("hungria",),
+    "iceland": ("islandia",),
+    "iran": ("iran",),
+    "israel": ("israel",),
+    "italy": ("italia",),
+    "ivory coast": ("costa de marfil", "cote d ivoire"),
+    "japan": ("japon",),
+    "kazakhstan": ("kazajistan", "kazajstan"),
+    "korea republic": ("corea del sur", "south korea"),
+    "kosovo": ("kosovo",),
     "latvia": ("letonia",),
+    "liechtenstein": ("liechtenstein",),
+    "lithuania": ("lituania",),
+    "luxembourg": ("luxemburgo",),
+    "malta": ("malta",),
+    "mexico": ("mexico", "mejico"),
+    "moldova": ("moldavia",),
+    "montenegro": ("montenegro",),
+    "morocco": ("marruecos",),
+    "netherlands": ("paises bajos", "holanda"),
+    "new zealand": ("nueva zelanda",),
+    "north macedonia": ("macedonia del norte", "fyr macedonia"),
+    "northern ireland": ("irlanda del norte",),
+    "norway": ("noruega",),
+    "panama": ("panama",),
+    "paraguay": ("paraguay",),
+    "peru": ("peru",),
+    "poland": ("polonia",),
+    "portugal": ("portugal",),
+    "qatar": ("catar", "qatar"),
+    "rep of ireland": ("irlanda", "republica de irlanda", "republic of ireland"),
+    "republic of ireland": ("irlanda", "republica de irlanda", "rep of ireland"),
+    "romania": ("rumania",),
+    "russia": ("rusia",),
+    "san marino": ("san marino",),
+    "saudi arabia": ("arabia saudi", "arabia saudita"),
+    "scotland": ("escocia",),
+    "senegal": ("senegal",),
+    "serbia": ("serbia",),
+    "slovakia": ("eslovaquia",),
+    "slovenia": ("eslovenia",),
+    "south africa": ("sudafrica",),
+    "south korea": ("corea del sur", "korea republic"),
+    "spain": ("espana",),
+    "sweden": ("suecia",),
+    "switzerland": ("suiza",),
+    "tunisia": ("tunez",),
+    "turkey": ("turquia", "turkiye"),
+    "turkiye": ("turquia", "turkey"),
+    "uae": ("emiratos arabes unidos", "united arab emirates"),
+    "ukraine": ("ucrania",),
+    "united arab emirates": ("emiratos arabes unidos", "uae"),
+    "united states": ("estados unidos", "usa", "ee uu"),
+    "uruguay": ("uruguay",),
+    "usa": ("estados unidos", "united states"),
+    "venezuela": ("venezuela",),
+    "wales": ("gales",),
 }
+
+_NATIONAL_TEAM_EQUIVALENCE: dict[str, set[str]] = {}
+for _en_name, _es_variants in NATIONAL_TEAM_TRANSLATIONS.items():
+    _group = {_en_name, *_es_variants}
+    for _member in _group:
+        _NATIONAL_TEAM_EQUIVALENCE.setdefault(_member, set()).update(_group)
+
+_INSTITUTIONAL_CLUB_PREFIXES = (
+    ("club deportivo ", "cd "),
+    ("c d ", "cd "),
+    ("club atletico ", "ca "),
+    ("c a ", "ca "),
+    ("sociedad deportiva ", "sd "),
+    ("union deportiva ", "ud "),
+    ("real club deportivo ", "rcd "),
+    ("real club ", "rc "),
+)
 INSTITUTIONAL_CANDIDATE_ALIASES = {
     "sl benfica w": ("benfica f",),
     "austria wien w": ("fk austria viena f",),
@@ -66,6 +165,97 @@ SENIOR_COMPETITION_IDENTITIES = {
     5: "uefa nations league",
     143: "copa del rey",
 }
+
+
+def verified_candidate_aliases() -> tuple[tuple[str, tuple[str, ...]], ...]:
+    """Load auditable aliases used only to retrieve candidates.
+
+    A registry entry never bypasses order, competition, category or time gates.
+    Invalid or unreviewed entries fail closed instead of becoming global aliases.
+    """
+    path = Path(__file__).resolve().parent / "config" / "bwin_team_aliases.json"
+    try:
+        document = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return ()
+    if (document.get("schema_version") != "1.0-bwin-team-alias-registry" or
+            document.get("policy") != "CANDIDATE_RETRIEVAL_ONLY_NEVER_IDENTITY_CONFIRMATION"):
+        return ()
+    output = []
+    for row in document.get("aliases", []):
+        variants = row.get("variants")
+        if (row.get("status") not in {"VERIFIED_NOMINAL", "VERIFIED_REPOSITORY"} or
+                not row.get("canonical") or not row.get("evidence") or not isinstance(variants, list)):
+            continue
+        output.append((str(row["canonical"]), tuple(str(value) for value in variants if value)))
+    return tuple(output)
+
+
+VERIFIED_CANDIDATE_ALIASES = verified_candidate_aliases()
+
+
+def verified_identity_candidates(path: Path, fixtures: list[dict]) -> tuple[dict[int, dict], dict]:
+    """Load exact frozen bindings for direct, fresh event-page reinspection."""
+    document = json.loads(Path(path).read_text(encoding="utf-8-sig"))
+    rows = document.get("fixtures")
+    if not isinstance(rows, list):
+        raise ValueError("VERIFIED_IDENTITY_CATALOG_INVALID")
+    original = (document.get("inputs") or {}).get("fixtures")
+    expected = (document.get("inputs") or {}).get("fixtures_sha256")
+    if original and expected:
+        source = Path(original)
+        if not source.is_file() or hashlib.sha256(source.read_bytes()).hexdigest() != expected:
+            raise ValueError("VERIFIED_IDENTITY_SOURCE_SHA_MISMATCH")
+    requested = {int(f["fixture_id"]): f for f in fixtures}
+    grouped: dict[int, list[dict]] = {}
+    for row in rows:
+        if row.get("fixture_id") is not None:
+            grouped.setdefault(int(row["fixture_id"]), []).append(row)
+    output = {}
+    for fid, fixture in requested.items():
+        candidates = grouped.get(fid, [])
+        if len(candidates) != 1:
+            continue
+        row = candidates[0]
+        event_id = str(row.get("event_id") or row.get("bwin_event_id") or "")
+        url = str(row.get("bwin_url") or "")
+        name = row.get("name") or {}
+        timing = row.get("time") or {}
+        category = row.get("category") or {}
+        competition = row.get("competition") or {}
+        try:
+            persisted_kickoff = datetime.fromisoformat(str(row.get("kickoff_madrid")))
+            requested_kickoff = datetime.fromisoformat(str(fixture.get("kickoff_madrid")))
+            if persisted_kickoff.utcoffset() is None or requested_kickoff.utcoffset() is None:
+                raise ValueError("KICKOFF_WITHOUT_TIMEZONE")
+            kickoff_difference = abs(persisted_kickoff.timestamp() - requested_kickoff.timestamp())
+        except (TypeError, ValueError):
+            kickoff_difference = float("inf")
+        match = EVENT_RE.search(url)
+        exact_fields = ("home_id", "away_id", "league_id", "season")
+        if (not row.get("identity_verified") or row.get("post_status") != "IDENTITY_VERIFIED_OFFLINE"
+                or not event_id.isdigit() or not match or match.group(1) != event_id
+                or any(str(row.get(k)) != str(fixture.get(k)) for k in exact_fields)
+                or kickoff_difference > 180
+                or name.get("status") != "CANDIDATE_COMPATIBLE"
+                or timing.get("status") != "MATCH"
+                or category.get("status") not in ("SENIOR_COMPETITION_CORROBORATED", "CATEGORY_CORROBORATED")
+                or competition.get("status") not in ("CORROBORATED_INSPECTION", "CORROBORATED")):
+            continue
+        frozen = next((c for c in row.get("candidates", []) if str(c.get("event_id")) == event_id), {})
+        output[fid] = {
+            "bwin_event_id": event_id,
+            "bwin_url": url,
+            "text": frozen.get("text") or f"{fixture.get('home')} {fixture.get('away')}",
+            "text_source": "PERSISTED_VERIFIED_IDENTITY_DIRECT_ROUTE",
+            "text_observed_at_utc": None,
+            "source_pages": row.get("source_pages", []),
+        }
+    audit = {"path": str(Path(path).resolve()),
+             "sha256": hashlib.sha256(Path(path).read_bytes()).hexdigest(),
+             "requested": len(requested), "usable_bindings": len(output),
+             "freshness": "IDENTITY_ONLY_REQUIRES_DIRECT_REINSPECTION"}
+    return output, audit
 
 
 def norm(s: object) -> str:
@@ -80,6 +270,17 @@ def norm(s: object) -> str:
 def team_tokens(name: str) -> list[str]:
     result = [t for t in norm(name).split() if t not in STOP_TOKENS]
     return result or norm(name).split()
+
+
+def identity_name_evidence(event_text: str, slug: str) -> str:
+    """Remove catalog clocks before comparing team names.
+
+    Otherwise a club number can accidentally match ``20`` from ``20:00`` or a
+    date, which was observed in the 100-fixture retrieval regression.
+    """
+    clean = re.sub(r"\b(?:Hoy|Mañana)\s*/\s*\d{1,2}:\d{2}\b", " ", str(event_text), flags=re.I)
+    clean = re.sub(r"\b\d{1,2}/\d{1,2}/\d{2,4}\s+\d{1,2}:\d{2}\b", " ", clean)
+    return f"{clean} {slug}"
 
 
 def _team_similarity_literal(team: str, evidence: str) -> float:
@@ -106,22 +307,128 @@ def _team_similarity_literal(team: str, evidence: str) -> float:
     return round(max(coverage * 0.83, longest * 0.75), 4)
 
 
-def team_similarity(team: str, evidence: str, *, national_context: bool = False) -> float:
-    # Exact club aliases only generate candidates; temporal/category/ID gates remain.
+def is_national_team_context(fixture: dict) -> bool:
+    """Return True only when fixture context indicates senior international teams."""
+    if NON_ADULT_RE.search(f"{fixture.get('home', '')} {fixture.get('away', '')}"):
+        return False
+    try:
+        league_id = int(fixture.get("league_id") or 0)
+    except (TypeError, ValueError):
+        league_id = 0
+    return (
+        norm(fixture.get("country")) in {"world", "mundo", "international"}
+        or "national" in norm(fixture.get("team_kind"))
+        or league_id in {5, 10}
+    )
+
+
+def team_candidate_queries(team: str, *, national_context: bool = False) -> set[str]:
+    """Return auditable retrieval variants without asserting identity.
+
+    Keeping this separate lets the offline auditor build a cheap lexical
+    shortlist before running the more expensive fuzzy comparison.  The result
+    remains candidate-only: none of these variants bypasses the independent
+    competition, category, order or time gates.
+    """
     from config.constants import TEAM_ALIASES
     query=norm(team);queries={str(team)}
-    if national_context:queries.update(NATIONAL_TEAM_TRANSLATIONS.get(query, ()))
+    if query=='atletico mg':queries.add('atletico mineiro')
+    if national_context:
+        queries.update(_NATIONAL_TEAM_EQUIVALENCE.get(query, ()))
+    else:
+        for long_prefix, short_prefix in _INSTITUTIONAL_CLUB_PREFIXES:
+            if query.startswith(long_prefix):
+                rest = query[len(long_prefix):].strip()
+                if any(len(tok) >= 4 for tok in team_tokens(rest)):
+                    queries.add(f"{short_prefix}{rest}")
     queries.update(INSTITUTIONAL_CANDIDATE_ALIASES.get(query, ()))
     for canonical,aliases in TEAM_ALIASES.items():
         variants={norm(x) for x in (canonical,*aliases)}
         if query in variants:queries.update(variants)
-    # OL Lyonnes is the women's club brand, never a global "Lyon" replacement.
+    for canonical, aliases in VERIFIED_CANDIDATE_ALIASES:
+        variants = {norm(x) for x in (canonical, *aliases)}
+        if query in variants:
+            queries.update(variants)
+    # OL Lyonnes is the women's club brand.
+    if query in {'lyon w', 'ol lyonnes w', 'ol lyonnes f'}:
+        queries.update({'lyon w', 'ol lyonnes w', 'ol lyonnes f'})
+    # Equivalencia específica verificada: Inter femenino.
+    if query in {'inter milano w', 'inter milan w', 'inter milan f'}:
+        queries.update({'inter milano w', 'inter milan w', 'inter milan f'})
+
+    return {q for q in queries if norm(q)}
+
+
+def resolve_verified_team_side(label: str, fixture: dict, extra_aliases: dict[str, tuple[str, ...]] | None = None) -> str | None:
+    """Resuelve 'home' o 'away' desde una cabecera/selección Bwin preservando categoría y evitando colisiones."""
+    raw_label = str(label or "").strip()
+    p_norm = norm(raw_label)
+    if not p_norm:
+        return None
+    observed_female = bool(FEMALE_RE.search(raw_label) or re.search(r"(?i)(?:\(f\)|\bf\b)", raw_label))
+    observed_non_adult = bool(NON_ADULT_RE.search(raw_label))
+    fixture_gender = str(fixture.get("gender") or "").upper()
+    if fixture_gender not in ("F", "M"):
+        h_a_txt = f"{fixture.get('home', '')} {fixture.get('away', '')}"
+        if FEMALE_RE.search(h_a_txt):
+            fixture_gender = "F"
+    if fixture_gender == "F" and not observed_female:
+        return None
+    if fixture_gender == "M" and observed_female:
+        return None
+
+    national_ctx = is_national_team_context(fixture)
+    category_stop = STOP_TOKENS | {"f", "w", "women", "femenina", "femenino", "frauen"}
+    p_core = [t for t in p_norm.split() if t not in category_stop]
+    p_token_set = set(p_core)
+
+    def _side_matches(side: str) -> bool:
+        base_names = [fixture.get(side), fixture.get(f"{side}_bwin")]
+        if extra_aliases and side in extra_aliases:
+            base_names.extend(extra_aliases[side])
+        expanded: set[str] = set()
+        for cname in base_names:
+            if not cname:
+                continue
+            cname_str = str(cname).strip()
+            if not cname_str:
+                continue
+            if observed_non_adult != bool(NON_ADULT_RE.search(cname_str)):
+                continue
+            c_fem = bool(FEMALE_RE.search(cname_str) or re.search(r"(?i)(?:\(f\)|\bf\b)", cname_str))
+            if observed_female != c_fem and fixture_gender != "F":
+                continue
+            expanded.add(norm(cname_str))
+            for cand in team_candidate_queries(cname_str, national_context=national_ctx):
+                if observed_non_adult == bool(NON_ADULT_RE.search(cand)):
+                    expanded.add(norm(cand))
+        for cand_norm in expanded:
+            if not cand_norm:
+                continue
+            if cand_norm == p_norm:
+                return True
+            cand_core = [t for t in cand_norm.split() if t not in category_stop]
+            if cand_core and p_core and cand_core == p_core:
+                return True
+            cand_set = set(cand_core)
+            # Evita colisiones parciales tipo "paris" vs "paris fc" o "inter" vs "inter miami".
+            if len(cand_set) >= 2 and cand_set == p_token_set:
+                return True
+        return False
+
+    hits = [s for s in ("home", "away") if _side_matches(s)]
+    return hits[0] if len(hits) == 1 else None
+
+def team_similarity(team: str, evidence: str, *, national_context: bool = False) -> float:
+    # Exact club aliases only generate candidates; temporal/category/ID gates remain.
+    queries = team_candidate_queries(team, national_context=national_context)
+    query = norm(team)
     if query in {'lyon w','ol lyonnes w','ol lyonnes f'} and re.search(r'\b(?:women|w|f)\b',norm(evidence)):
         queries.update({'lyon','ol lyonnes'})
     return max(_team_similarity_literal(q,evidence) for q in queries)
 
 
-def team_order_status(home: str, away: str, evidence: str) -> str:
+def team_order_status(home: str, away: str, evidence: str, *, national_context: bool = False) -> str:
     """Check home/away order only from observed Bwin text or URL slug."""
     observed = norm(evidence)
     h, a = norm(home), norm(away)
@@ -134,6 +441,22 @@ def team_order_status(home: str, away: str, evidence: str) -> str:
     apos = [observed.find(t) for t in at if observed.find(t) >= 0]
     if hpos and apos and min(hpos) != min(apos):
         return "HOME_AWAY_TOKEN" if min(hpos) < min(apos) else "AWAY_HOME_TOKEN_CONFLICT"
+    # Multilingual/verified aliases may have no literal token in common with
+    # the API name (Moldova/Moldavia, Türkiye/Turquía). Resolve their positions
+    # only for order corroboration; the remaining hard gates still apply.
+    def variant_position(team: str):
+        positions = []
+        for variant in team_candidate_queries(team, national_context=national_context):
+            words = team_tokens(variant)
+            if not words:
+                continue
+            word_positions = [observed.find(word) for word in words]
+            if all(position >= 0 for position in word_positions):
+                positions.append(min(word_positions))
+        return min(positions) if positions else None
+    hp, ap = variant_position(home), variant_position(away)
+    if hp is not None and ap is not None and hp != ap:
+        return "HOME_AWAY_ALIAS" if hp < ap else "AWAY_HOME_ALIAS_CONFLICT"
     return "UNKNOWN"
 
 
@@ -141,7 +464,7 @@ def category_compatibility(fixture: dict, evidence: str) -> str:
     observed_female = bool(FEMALE_RE.search(evidence) or re.search(r'(?i)(?:\(f\)|\bf\b)',evidence))
     observed_non_adult = bool(NON_ADULT_RE.search(evidence))
     expected = str(fixture.get("gender") or "UNKNOWN").upper()
-    if observed_non_adult and fixture.get("category_status") in {"ELIGIBLE", "ADULT", None}:
+    if observed_non_adult:
         return "NON_ADULT_CONFLICT"
     if expected == "M" and observed_female:
         return "GENDER_CONFLICT"
@@ -159,22 +482,35 @@ def senior_category_corroborated(fixture: dict, candidate_category: str,
     """Close UNKNOWN only from a known senior competition corroborated by Bwin."""
     try:league_id=int(fixture.get('league_id'))
     except (TypeError,ValueError):return False
-    expected=SENIOR_COMPETITION_IDENTITIES.get(league_id)
-    league=norm(fixture.get('league'))
-    generic_senior=bool(league and not FEMALE_RE.search(str(fixture.get('league'))) and not NON_ADULT_RE.search(str(fixture.get('league'))))
+    from filter_major_leagues import explicit_competition_category
+    explicit=explicit_competition_category(fixture)
+    provenance=fixture.get('category_provenance') or {}
+    positive_category=bool(explicit and fixture.get('gender')==explicit['gender']=='M'
+        and str(fixture.get('category_level') or '').upper()=='SENIOR'
+        and str(fixture.get('category_evidence_status') or '').upper()=='CORROBORATED'
+        and provenance==explicit['category_provenance'])
     return bool(candidate_category=='CATEGORY_UNCONFIRMED'
         and page_category in (None,'CATEGORY_UNCONFIRMED','COMPATIBLE_OR_UNKNOWN')
         and str(fixture.get('category_status') or '').upper() in {'ELIGIBLE','ADULT'}
-        and ((expected and league==expected) or generic_senior)
+        and positive_category
         and isinstance(competition_score,(int,float)) and not isinstance(competition_score,bool)
         and competition_score>=.95)
 
 
-def competition_similarity(competition: str, evidence: str) -> float:
+def competition_similarity(competition: str, evidence: str, *, league_id=None,
+                           country: str | None = None, season=None) -> float:
     """Supporting competition evidence; missing evidence never becomes a match."""
     expected, observed = norm(competition), norm(evidence)
     if not expected or not observed:
         return 0.0
+    # API 10 identifies international friendlies, not club friendlies (667).
+    # This is competition evidence only; it supplies no gender/age evidence.
+    if league_id==10 and norm(country) in {'world','international','mundo'} and expected=='friendlies':
+        return 1.0 if re.search(r'(?:\bamistosos\s+int(?:ernacional(?:es)?)?\b|\binternational\s+friendl(?:y|ies)\b|\bfriendlies\s+international\b)',observed) else 0.0
+    from filter_major_leagues import verified_bwin_competition_alias
+    if verified_bwin_competition_alias({'league_id':league_id,'league':competition,
+            'country':country,'season':season},evidence):
+        return 1.0
     if expected == 'wsl cup':
         return 1.0 if re.search(r'\bfa league cup f\b',observed) else 0.0
     if expected == 'uefa europa cup women':
@@ -336,6 +672,17 @@ def read_candidates(path: Path, fixture_ids: list[int], top: int, include_past: 
         raise ValueError("El archivo no contiene matches[]")
     gathered = []
     for item in data:
+        # Raw discovery snapshots may predate category enrichment. Reuse the
+        # canonical classifier here without rewriting the source snapshot.
+        from filter_major_leagues import explicit_competition_category, gender_for, matching_eligibility
+        item=dict(item)
+        explicit=explicit_competition_category(item)
+        if explicit and str(item.get('gender') or 'UNKNOWN').upper() in {'UNKNOWN',explicit['gender']}:
+            item.update(explicit)
+        from competition_registry import category
+        item.update(category(item))
+        if not item.get('gender') or item.get('gender')=='UNKNOWN':
+            item['gender']=gender_for(item)
         try:
             fid = int(item.get("fixture_id") or item.get("fixture_id_api_football"))
         except (TypeError, ValueError):
@@ -352,10 +699,22 @@ def read_candidates(path: Path, fixture_ids: list[int], top: int, include_past: 
             "fixture_id": fid, "home": item.get("home", ""), "away": item.get("away", ""),
             "league": item.get("league") or item.get("competition") or "",
             "league_id": item.get("league_id"), "season": item.get("season"),
+            "league_type":item.get('league_type'),
             "round": item.get("round"), "home_id": item.get("home_id"),
             "away_id": item.get("away_id"), "kickoff_utc": item.get("kickoff_utc"),
             "country": item.get("country", ""), "gender": item.get("gender"),
             "category_status": item.get("category_status") or item.get("filter_status"),
+            "category_evidence_status": item.get("category_evidence_status"),
+            "category_level": item.get("category_level"),
+            "category_provenance": item.get("category_provenance"),
+            "competition_identity_status":item.get('competition_identity_status'),
+            "competition_eligibility":item.get('competition_eligibility'),
+            "competition_eligibility_reason":item.get('competition_eligibility_reason'),
+            "participant_eligibility":item.get('participant_eligibility'),
+            "participant_eligibility_reason":item.get('participant_eligibility_reason'),
+            "filter_status":item.get('filter_status'),"filter_reason":item.get('filter_reason'),
+            "national_team_evidence":item.get('national_team_evidence'),
+            "cup_eligibility_evidence":item.get('cup_eligibility_evidence'),
             "kickoff_madrid": kickoff.isoformat() if kickoff else None,
             "research_priority_score": score,
             "details_checked": item.get("details_checked", False),
@@ -389,6 +748,15 @@ def read_candidates(path: Path, fixture_ids: list[int], top: int, include_past: 
                      if top == 0 else upcoming[:top])
     ready, skipped = [], []
     for i in requested:
+        eligibility,reason=matching_eligibility(i)
+        resource_policy=('FULL_DISCOVERY' if eligibility=='ELIGIBLE' else
+                         'FULL_DISCOVERY_CLASSIFICATION_WARNING' if eligibility=='PENDING_CLASSIFICATION' else
+                         'NO_SEARCH')
+        i.update(matching_eligibility=eligibility,matching_eligibility_reason=reason,
+                 discovery_resource_policy=resource_policy)
+        if eligibility=='EXCLUDED':
+            skipped.append({**i,'status':'SKIPPED_CATEGORY_EXCLUDED','bwin_event_id':None})
+            continue
         kickoff = local_kickoff(i["kickoff_madrid"])
         if not include_past and kickoff and kickoff <= now:
             skipped.append({**i, "status": "SKIPPED_ALREADY_KICKED_OFF", "bwin_event_id": None})
@@ -551,6 +919,15 @@ def is_country_page_url(url: str, base_url: str) -> bool:
     return bool(re.fullmatch(r"/es/sports/fútbol-4/apuestas/[^/]+-\d+", path, flags=re.I))
 
 
+def is_betting_navigation_url(url: str, base_url: str) -> bool:
+    """Accept real country or nested competition routes from Bwin's DOM."""
+    parsed=urlparse(url)
+    if parsed.hostname!=urlparse(base_url).hostname:return False
+    path=unquote(parsed.path).rstrip('/')
+    segment=r'[^/]+-\d+(?::\d+)?'
+    return bool(re.fullmatch(rf'/es/sports/fútbol-4/apuestas/{segment}(?:/{segment})?',path,re.I))
+
+
 def parse_country_nav(anchors: list[dict], base_url: str) -> dict[str, str]:
     """Extract country URLs from actual DOM <a href>, never construct country IDs.
 
@@ -560,7 +937,7 @@ def parse_country_nav(anchors: list[dict], base_url: str) -> dict[str, str]:
     found = {}
     for item in anchors:
         url = str(item.get("url") or "")
-        if not is_country_page_url(url, base_url):
+        if not is_betting_navigation_url(url, base_url):
             continue
         country_slug = unquote(urlparse(url).path).rstrip('/').rsplit('/', 1)[-1]
         country_slug = re.sub(r"-\d+$", "", country_slug)
@@ -569,7 +946,10 @@ def parse_country_nav(anchors: list[dict], base_url: str) -> dict[str, str]:
         from_text = re.sub(r"\s+\d+$", "", label.removeprefix("todos ")).strip()
         # URL is a real anchor.  When there is no recognizable country label,
         # use the slug extracted FROM that real URL, not a guessed URL.
-        country = from_text if label.startswith('todos ') and from_text else country_from_path
+        nested='/apuestas/' in unquote(urlparse(url).path) and len(
+            unquote(urlparse(url).path).split('/apuestas/',1)[1].split('/'))>1
+        country = (label if nested and label else
+                   from_text if label.startswith('todos ') and from_text else country_from_path)
         if country:
             found.setdefault(country, url)
     return found
@@ -582,6 +962,32 @@ VERIFIED_PUBLIC_COUNTRY_PAGES = {
     'estados unidos': 'https://www.bwin.es/es/sports/f%C3%BAtbol-4/apuestas/estados-unidos-39',
     'canada': 'https://www.bwin.es/es/sports/f%C3%BAtbol-4/apuestas/canad%C3%A1-94',
 }
+
+# Public competition routes observed and verified previously. They are a
+# fallback route only: every visited page is still parsed and every event must
+# pass team, order, competition, category and time gates independently.
+VERIFIED_PUBLIC_COMPETITION_PAGES = {
+    5: 'https://www.bwin.es/es/sports/f%C3%BAtbol-4/apuestas/europa-7/uefa-nations-league-0:4',
+}
+
+
+def competition_navigation_url(fixture: dict, navigation: dict[str,str], base_url: str) -> tuple[str|None,str]:
+    """Resolve a real competition link, anchored by API league identity."""
+    from competition_registry import lookup
+    if fixture.get('league_id') != 5 and lookup(fixture) is None:
+        return None,'NO_CURATED_COMPETITION_ROUTE'
+    scored=[]
+    for label,url in navigation.items():
+        score=competition_similarity(fixture.get('league',''),label,league_id=fixture.get('league_id'),
+            country=fixture.get('country'),season=fixture.get('season'))
+        if score>=.95:scored.append((score,url,label))
+    scored.sort(reverse=True)
+    if scored and (len(scored)==1 or scored[0][0]-scored[1][0]>=.05 or scored[0][1]==scored[1][1]):
+        return scored[0][1],'BWIN_DOM_COMPETITION_LINK'
+    fallback=VERIFIED_PUBLIC_COMPETITION_PAGES.get(fixture.get('league_id'))
+    if fallback and urlparse(fallback).hostname==urlparse(base_url).hostname:
+        return fallback,'VERIFIED_PUBLIC_COMPETITION_FALLBACK'
+    return None,'COMPETITION_ROUTE_UNRESOLVED'
 
 
 def read_country_navigation(browser, base_url: str, nav_page_url: str, timeout: int) -> tuple[dict[str, str], dict]:
@@ -603,7 +1009,7 @@ def read_country_navigation(browser, base_url: str, nav_page_url: str, timeout: 
         for i in range(11):
             count_before = len(all_anchors)
             for a in page.evaluate(js):
-                if is_country_page_url(str(a.get('url') or ''), base_url):
+                if is_betting_navigation_url(str(a.get('url') or ''), base_url):
                     all_anchors[str(a['url'])] = a
             stable = stable + 1 if len(all_anchors) == count_before else 0
             if stable >= 3 or i >= 10:
@@ -660,7 +1066,13 @@ def extend_catalog_for_missing(browser, base_url: str, catalog: list[dict],
     First read public Bwin competition navigation; then use only explicitly
     verified known public country URLs if the dynamic navigation is incomplete.
     """
-    missing = [f for f in selected if not match_catalog(f, catalog)]
+    started=time.perf_counter()
+    # Classification is not event identity. Unknown tiers may create bounded
+    # navigation demand; only positively excluded fixtures are suppressed.
+    from filter_major_leagues import matching_eligibility
+    missing = [f for f in selected
+               if (f.get('matching_eligibility') or matching_eligibility(f)[0])!='EXCLUDED'
+               and not match_catalog(f, catalog)]
     if not missing or max_countries <= 0:
         return catalog, [], {"requested_countries": [], "country_urls_found": 0,
                              "country_url_sources": {}, "country_pages": {}}
@@ -668,7 +1080,6 @@ def extend_catalog_for_missing(browser, base_url: str, catalog: list[dict],
     for fixture in missing:
         for label in (country_label(fixture.get('country','')),norm(fixture.get('league',''))):
             if label and label not in {'world','mundo','international'} and label not in wanted:wanted.append(label)
-    wanted=wanted[:max_countries]
     nav = {}
     diagnostics = []
     for path in ('/es/sports/f%C3%BAtbol-4/apuestas/competiciones',
@@ -679,6 +1090,25 @@ def extend_catalog_for_missing(browser, base_url: str, catalog: list[dict],
         diagnostics.append(diag)
         for k, url in links.items():
             nav.setdefault(k, url)
+    competition_pages={};competition_sources={}
+    for fixture in missing:
+        url,source=competition_navigation_url(fixture,nav,base_url)
+        if url:
+            competition_pages[str(fixture.get('league_id'))]=url
+            competition_sources[str(fixture.get('league_id'))]=source
+    competition_urls=list(dict.fromkeys(competition_pages.values()))[:max_countries]
+    if competition_urls:
+        additions,page_diags=fetch_catalog(browser,base_url,competition_urls,scrolls,timeout)
+        for d in page_diags:d['kind']='TARGETED_COMPETITION_CATALOG'
+        diagnostics.extend(page_diags);catalog=merge_catalog_events(catalog,additions)
+        missing=[f for f in missing if not match_catalog(f,catalog)]
+    # International competitions are resolved by competition, never by the
+    # synthetic API country "World" or arbitrary national menu pages.
+    wanted=[]
+    for fixture in missing:
+        if fixture.get('league_id')==5:continue
+        for label in (country_label(fixture.get('country','')),norm(fixture.get('league',''))):
+            if label and label not in {'world','mundo','international'} and label not in wanted:wanted.append(label)
     resolved, sources = {}, {}
     for k in wanted:
         exact=nav.get(k)
@@ -693,7 +1123,7 @@ def extend_catalog_for_missing(browser, base_url: str, catalog: list[dict],
                 resolved[k], sources[k] = fallback, 'VERIFIED_PUBLIC_PAGE_FALLBACK'
             else:
                 resolved[k], sources[k] = None, 'UNRESOLVED'
-    urls = list(dict.fromkeys(u for u in resolved.values() if u))
+    urls = list(dict.fromkeys(u for u in resolved.values() if u and u not in competition_urls))[:max(0,max_countries-len(competition_urls))]
     if urls:
         extra_catalog, extra_diagnostics = fetch_catalog(browser, base_url, urls, scrolls, timeout)
         for d in extra_diagnostics:
@@ -701,39 +1131,157 @@ def extend_catalog_for_missing(browser, base_url: str, catalog: list[dict],
         diagnostics.extend(extra_diagnostics)
         catalog=merge_catalog_events(catalog,extra_catalog)
     return catalog, diagnostics, {
-        "requested_countries": [country_label(f.get('country','')) for f in missing],
+        "requested_countries": [country_label(f.get('country','')) for f in missing if f.get('league_id')!=5],
         "requested_contexts": wanted, "country_urls_found": len(urls),
         "country_pages": resolved, "country_url_sources": sources,
+        "competition_pages":competition_pages,"competition_url_sources":competition_sources,
+        "navigation_urls_deduplicated":len(competition_pages)+sum(bool(u) for u in resolved.values())-len(set(competition_pages.values())|set(u for u in resolved.values() if u)),
+        "unresolved_contexts":[k for k,v in resolved.items() if not v],
+        "deferred_navigation_urls":[u for u in dict.fromkeys(resolved.values()) if u and u not in urls and u not in competition_urls],
+        "duration_seconds":round(time.perf_counter()-started,6),
     }
 
 
 def match_catalog(fixture: dict, catalog: list[dict]) -> list[dict]:
+    from filter_major_leagues import matching_eligibility
+    if matching_eligibility(fixture)[0]=='EXCLUDED':return []
     candidates = []
-    national_context = (norm(fixture.get('country')) in {'world','mundo','international'}
-                        and not NON_ADULT_RE.search(str(fixture.get('home',''))+' '+str(fixture.get('away',''))))
+    national_context = is_national_team_context(fixture)
     for e in catalog:
         if LIVE_RE.search(e.get("text", "")):
             continue
         parsed = unquote(urlparse(e["bwin_url"]).path)
         slug = parsed.split("/eventos/")[-1].rsplit(":", 1)[0]
+        # ``-2`` is Bwin's event-route marker, not part of either team name.
+        # Keeping it polluted numeric club names (e.g. synthetic/academy names)
+        # and could retrieve unrelated events merely because both contained 2.
+        slug = re.sub(r"-2$", "", slug)
         evidence = f'{e["text"]} {slug}'
-        home = team_similarity(fixture["home"], evidence,national_context=national_context)
-        away = team_similarity(fixture["away"], evidence,national_context=national_context)
+        name_evidence = identity_name_evidence(e.get("text", ""), slug)
+        home = team_similarity(fixture["home"], name_evidence,national_context=national_context)
+        away = team_similarity(fixture["away"], name_evidence,national_context=national_context)
         if min(home, away) < 0.82:
             continue
-        order_status = team_order_status(fixture["home"], fixture["away"], evidence)
+        order_status = team_order_status(fixture["home"], fixture["away"], name_evidence,
+                                         national_context=national_context)
         category_status = category_compatibility(fixture, evidence)
-        if order_status in {"AWAY_HOME_CONFLICT", "AWAY_HOME_TOKEN_CONFLICT"}:
+        if order_status in {"AWAY_HOME_CONFLICT", "AWAY_HOME_TOKEN_CONFLICT", "AWAY_HOME_ALIAS_CONFLICT"}:
             continue
         if category_status in {"GENDER_CONFLICT", "NON_ADULT_CONFLICT"}:
             continue
         score = round((home + away) / 2, 4)
-        competition_score = competition_similarity(str(fixture.get("league") or ""), evidence) if fixture.get("league") else None
+        competition_score = competition_similarity(str(fixture.get("league") or ""), evidence,
+            league_id=fixture.get('league_id'),country=fixture.get('country'),season=fixture.get('season')) if fixture.get("league") else None
         candidates.append({**e, "name_score": score, "home_similarity": home, "away_similarity": away,
                            "team_order_status": order_status,
                            "category_compatibility": category_status,
                            "competition_similarity": competition_score})
     return sorted(candidates, key=lambda i: i["name_score"], reverse=True)
+
+
+def candidate_possibilities(fixture: dict, catalog: list[dict], direct_bindings: dict[int, dict]) -> list[dict]:
+    """Apply the normal semantic gates to a persisted direct route as well."""
+    binding = direct_bindings.get(int(fixture['fixture_id']))
+    return match_catalog(fixture, [binding] if binding else catalog)
+
+
+def load_local_catalog_snapshots(paths: list[Path]) -> list[dict]:
+    """Read frozen catalogs without opening Bwin; later files win by Event ID."""
+    merged={}
+    for path in paths:
+        document=json.loads(Path(path).read_text(encoding='utf-8-sig'))
+        if isinstance(document,list):rows=document
+        elif isinstance(document,dict):rows=document.get('catalog_observed',document.get('events'))
+        else:rows=None
+        if not isinstance(rows,list):raise ValueError(f'CATALOG_SNAPSHOT_INVALID:{path}')
+        for row in rows:
+            event_id=str(row.get('bwin_event_id') or row.get('event_id') or '')
+            if not event_id.isdigit() or not row.get('bwin_url'):continue
+            merged[event_id]={**row,'bwin_event_id':event_id}
+    return list(merged.values())
+
+
+def pending_local_result(fixture: dict, possible: list[dict]) -> dict:
+    """Retain local evidence for a pending fixture without inspection/navigation."""
+    out={**fixture,'status':'NOT_SEARCHED_PENDING_CLASSIFICATION','identity_status':'NOT_VERIFIED',
+         'bwin_event_id':None,'bwin_url':None,'candidates_found':len(possible),'alternatives':[],
+         'markets':None,'prematch_authorization':'NOT_GRANTED','actionable_bet':False,
+         'inspection':None,'discovery_diagnostic':'PENDING_CLASSIFICATION_LOCAL_CATALOG_ONLY'}
+    if not possible:return out
+    out['alternatives']=[{'event_id':row['bwin_event_id'],'url':row['bwin_url'],
+                          'score':row['name_score'],'text':row.get('text','')[:160]}
+                         for row in possible[:5]]
+    if len(possible)>1 and possible[0]['name_score']-possible[1]['name_score']<.05:
+        out['status']='PENDING_CLASSIFICATION_AMBIGUOUS_LOCAL_CANDIDATES'
+        return out
+    winner=possible[0]
+    if winner['name_score']<.94:
+        out['status']='PENDING_CLASSIFICATION_LOW_CONFIDENCE_LOCAL_CANDIDATE'
+        return out
+    out.update(status='EVENT_VISIBLE_PENDING_CLASSIFICATION',
+               bwin_event_id=winner['bwin_event_id'],bwin_url=winner['bwin_url'],
+               name_match_score=winner['name_score'],team_order_status=winner.get('team_order_status'),
+               category_compatibility=winner.get('category_compatibility'),
+               competition_similarity=winner.get('competition_similarity'),
+               event_identity_status='PROVISIONAL_COMPATIBLE',
+               category_corroboration_status='PENDING',
+               discovery_diagnostic='EVENT_MATCHED_IN_LOCAL_CATALOG_INSPECTION_DEFERRED')
+    return out
+
+
+def visible_without_matching(fixture: dict, catalog: list[dict]) -> list[dict]:
+    """Diagnostic shortlist only; it never supplies a candidate identity."""
+    national_context = is_national_team_context(fixture)
+    rows=[];fixture_start=local_kickoff(fixture.get('kickoff_madrid'))
+    for event in catalog:
+        if LIVE_RE.search(str(event.get('text') or '')):continue
+        parsed=unquote(urlparse(event.get('bwin_url','')).path)
+        slug=re.sub(r'-2$','',parsed.split('/eventos/')[-1].rsplit(':',1)[0])
+        evidence=identity_name_evidence(event.get('text',''),slug)
+        home=team_similarity(fixture.get('home',''),evidence,national_context=national_context)
+        away=team_similarity(fixture.get('away',''),evidence,national_context=national_context)
+        if min(home,away)<.60 or (home+away)/2<.80:continue
+        order=team_order_status(fixture.get('home',''),fixture.get('away',''),evidence,
+                                national_context=national_context)
+        category=category_compatibility(fixture,evidence)
+        if order.startswith('AWAY_HOME') or category in {'GENDER_CONFLICT','NON_ADULT_CONFLICT'}:continue
+        event_start=catalog_relative_kickoff(event)
+        difference=(abs((fixture_start-event_start).total_seconds())/60
+                    if fixture_start is not None and event_start is not None else None)
+        if difference is not None and difference>15:continue
+        rows.append({'event_id':event.get('bwin_event_id'),'url':event.get('bwin_url'),
+                     'home_similarity':home,'away_similarity':away,
+                     'average_similarity':round((home+away)/2,4),'team_order_status':order,
+                     'kickoff_difference_minutes':round(difference,2) if difference is not None else None})
+    return sorted(rows,key=lambda row:row['average_similarity'],reverse=True)[:5]
+
+
+def coverage_for_fixture(fixture: dict, pages: list[dict], extension_info: dict,
+                         *, candidate_visible: bool, unmatched_visible: list[dict] | None = None) -> dict:
+    """Fixture-scoped coverage evidence; MAX_SCROLLS is always partial."""
+    if candidate_visible:
+        return {'status':'EVENT_VISIBLE_IN_LOCAL_CATALOG','pages':[],'exhaustive':False}
+    if unmatched_visible:
+        return {'status':'EVENT_VISIBLE_WITHOUT_MATCHING','pages':[],'exhaustive':False,
+                'unmatched_visible_events':unmatched_visible}
+    country=country_label(fixture.get('country',''))
+    league_id=str(fixture.get('league_id'))
+    urls=[]
+    competition_url=extension_info.get('competition_pages',{}).get(league_id)
+    country_url=extension_info.get('country_pages',{}).get(country)
+    for value in (competition_url,country_url):
+        if value and value not in urls:urls.append(value)
+    unresolved=(country in extension_info.get('unresolved_contexts',[]) and not urls)
+    scoped=[row for row in pages if row.get('catalog_page') in urls]
+    terminal={'STABLE','NO_NEW_EVENTS','AT_BOTTOM','EXHAUSTED','STABLE_AT_BOTTOM'}
+    exhaustive=bool(scoped and all(row.get('status')=='OK' and
+        (row.get('collection_trace') or {}).get('termination') in terminal for row in scoped))
+    if unresolved:status='NAVIGATION_UNRESOLVED'
+    elif exhaustive:status='EVENT_NOT_OBSERVED_IN_COMPLETE_SCOPE'
+    else:status='CATALOG_PARTIAL'
+    return {'status':status,'pages':[row.get('catalog_page') for row in scoped],
+            'page_terminations':[(row.get('collection_trace') or {}).get('termination') for row in scoped],
+            'exhaustive':exhaustive}
 
 
 # Market headings are *provisional indicators*, not verified selectable bets.
@@ -765,17 +1313,38 @@ def market_indicators(body_text: str) -> dict:
     return found
 
 
-def inspect_event(browser, result: dict, fixture: dict, navigation_timeout: int) -> dict:
+def inspect_event(browser, result: dict, fixture: dict, navigation_timeout: int,
+                  load_method: str = 'DOMCONTENTLOADED') -> dict:
+    started=time.perf_counter()
     page = browser.new_page(locale="es-ES", timezone_id="Europe/Madrid", viewport={"width": 1440, "height": 900})
     observation = {"status": "NOT_INSPECTED", "page_title": None, "event_id_from_url": None,
                    "event_start_machine_readable": None, "kickoff_difference_minutes": None,
                    "market_headings": {}, "market_heading_families": 0,
                    "is_live": None, "identity_status": "NOT_VERIFIED", "time_evidence_type": "NONE",
-                   "competition_match_score": None}
+                   "competition_match_score": None,'load_method':load_method}
     try:
         capture_started = datetime.now(timezone.utc).isoformat()
-        response = page.goto(result["bwin_url"], wait_until="domcontentloaded", timeout=navigation_timeout)
-        page.wait_for_timeout(1700)
+        wait_until='commit' if load_method=='COMMIT_THEN_VALIDATE' else 'domcontentloaded'
+        method_timeout=min(navigation_timeout,6000) if load_method=='COMMIT_THEN_VALIDATE' else navigation_timeout
+        navigation_error=None
+        try:
+            response = page.goto(result["bwin_url"], wait_until=wait_until, timeout=method_timeout)
+        except Exception as exc:
+            if 'Timeout' not in type(exc).__name__:raise
+            navigation_error=exc
+            observation['navigation_warning']=str(exc)[:300]
+            # Hydrated DOM may already exist after a navigation timeout.
+            # All ID/title/clock/category gates below still apply.
+            if extract_event_id(page.url)!=result['bwin_event_id']:raise
+            response=None
+        # Do not immediately discard a target URL whose DOM is still hydrating.
+        # This is recovery on the same navigation, not an identical second goto.
+        for _ in range(8):
+            if norm(page.title()) not in ('','bwin'):break
+            page.wait_for_timeout(350)
+        if navigation_error is not None and norm(page.title()) in ('','bwin'):
+            raise navigation_error
+        page.wait_for_timeout(700)
         if response and response.status >= 400:
             raise RuntimeError(f"HTTP {response.status}")
         observation["status"] = "OPENED"
@@ -807,7 +1376,8 @@ def inspect_event(browser, result: dict, fixture: dict, navigation_timeout: int)
         observation["market_heading_families"] = sum(x["status"].startswith("HEADING_")
                                                      for x in observation["market_headings"].values())
         if fixture.get("league"):
-            observation["competition_match_score"] = competition_similarity(fixture["league"], body)
+            observation["competition_match_score"] = competition_similarity(fixture["league"], body,
+                league_id=fixture.get('league_id'),country=fixture.get('country'),season=fixture.get('season'))
         # The global header often advertises 'Live'. Only inspect close to event header.
         # The event page can display OTHER ongoing fixtures in sidebars.
         # Never infer the current event is live from global body text.
@@ -857,12 +1427,13 @@ def inspect_event(browser, result: dict, fixture: dict, navigation_timeout: int)
         observation["status"] = "ERROR"
         observation["error"] = f"{type(exc).__name__}: {exc}"[:500]
     finally:
+        observation['duration_seconds']=round(time.perf_counter()-started,6)
         page.close()
     return observation
 
 
 def summarize(fixture: dict, possible: list[dict], browser, timeout: int, inspect: bool,
-              inspection_retries: int = 0) -> dict:
+              inspection_retries: int = 0, inspection_control: dict | None = None) -> dict:
     out = {**fixture, "status": "NOT_FOUND_IN_SCANNED_PAGES", "bwin_event_id": None,
            "bwin_url": None, "candidates_found": len(possible), "alternatives": [],
            "identity_status": "NOT_VERIFIED", "markets": None}
@@ -884,36 +1455,82 @@ def summarize(fixture: dict, possible: list[dict], browser, timeout: int, inspec
                 "category_compatibility": winner.get("category_compatibility"),
                 "competition_similarity": winner.get("competition_similarity")})
     if inspect:
+        control=inspection_control if inspection_control is not None else {}
+        if control.get('open'):
+            control['deferred_since_open']=int(control.get('deferred_since_open',0))+1
+            probe_interval=int(control.get('probe_interval',20))
+            if control['deferred_since_open']>=probe_interval:
+                control.update(open=False,consecutive_timeouts=0,deferred_since_open=0)
+            else:
+                observed={'status':'ERROR','error':'INSPECTION_CIRCUIT_OPEN',
+                          'identity_status':'NOT_VERIFIED','market_headings':{},
+                          'load_method':'CIRCUIT_OPEN','duration_seconds':0.0,'attempts':[]}
+                out['inspection']=observed;out['identity_status']='NOT_VERIFIED'
+                out['status']='EVENT_REQUIRES_REVIEW';out['markets']={}
+                out['discovery_diagnostic']='INSPECTION_DEFERRED_CIRCUIT_OPEN'
+                out.update(event_identity_status='PENDING_OR_CONFLICT',category_corroboration_status='PENDING',
+                           prematch_authorization='NOT_GRANTED',actionable_bet=False)
+                return out
         attempts=[]
         for attempt in range(inspection_retries+1):
-            observed = inspect_event(browser, winner, fixture, timeout)
-            attempts.append({'attempt':attempt+1,'status':observed.get('status'),'error':observed.get('error')})
+            method='DOMCONTENTLOADED' if attempt==0 else 'COMMIT_THEN_VALIDATE'
+            observed = inspect_event(browser, winner, fixture, timeout,method)
+            attempts.append({'attempt':attempt+1,'method':method,'status':observed.get('status'),
+                             'duration_seconds':observed.get('duration_seconds'),'error':observed.get('error')})
             if observed.get('status')!='ERROR':break
         observed['attempts']=attempts
+        observed['final_error_cause']=observed.get('error') if observed.get('status')=='ERROR' else None
+        timeout_failure=bool(observed.get('status')=='ERROR' and 'Timeout' in str(observed.get('error')))
+        if timeout_failure:
+            control['consecutive_timeouts']=int(control.get('consecutive_timeouts',0))+1
+            threshold=int(control.get('threshold',3))
+            if control['consecutive_timeouts']>=threshold:
+                control['open']=True;control['deferred_since_open']=0
+        else:
+            control['consecutive_timeouts']=0
         expected_gender = str(fixture.get("gender") or "UNKNOWN").upper()
         competition_score = observed.get("competition_match_score")
         competition_ok = (isinstance(competition_score, (int, float)) and
                           not isinstance(competition_score, bool) and competition_score >= 0.82)
         senior_inferred=senior_category_corroborated(fixture,winner.get('category_compatibility'),competition_score,
             observed.get('page_category_compatibility'))
-        category_ok = ((expected_gender == "M" and winner.get("category_compatibility") == "COMPATIBLE_OR_UNKNOWN") or
-                       (expected_gender == "F" and winner.get("category_compatibility") == "FEMALE_CORROBORATED") or senior_inferred)
+        candidate_category=winner.get("category_compatibility")
+        page_category=observed.get('page_category_compatibility')
+        category_conflict=(candidate_category in {'GENDER_CONFLICT','NON_ADULT_CONFLICT'} or
+                           page_category in {'GENDER_CONFLICT','NON_ADULT_CONFLICT'})
+        # Missing registry/category metadata is a warning. Identity only needs
+        # the observed event not to contradict the known fixture category.
+        category_ok=not category_conflict
+        classification_pending=(fixture.get('matching_eligibility')=='PENDING_CLASSIFICATION' or
+                                fixture.get('category_evidence_status')!='CORROBORATED')
+        raw_identity=observed.get('identity_status')
+        provisional=bool(competition_ok and not category_conflict and
+            winner.get('team_order_status') in {'HOME_AWAY','HOME_AWAY_TOKEN','HOME_AWAY_ALIAS'} and
+            raw_identity in {'NAME_AND_ABSOLUTE_TIME_MATCH','NAME_AND_RELATIVE_TIME_CORROBORATED',
+                             'NAME_MATCH_TIME_NOT_MACHINE_VERIFIED'})
+        out.update(event_identity_status='PROVISIONAL_COMPATIBLE' if provisional else 'PENDING_OR_CONFLICT',
+                   category_corroboration_status='CONFLICT' if category_conflict else 'CORROBORATED' if category_ok else 'PENDING',
+                   prematch_authorization='NOT_GRANTED',actionable_bet=False)
         if senior_inferred:observed['category_evidence']='SENIOR_COMPETITION_CORROBORATED'
-        if observed.get("identity_status") == "NAME_AND_ABSOLUTE_TIME_MATCH" and not (category_ok and competition_ok):
-            if expected_gender=='UNKNOWN' and competition_ok:
-                observed['identity_status']='CATEGORY_UNKNOWN_PENDING'
-            elif category_ok and not competition_ok:
-                observed['identity_status']='COMPETITION_UNVERIFIED'
-            else:
-                observed["identity_status"] = "CATEGORY_OR_COMPETITION_UNVERIFIED"
-            observed["supporting_identity_checks"] = {
-                "category_compatible": category_ok,
-                "competition_compatible": competition_ok,
-            }
+        observed["supporting_identity_checks"] = {
+            "category_compatible": category_ok,
+            "competition_compatible": competition_ok,
+            "classification_pending": classification_pending,
+        }
+        warnings=[]
+        if classification_pending:warnings.append(fixture.get('matching_eligibility_reason') or 'CLASSIFICATION_PENDING')
+        if not competition_ok:warnings.append('COMPETITION_METADATA_NOT_CORROBORATED')
+        out['identity_warnings']=warnings
         out["inspection"] = observed
+        out['catalog_competition_similarity']=out.get('competition_similarity')
+        out['competition_similarity']=competition_score
         out["identity_status"] = observed["identity_status"]
         out["markets"] = observed["market_headings"]
-        if observed["identity_status"] == "NAME_AND_ABSOLUTE_TIME_MATCH":
+        if category_conflict:
+            observed['identity_status']='CATEGORY_CONFLICT'
+            out['identity_status']='CATEGORY_CONFLICT'
+            out['status']='EVENT_REQUIRES_REVIEW'
+        elif observed["identity_status"] == "NAME_AND_ABSOLUTE_TIME_MATCH":
             out["status"] = "IDENTITY_VERIFIED_AUTOMATICALLY"
         elif observed["identity_status"] == "NAME_AND_RELATIVE_TIME_CORROBORATED":
             out["status"] = "EVENT_FOUND_TIME_CORROBORATED"
@@ -921,6 +1538,8 @@ def summarize(fixture: dict, possible: list[dict], browser, timeout: int, inspec
             out["status"] = "EVENT_FOUND_NEEDS_TIME_CONFIRMATION"
         else:
             out["status"] = "EVENT_REQUIRES_REVIEW"
+        if out['status']=='IDENTITY_VERIFIED_AUTOMATICALLY':out['event_identity_status']='VERIFIED'
+        if observed.get('status')=='ERROR':out['discovery_diagnostic']='INSPECTION_FAILED'
     return out
 
 
@@ -979,6 +1598,10 @@ def write_reports(folder: Path, payload: dict) -> None:
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Descubrimiento verificable de partidos PREMATCH en Bwin.es")
     parser.add_argument("--catalog-snapshot",type=Path,action="append",default=[],help="Catálogo archivado: pista de identidad, nunca horario vigente sin revalidación")
+    parser.add_argument("--verified-identity-catalog", type=Path,
+                        help="Reconciliación congelada Fixture ID/Event ID; solo habilita reinspección directa")
+    parser.add_argument("--direct-verified-only", action="store_true",
+                        help="No recorre catálogos: abre URLs exactas y vuelve a validar identidad/hora")
     parser.add_argument("--input", type=Path, required=True, help="fixtures_discovered/fixtures.json, preselection.json V1.3 o CSV")
     parser.add_argument("--fixture-id", type=int, action="append", default=[], help="Fixture API-Football a buscar (repetible)")
     parser.add_argument("--top", type=int, default=1, help="Sin fixture-id: top N futuros; 0=todos, sin ranking estadístico")
@@ -994,7 +1617,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--timeout", type=int, default=25000, help="Timeout navegación en milisegundos")
     parser.add_argument("--no-inspect", action="store_true", help="Solo identificar links, sin abrir eventos")
     parser.add_argument("--directed-pilot", action="store_true", help="Piloto dirigido: exige 1-10 --fixture-id y limita páginas nacionales")
-    parser.add_argument("--inspection-retries",type=int,default=0,help="Reintentos por página de evento (piloto: 0-2)")
+    parser.add_argument("--inspection-retries",type=int,default=0,
+                        help="Recuperación alternativa por evento: 0=solo DOM existente; 1=commit+validación")
     parser.add_argument("--include-past-for-debug", action="store_true", help="No omitir encuentros ya iniciados (solo depuración; nunca PREMATCH)")
     parser.add_argument("--base-url", default=BASE)
     args = parser.parse_args(argv)
@@ -1011,14 +1635,19 @@ def main(argv: list[str] | None = None) -> int:
         parser.error('--bwin-first-max-pages inválido; en piloto se permiten 0-10')
     if args.directed_pilot and args.bwin_first_max_pages+args.max_country_pages>10:
         parser.error('el presupuesto combinado de páginas Bwin-first y dirigidas no puede superar 10')
-    if args.inspection_retries<0 or (args.directed_pilot and args.inspection_retries>2):
-        parser.error('--inspection-retries inválido; en piloto se permiten 0-2')
+    if args.inspection_retries not in (0,1):
+        parser.error('--inspection-retries inválido; se permiten 0-1 y nunca dos navegaciones idénticas')
+    if args.direct_verified_only and not args.verified_identity_catalog:
+        parser.error('--direct-verified-only requiere --verified-identity-catalog')
     now = datetime.now(timezone.utc).astimezone(TZ)
     try:
         chosen, skipped = read_candidates(args.input, args.fixture_id, args.top, args.include_past_for_debug, now)
     except (OSError, ValueError, json.JSONDecodeError) as exc:
         parser.error(str(exc))
-    print(f"Selección: {len(chosen)} para buscar · {len(skipped)} omitidos (ya iniciados/sin hora)")
+    eligible_external=[row for row in chosen if row.get('matching_eligibility')=='ELIGIBLE']
+    pending_external=[row for row in chosen if row.get('matching_eligibility')=='PENDING_CLASSIFICATION']
+    discovery_external=eligible_external+pending_external
+    print(f"Selección: {len(eligible_external)} elegibles · {len(pending_external)} clasificación pendiente con descubrimiento · {len(skipped)} excluidos/omitidos")
     if not chosen:
         print("Sin encuentros futuros a buscar. Usa otro fixture o ventana; no se abrirá Bwin.")
         write_reports(args.output_dir, {"schema_version":"0.2-bwin-discovery", "generated_at_utc":datetime.now(timezone.utc).isoformat(),
@@ -1030,31 +1659,45 @@ def main(argv: list[str] | None = None) -> int:
         print("Falta Playwright: pip install playwright && python -m playwright install chromium", file=sys.stderr)
         return 3
     paths = args.catalog_page or list(CALENDAR)
+    direct_bindings = {}; identity_audit = None
+    if args.verified_identity_catalog:
+        try:
+            direct_bindings, identity_audit = verified_identity_candidates(args.verified_identity_catalog, chosen)
+        except (OSError, ValueError, json.JSONDecodeError) as exc:
+            parser.error(str(exc))
+        if args.direct_verified_only and len(direct_bindings) != len(chosen):
+            missing = sorted(set(int(f['fixture_id']) for f in chosen) - set(direct_bindings))
+            parser.error(f'VERIFIED_DIRECT_BINDING_MISSING:{missing}')
     with sync_playwright() as p:
         kwargs = {"headless": args.headless, "args": ["--disable-blink-features=AutomationControlled"]}
         if args.browser_executable:
             kwargs["executable_path"] = args.browser_executable
         browser = p.chromium.launch(**kwargs)
         try:
-            catalog, pages = fetch_catalog(browser, args.base_url, paths, args.max_scrolls, args.timeout)
+            catalog, pages = (list(direct_bindings.values()), []) if args.direct_verified_only else fetch_catalog(browser, args.base_url, paths, args.max_scrolls, args.timeout)
             if args.catalog_snapshot:
-                from prematch_phase1 import merge_bwin_snapshots
-                archived=merge_bwin_snapshots(args.catalog_snapshot)
-                byid={e['bwin_event_id']:e for e in archived['events']}
+                archived=load_local_catalog_snapshots(args.catalog_snapshot)
+                byid={e['bwin_event_id']:e for e in archived}
                 byid.update({e['bwin_event_id']:e for e in catalog});catalog=list(byid.values())
-            catalog,bwin_first_pages,bwin_first_info=extend_catalog_bwin_first(browser,args.base_url,catalog,
-                args.bwin_first_max_pages,args.max_scrolls,args.timeout)
+            competition_targeted=any(f.get('league_id')==5 for f in discovery_external)
+            if args.direct_verified_only:
+                bwin_first_pages,bwin_first_info=[],{'status':'SKIPPED_DIRECT_VERIFIED_ROUTE'}
+            elif competition_targeted:
+                bwin_first_pages,bwin_first_info=[],{'status':'SKIPPED_COMPETITION_TARGETING','pages_selected':[]}
+            else:
+                catalog,bwin_first_pages,bwin_first_info=extend_catalog_bwin_first(browser,args.base_url,catalog,
+                    args.bwin_first_max_pages,args.max_scrolls,args.timeout)
             pages.extend(bwin_first_pages)
             extension_info = {"requested_countries": [], "country_urls_found": 0,
                               'bwin_first':bwin_first_info}
-            if not args.no_country_discovery:
+            if not args.no_country_discovery and not args.direct_verified_only:
                 catalog, extended_pages, extension_info = extend_catalog_for_missing(
-                    browser, args.base_url, catalog, chosen, args.max_country_pages,
+                    browser, args.base_url, catalog, discovery_external, args.max_country_pages,
                     args.max_scrolls, args.timeout)
                 pages.extend(extended_pages)
                 extension_info['bwin_first']=bwin_first_info
             print(f"Eventos observados en el catálogo: {len(catalog)}")
-            if not args.no_country_discovery:
+            if not args.no_country_discovery and not args.direct_verified_only:
                 print(f"Búsqueda por países: {extension_info.get('requested_countries', [])} | enlaces nacionales: {extension_info.get('country_urls_found', 0)}")
             for d in pages:
                 if d.get('kind') == 'COUNTRY_NAV_DISCOVERY':
@@ -1063,10 +1706,12 @@ def main(argv: list[str] | None = None) -> int:
                     print(f"  {d.get('status', '?')}: {d.get('catalog_page', '?')} ({d.get('events_found', 0)} eventos)")
                 if d.get("error"):
                     print(f"    {d['error'][:160]}")
-            results = []
+            results = [];inspection_control={'consecutive_timeouts':0,'threshold':3,'open':False,
+                                             'deferred_since_open':0,'probe_interval':20}
             for fixture in chosen:
-                possibilities = match_catalog(fixture, catalog)
-                result = summarize(fixture, possibilities, browser, args.timeout, not args.no_inspect,args.inspection_retries)
+                possibilities = candidate_possibilities(fixture, catalog, direct_bindings)
+                result = summarize(fixture, possibilities, browser, args.timeout,
+                                   not args.no_inspect,args.inspection_retries,inspection_control)
                 print(f"[{fixture['fixture_id']}] {fixture['home']} - {fixture['away']}: {result['status']}" +
                       (f" | bwin={result['bwin_event_id']}" if result['bwin_event_id'] else ""))
                 results.append(result)
@@ -1074,9 +1719,32 @@ def main(argv: list[str] | None = None) -> int:
                 byid={e['bwin_event_id']:e for e in catalog};byid.update({e['bwin_event_id']:e for e in refreshed});catalog=list(byid.values())
         finally:
             browser.close()
+    # Recheck identities not found before the shared catalog grew. The browser
+    # is closed, so recovered candidates stay pending inspection.
+    for index,result in enumerate(results):
+        if result.get('status')!='NOT_FOUND_IN_SCANNED_PAGES':continue
+        fixture=next(f for f in chosen if f['fixture_id']==result['fixture_id'])
+        possible=candidate_possibilities(fixture,catalog,direct_bindings)
+        if possible:
+            # Browser has closed: persist recovered candidates for later
+            # inspection rather than claiming a verified identity.
+            results[index]=summarize(fixture,possible,None,args.timeout,False)
+            results[index]['discovery_diagnostic']='EVENT_PRESENT_LOCAL_REMATCH'
+        near=[] if possible else visible_without_matching(fixture,catalog)
+        coverage=coverage_for_fixture(fixture,pages,extension_info,candidate_visible=bool(possible),
+                                      unmatched_visible=near)
+        results[index]['coverage']=coverage
+        if not possible:
+            results[index]['discovery_diagnostic']=coverage['status']
+    for result in results:
+        if result.get('coverage') is not None:continue
+        fixture=next(f for f in chosen if f['fixture_id']==result['fixture_id'])
+        visible=bool(result.get('bwin_event_id') or result.get('candidates_found'))
+        result['coverage']=coverage_for_fixture(fixture,pages,extension_info,candidate_visible=visible)
     reconcile_catalog_clocks(results,catalog)
-    payload = {"schema_version": "0.4-bwin-discovery", "generated_at_utc": datetime.now(timezone.utc).isoformat(),
+    payload = {"schema_version": "0.5-bwin-discovery-v3", "generated_at_utc": datetime.now(timezone.utc).isoformat(),
                "source_input": str(args.input), "user_time_reference": "Europe/Madrid", "prematch_only": not args.include_past_for_debug,
+               "verified_identity_catalog": identity_audit,
                "methodology": "Public DOM event links + targeted country pages discovered from DOM or previously verified; time identity checks",
                "pages": pages, "country_discovery": extension_info, "catalog_observed": catalog, "matches": results + skipped}
     write_reports(args.output_dir, payload)

@@ -363,18 +363,19 @@ def main(argv=None):
     ap.add_argument('--preselection',required=True,type=Path)
     ap.add_argument('--preflight',action='append',default=[],type=Path,help='Repetible, un preflight por fixture')
     ap.add_argument('--fixture-id',action='append',type=int,default=[],help='Repetible: restringe a fixtures concretos')
-    ap.add_argument('--top',type=int,default=15,help='Max fixtures desde ranking de preselección (por defecto 15)')
+    ap.add_argument('--top',type=int,default=0,help='0=todos los fixtures de preselección')
     ap.add_argument('--min-lead-minutes',type=int,default=20)
     ap.add_argument('--max-snapshot-age-minutes',type=int,default=120)
     ap.add_argument('--asof',help='ISO con offset. Para auditoría histórica; nunca convierte cuotas históricas en vigentes')
     ap.add_argument('--output-dir',type=Path,required=True)
     args=ap.parse_args(argv)
-    if args.top<1 or args.min_lead_minutes<0 or args.max_snapshot_age_minutes<0:
+    if args.top<0 or args.min_lead_minutes<0 or args.max_snapshot_age_minutes<0:
         ap.error('Umbrales numéricos fuera de rango')
     asof=parse_dt(args.asof) if args.asof else datetime.now(timezone.utc)
     if asof is None:ap.error('--asof requiere fecha ISO8601 con offset explícito')
     try:
-        result=analyze(args.preselection,args.preflight,args.fixture_id,args.top,asof,
+        top=args.top or len(json.loads(args.preselection.read_text())['matches']) or 1
+        result=analyze(args.preselection,args.preflight,args.fixture_id,top,asof,
                        args.min_lead_minutes,args.max_snapshot_age_minutes)
         out=args.output_dir
         out.mkdir(parents=True,exist_ok=True)

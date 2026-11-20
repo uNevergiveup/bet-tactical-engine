@@ -10,7 +10,7 @@ from pathlib import Path
 from datetime import datetime, timedelta
 import prematch_prospective_trial as t
 
-TACTICAL_FIELDS='tactical_engine_evaluado tactical_signal_count tactical_signal_families tactical_confidence_level tactical_data_coverage tactical_profile_status tactical_contradictions tactical_priority_score tactical_reason historical_matches_available historical_matches_detailed historical_matches_not_detailed metric_observations_valid metric_observations_missing requested_data_coverage_pct historical_effective_coverage_pct tactical_research_score market_execution_readiness direct_market_hypotheses indirect_market_hypotheses unmodelled_market_count scanner_status evaluation_completeness comparison_rank final_decision_reason market_hypotheses_count market_hypotheses_verified research_priority tactical_json tactical_mode selection_tier research_eligible research_missing_evidence hard_block_reasons'.split()
+TACTICAL_FIELDS='tactical_engine_evaluado tactical_signal_count tactical_signal_families tactical_confidence_level tactical_data_coverage tactical_profile_status tactical_contradictions tactical_priority_score tactical_reason historical_matches_available historical_matches_detailed historical_matches_not_detailed metric_observations_valid metric_observations_missing requested_data_coverage_pct historical_effective_coverage_pct tactical_research_score market_execution_readiness direct_market_hypotheses indirect_market_hypotheses unmodelled_market_count scanner_status evaluation_completeness comparison_rank final_decision_reason market_hypotheses_count market_hypotheses_verified research_priority tactical_json tactical_mode selection_tier research_eligible research_missing_evidence hard_block_reasons competition_category evidence_tier bwin_search_status budget_status offer_proven_absent quote_capture_status'.split()
 FIELDS='fecha_ventana inicio_ventana_madrid fin_ventana_madrid fixture_id kickoff_madrid pais liga league_id temporada local visitante liga_elegible motivo_filtro_liga prematch_elegible minutos_hasta_kickoff_en_captura fase_maxima estado_final motivo_exclusion_o_pendiente detalle_evidencia preselection_evaluada preselection_score cobertura_api patrones_detectados patrones_resumen bwin_busqueda_estado bwin_event_id bwin_url identidad_bwin_estado evidencia_horaria_estado cuotas_capturadas captura_madrid sha256_snapshot cuotas_elegibles mercados_investigables opportunity_evaluado opportunity_estado mejor_hipotesis_mercado mejor_hipotesis_cuota score_oportunidad seleccionado razon_seleccion_o_no_seleccion actualizado_madrid'.split()
 
 
@@ -26,15 +26,32 @@ def atomic(path, value, encoding='utf-8'):
     tmp.write_text(value,encoding=encoding);tmp.replace(path)
 
 
+def window_bounds(base, source):
+    """Resolve isolated-evaluation and legacy window layouts without guessing."""
+    evaluation = base.parent / 'evaluation_manifest.json'
+    if evaluation.is_file():
+        request = read(evaluation).get('request', {})
+        start = t.dt(request.get('window_start_madrid'))
+        end = t.dt(request.get('window_end_madrid'))
+        if start and end:
+            return start, end
+    window=source.get('window',{})
+    start=t.dt(str(window.get('start_madrid','')).split(' Europe/')[0])
+    end=t.dt(str(window.get('end_madrid','')).split(' Europe/')[0])
+    if start and end:
+        return start, end
+    try:
+        d,a,b=base.parent.name.split('_')
+        return t.local_window(t.parse_date(d),t.parse_clock(a[:2]+':'+a[2:]),t.parse_clock(b[:2]+':'+b[2:]))
+    except ValueError:
+        return None, None
+
+
 def export_daily(base):
     base=Path(base);folder=base.parent;source=read(folder/'fixtures.json')
     if not source:return []
-    window=source.get('window',{})
-    start=t.dt(str(window.get('start_madrid','')).split(' ')[0]);end=t.dt(str(window.get('end_madrid','')).split(' ')[0])
-    if not start or not end:
-        try:
-            d,a,b=folder.name.split('_');start,end=t.local_window(t.parse_date(d),t.parse_clock(a[:2]+':'+a[2:]),t.parse_clock(b[:2]+':'+b[2:]))
-        except ValueError:return []
+    start,end=window_bounds(base,source)
+    if not start or not end:return []
     fixtures={}
     for f in source.get('fixture_audit',[])+source.get('fixtures',[]):
         ko=t.dt(f.get('kickoff_madrid'))
@@ -72,16 +89,33 @@ def export_daily(base):
     if tactical and tactical.get('sources',{}).get('preselection_sha256')!=t.sha(base/'enriched/preselection.json'):tactical={}
     tactical_rank={str(r['fixture_id']):r for r in tactical.get('ranking',[])}
     tactical_position={str(r['fixture_id']):index+1 for index,r in enumerate(tactical.get('ranking',[]))}
+    from bwin_manual_links import load_manual_links, resolve_bwin_search_status
+    manual_links_map = (load_manual_links(folder).get('links') or {})
     rows=[];now=t.now_madrid()
     for fid,f in fixtures.items():
         l=league.get(fid,{});s=pre.get(fid,{});d=disc.get(fid,{});a=ledger.get(fid,{})
+        ml=manual_links_map.get(fid)
         m,path=pf.get(fid,({},None));snap=m.get('snapshot',{});gate=m.get('quality_gate',{})
         scan,scanpath=scans.get(fid,({},None));capture=t.dt(snap.get('capture_declared_madrid'))
         state=mapping.get(a.get('state'),a.get('state','PENDIENTE'));reason=a.get('reason','ETAPA_NO_EJECUTADA')
+        is_budget_deferred = a.get('state') in ('DIFERIDO_POR_PRESUPUESTO', 'EXCLUIDO_POR_LIMITE_ANTERIOR')
+        if a.get('state')=='FILTRADO_POR_LIGA' and l.get('filter_status')=='REVIEW':
+            state='PENDING_CLASSIFICATION'
         if state=='SIN_CUOTAS' and any(x in str(reason).upper() for x in ('STALE','CADUC','EXISTING_ODDS_NOT_REUSABLE')):state='PENDIENTE_ACTUALIZAR_CUOTAS'
+        tx=tactical.get('fixtures',{}).get(fid)
+        bwin_status = resolve_bwin_search_status(
+            ledger_row=a, discovery_row=d, manual_link=ml, preflight_match=m, scanner_row=scan
+        )
+        # Un candidato diferido por presupuesto conserva su estado PENDING_BUDGET / NO_EVALUADO_POR_LIMITE.
+        # Un candidato no encontrado en Bwin tampoco pasa a SIN_CUOTAS ni prueba ausencia.
+        if not is_budget_deferred and state in ('SIN_BWIN', 'SIN_CUOTAS') and bwin_status in ('BWIN_NOT_FOUND_IN_SCANNED_PAGES', 'BWIN_SEARCH_INCOMPLETE', 'BWIN_MANUAL_LINK_PENDING_VALIDATION'):
+            state = 'RESEARCH_PENDING' if tx else bwin_status
+            if 'NOT_FOUND_IN_SCANNED_PAGES' in str(reason) or 'SEARCH_INCOMPLETE' in str(reason):
+                reason = f'{reason} (oferta Bwin no descartada)'
         if m.get('status')=='BLOCKED':
             reason=','.join(m.get('reasons',[]));state='BLOQUEADO_IDENTIDAD' if any(x in reason for x in ('IDENTITY','TITLE','NAME','EVENT_ID','MISMATCH')) else 'BLOQUEADO_TIEMPO'
-        if scan.get('status')=='VERIFIED':state='ANALIZADO_SIN_SENAL_VALIDADA'
+        if scan.get('status')=='VERIFIED':state='ANALIZADO_PARA_INVESTIGACION'
+        elif scan.get('status')=='RESEARCH_ONLY':state='ANALIZADO_PENDIENTE_VALIDACION_FINAL'
         selected=(str(handoff.get('fixture_id'))==fid and handoff.get('status')=='READY_FOR_MANUAL_RESEARCH' and scan.get('status')=='VERIFIED')
         if selected:state='SELECCIONADO'
         if selected and not t.kickoff_valid(f,now,45):
@@ -97,9 +131,15 @@ def export_daily(base):
                                                 prematch_elegible=str(t.scope_reason(f,now,45,0) is None).lower(),fase_maxima=a.get('stage','discovery'),estado_final=state,motivo_exclusion_o_pendiente=reason,
                                                 detalle_evidencia=' | '.join(str(x) for x in [folder/'fixtures.json',base/'candidate_ledger.json',path,scanpath] if x),
                                                 preselection_evaluada=str(bool(s)).lower(),preselection_score=s.get('research_priority_score',''),cobertura_api=s.get('data_readiness_status',''),patrones_detectados=len(ps) if s else '',patrones_resumen=' | '.join(sorted({str(p.get('metric'))+':'+str(p.get('team_side')) for p in ps})),
-                                                bwin_busqueda_estado=d.get('status','NO_EVALUADO'),bwin_event_id=m.get('bwin_event_id',d.get('bwin_event_id','')) or '',bwin_url=m.get('bwin_url',d.get('bwin_url','')) or '',identidad_bwin_estado=m.get('discovery_identity_status',d.get('identity_status','')),evidencia_horaria_estado=m.get('time_evidence',{}).get('status',''),
+                                                bwin_busqueda_estado=d.get('status','NO_EVALUADO'),bwin_event_id=m.get('bwin_event_id',d.get('bwin_event_id',(ml or {}).get('extracted_event_id',''))) or '',bwin_url=m.get('bwin_url',d.get('bwin_url',(ml or {}).get('bwin_url',''))) or '',identidad_bwin_estado=m.get('discovery_identity_status',d.get('identity_status',(ml or {}).get('identity_status',''))),evidencia_horaria_estado=m.get('time_evidence',{}).get('status',''),
                                                 cuotas_capturadas=snap.get('selection_triplets_verified',''),captura_madrid=snap.get('capture_declared_madrid',''),sha256_snapshot=snap.get('sha256',''),cuotas_elegibles=gate.get('price_eligible',''),mercados_investigables=gate.get('researchable_after_data_gate',''),
-                                                opportunity_evaluado=str(bool(scan)).lower(),opportunity_estado=scan.get('status','NO_EVALUADO'),seleccionado=str(selected).lower(),razon_seleccion_o_no_seleccion=handoff.get('routing_reason','') if selected else reason,actualizado_madrid=now.isoformat())
+                                                opportunity_evaluado=str(bool(scan)).lower(),opportunity_estado=scan.get('status','NO_EVALUADO'),seleccionado=str(selected).lower(),razon_seleccion_o_no_seleccion=handoff.get('routing_reason','') if selected else reason,actualizado_madrid=now.isoformat(),
+                                                competition_category=l.get('competition_category',s.get('competition_category','')),
+                                                evidence_tier=s.get('evidence_tier',''),
+                                                bwin_search_status=bwin_status,
+                                                budget_status='PENDING_BUDGET' if is_budget_deferred else '',
+                                                offer_proven_absent='false' if bwin_status in ('BWIN_NOT_FOUND_IN_SCANNED_PAGES','BWIN_SEARCH_INCOMPLETE','BWIN_NOT_SCANNED_BUDGET','BWIN_MANUAL_LINK_PENDING_VALIDATION') else '',
+                                                quote_capture_status=('CAPTURED_VERIFIED' if snap and state in ('ANALIZADO_PARA_INVESTIGACION','SELECCIONADO') else ((ml or {}).get('quote_capture_status','') if (ml or {}).get('quote_capture_status','') not in ('', 'NOT_CAPTURED') else ('CAPTURED_UNVERIFIED' if snap else 'NOT_CAPTURED'))))
         if capture:row['minutos_hasta_kickoff_en_captura']=round((t.dt(f['kickoff_madrid']).timestamp()-capture.timestamp())/60,2)
         if fid in hypotheses:
             q=hypotheses[fid];row['mejor_hipotesis_mercado']=q.get('market','');row['mejor_hipotesis_cuota']=q.get('odd','')
@@ -108,7 +148,6 @@ def export_daily(base):
         if selected:row['fase_maxima']='handoff'
         elif scan:row['fase_maxima']='opportunity_scanner'
         elif m:row['fase_maxima']='preflight'
-        tx=tactical.get('fixtures',{}).get(fid)
         row['tactical_engine_evaluado']=str(bool(tx)).lower()
         if tx:
             summary=tx.get('coverage_summary',{})
@@ -146,5 +185,22 @@ def export_daily(base):
     atomic(base/'partidos_diarios.json',json.dumps(rows,ensure_ascii=False,indent=2)+'\n')
     from collections import Counter
     counts=Counter(r['estado_final'] for r in rows)
-    atomic(base/'partidos_diarios.md','# Partidos diarios\n\nCSV UTF-8-SIG, separador punto y coma. Vacío = no medido/no disponible.\n\n'+json.dumps(dict(counts),ensure_ascii=False,indent=2)+'\n')
+    denominators={
+        'discovered_n': len(rows),
+        'excluded_with_evidence_n': sum(r['liga_elegible'] == 'false' for r in rows),
+        'pending_classification_n': sum(r['estado_final'] == 'PENDING_CLASSIFICATION' for r in rows),
+        'below_minimum_evidence_n': sum(r['evidence_tier'] in ('NO_STATISTICAL_DATA', 'BELOW_MINIMUM_EVIDENCE') or r['estado_final'] == 'SIN_COBERTURA' for r in rows),
+        'statistically_eligible_n': sum(
+            r['evidence_tier'] in ('MINIMUM_EVIDENCE_MET', 'RICH_EVIDENCE_AVAILABLE')
+            or (r['evidence_tier'] == '' and r['preselection_evaluada'] == 'true' and r['cobertura_api'] == 'DATOS_APROVECHABLES')
+            for r in rows
+        ),
+        'pending_budget_n': sum(r['budget_status'] == 'PENDING_BUDGET' for r in rows),
+        'pending_bwin_n': sum(r['bwin_search_status'] in ('BWIN_NOT_SCANNED_BUDGET', 'BWIN_SEARCH_INCOMPLETE', 'BWIN_NOT_FOUND_IN_SCANNED_PAGES', 'BWIN_MANUAL_LINK_PENDING_VALIDATION') for r in rows),
+        'commercially_verified_n': sum(r['bwin_search_status'] in ('BWIN_VERIFIED', 'BWIN_MANUAL_LINK_VERIFIED') and r['quote_capture_status'] == 'CAPTURED_VERIFIED' for r in rows),
+        'deeply_analyzed_n': sum(r['tactical_engine_evaluado'] == 'true' for r in rows),
+        'selected_for_case_n': sum(r['seleccionado'] == 'true' for r in rows),
+    }
+    atomic(base/'pipeline_funnel_denominators.json',json.dumps(denominators,ensure_ascii=False,indent=2)+'\n')
+    atomic(base/'partidos_diarios.md','# Partidos diarios\n\nCSV UTF-8-SIG, separador punto y coma. Vacío = no medido/no disponible.\n\n## Estados\n\n'+json.dumps(dict(counts),ensure_ascii=False,indent=2)+'\n\n## Denominadores del embudo\n\n'+json.dumps(denominators,ensure_ascii=False,indent=2)+'\n')
     return rows

@@ -90,35 +90,43 @@ DISPLAY_PARENTHESES = {'local', 'visitante', 'home', 'away', 'titular',
 
 
 def clean_report_team(value: str) -> str:
-    """Elimina formato Markdown y solo etiquetas de PRESENTACIÓN."""
+    """Elimina formato Markdown y solo etiquetas de PRESENTACIÓN y descriptor tras `;`."""
+    from match_identity import split_team_descriptor
+
     value = re.sub(r'\[([^]]+)\]\([^)]*\)', r'\1', str(value))
     value = re.sub(r'\s*\(\s*(?:local|visitante|home|away)\s*\)\s*$', '', value, flags=re.I)
     value = re.split(r',\s*(?:kickoff_utc|analysis_cutoff_utc|report_generated_utc|fecha|estadio)\s*[:=]?\s*', value, maxsplit=1, flags=re.I)[0]
-    return re.sub(r'\s+', ' ', value).strip(' `*.;,')
+    parts = split_team_descriptor(value)
+    return re.sub(r'\s+', ' ', parts['base']).strip(' `*.;,')
 
 
 def _club_spelling_variants(value: str) -> set[str]:
     """Crea claves conservadoras. Paréntesis descriptivos nunca sustituyen el nombre."""
+    from match_identity import LINGUISTIC_TEAM_ALIASES
+
     cleaned = clean_report_team(value)
     main = re.sub(r'\s*\([^)]*\)', '', cleaned).strip()
     raw_variants = {cleaned, main}
     main_key = normalize(main)
-    # «Junior FC (Junior de Barranquilla)»: el nombre entre paréntesis debe
-    # compartir el núcleo, nunca basta un alias completamente diferente.
+    main_canonical = LINGUISTIC_TEAM_ALIASES.get(main_key, main_key)
+    # «Junior FC (Junior de Barranquilla)» o «Wales (Gales)»: el paréntesis debe
+    # compartir núcleo o vínculo lingüístico explícito.
     for part in re.findall(r'\(([^()]*)\)', cleaned):
         part_key = normalize(part)
         if part_key in DISPLAY_PARENTHESES:
             continue
+        part_canonical = LINGUISTIC_TEAM_ALIASES.get(part_key, part_key)
         main_tokens = set(main_key.split()) - CLUB_LEGAL_TOKENS - {'de','del','la','el'}
         part_tokens = set(part_key.split()) - CLUB_LEGAL_TOKENS - {'de','del','la','el'}
-        if main_tokens & part_tokens:
+        if (main_tokens & part_tokens) or (part_canonical == main_canonical):
             raw_variants.add(part)
     variants = set()
     for candidate in raw_variants:
         key = normalize(candidate)
         if not key:
             continue
-        variants.add(KNOWN_CLUB_ALIASES.get(key, key))
+        variants.add(KNOWN_CLUB_ALIASES.get(key, LINGUISTIC_TEAM_ALIASES.get(key, key)))
+        variants.add(key)
         parts = key.split()
         # Solo en inicio y final; nunca suprimir palabras en medio.
         while len(parts) > 1 and parts[0] in CLUB_LEGAL_TOKENS:
@@ -126,37 +134,47 @@ def _club_spelling_variants(value: str) -> set[str]:
         while len(parts) > 1 and parts[-1] in CLUB_LEGAL_TOKENS:
             parts.pop()
         reduced = ' '.join(parts)
-        variants.add(KNOWN_CLUB_ALIASES.get(reduced, reduced))
+        variants.add(KNOWN_CLUB_ALIASES.get(reduced, LINGUISTIC_TEAM_ALIASES.get(reduced, reduced)))
         # Casos «Instituto AC Córdoba» frente a «Instituto Córdoba»:
         # eliminar siglas legales intercaladas, pero NUNCA topónimos.
         without_legal = ' '.join(x for x in key.split() if x not in CLUB_LEGAL_TOKENS)
         if without_legal:
-            variants.add(KNOWN_CLUB_ALIASES.get(without_legal, without_legal))
+            variants.add(KNOWN_CLUB_ALIASES.get(without_legal, LINGUISTIC_TEAM_ALIASES.get(without_legal, without_legal)))
     return {v for v in variants if v}
 
 
 def same_club_report(report_name: str, api_name: str, bwin_name: str | None = None) -> bool:
-    """Equivalencia exacta de alias legales y variantes Bwin del fixture.
+    """Equivalencia exacta de alias legales, lingüísticos y variantes Bwin del fixture.
 
     Evita fuzzy matching: Real Sociedad no pasa por Real Madrid, ni Junior
     Córdoba se convierte en Junior Barranquilla solo por compartir «Junior».
-    La pertenencia del nombre Bwin al evento/fixture se audita por separado.
+    También rechaza contradicciones de categoría aunque tras `;` conste un descriptor.
     """
+    from match_identity import category as identity_category, FEMALE as IDENT_FEMALE, MALE_MARKERS
+
+    raw_full = str(report_name or '')
+    full_norm = normalize(raw_full)
+    full_tokens = set(full_norm.split())
+    report_cats = identity_category(raw_full)
+    target_cats = identity_category(' '.join(x for x in (api_name, bwin_name) if x))
+    fixture_female = bool(target_cats & IDENT_FEMALE)
+    if fixture_female and (full_tokens & MALE_MARKERS):
+        return False
+    if (report_cats & IDENT_FEMALE) and not fixture_female:
+        return False
+    if (report_cats & {'b', 'ii', 'iii', 'youth'}) and not (target_cats & report_cats):
+        return False
+    if any(c.startswith('u') for c in report_cats) and not (target_cats & {c for c in report_cats if c.startswith('u')}):
+        return False
+
     # Alias institucional específico: jamás equiparar el club de Rio con
     # Botafogo-SP, Botafogo-PB, filiales, equipos femeninos o juveniles.
-    # Se contrasta con el calificador Bwin disponible para ESTE fixture.
     report_primary = normalize(re.sub(r'\s*\([^)]*\)', '', clean_report_team(report_name)))
     if report_primary == 'botafogo de futebol e regatas' and bwin_name:
         bwin_key = normalize(bwin_name)
         if re.search(r'\bbotafogo\s+(?:sp|pb|sao paulo|paraiba|b|ii|u\d+|sub\s*\d+|femenino|femenina|feminino|women|fem)\b', bwin_key):
             return False
-    # Equivalencias femeninas controladas por la identidad del fixture.
-    # No se elimina W/F indiscriminadamente: solo se admiten estas variantes
-    # cuando API o Bwin identifican explícitamente el encuentro femenino.
-    female_marker = re.compile(r'\b(?:w|women|woman|f|femenina|femenino|frauen|fem)\b', re.I)
-    fixture_female = any(female_marker.search(normalize(n)) for n in (api_name, bwin_name) if n)
-    report_key = normalize(clean_report_team(report_name))
-    if fixture_female and not re.search(r'\b(?:men|masculino|masculina|hombres)\b', report_key):
+    if fixture_female and not re.search(r'\b(?:men|masculino|masculina|hombres)\b', full_norm):
         def female_core(n):
             tokens = [t for t in normalize(clean_report_team(n)).split()
                       if t not in {'w','women','woman','f','femenina','femenino','frauen','fem','fc','fk','cf','club','de','del'}]
@@ -178,9 +196,21 @@ def same_club_report(report_name: str, api_name: str, bwin_name: str | None = No
     targets = set().union(*(_club_spelling_variants(n) for n in (api_name,bwin_name) if n))
     if not (report_keys & targets):
         return False
+    # Rechaza paréntesis no triviales con otro nombre sin vínculo con el equipo o alias del fixture (ej. 'Wales (Portugal)')
+    from match_identity import _canonical_variants
+    cleaned_full = clean_report_team(report_name)
+    primary_bare = re.sub(r'\s*\([^)]*\)', '', cleaned_full).strip()
+    primary_core_tokens = set(normalize(primary_bare).split()) - CLUB_LEGAL_TOKENS - {'de', 'del', 'do', 'da', 'la', 'el'}
+    for inner in re.findall(r'\(([^()]*)\)', cleaned_full):
+        inner_key = normalize(inner)
+        if not inner_key or inner_key in DISPLAY_PARENTHESES:
+            continue
+        inner_canon = _canonical_variants(inner)
+        inner_tokens = set(inner_key.split()) - CLUB_LEGAL_TOKENS - {'de', 'del', 'do', 'da', 'la', 'el'}
+        if not (inner_canon & targets) and not (inner_tokens & primary_core_tokens):
+            return False
     # Si el reporte ADEMÁS da un nombre geográfico explícito en paréntesis,
     # rechazar contradicciones con una ubicación que sí identifica Bwin.
-    # Ej.: «Junior FC (Junior de Córdoba)» NO equivale a Bwin «Junior Barranquilla».
     if bwin_name:
         raw = clean_report_team(report_name)
         primary = re.sub(r'\([^)]*\)', '', raw)
@@ -196,8 +226,6 @@ def same_club_report(report_name: str, api_name: str, bwin_name: str | None = No
             if not match:
                 continue
             named_place = set(match.group(1).split()) - {'la','el','los','las','the'}
-            # Solo hay contradicción objetiva cuando Bwin dispone de un
-            # calificador adicional y el mismo calificador no coincide.
             if named_place and bwin_tokens and not (named_place & bwin_tokens):
                 return False
     return True
@@ -260,19 +288,85 @@ def event_id_from_url(url: str) -> str:
     return match.group(1)
 
 
+def _extract_txt_lineup_presence(
+    raw: str,
+    *,
+    home_id: str | None,
+    away_id: str | None,
+    home_api: str | None,
+    away_api: str | None,
+) -> dict:
+    """Inspecciona el bloque estructurado `LINEUPS DEL FIXTURE OBJETIVO` tras el resumen textual."""
+    header = re.search(r'^LINEUPS DEL FIXTURE OBJETIVO\s*\n=+\s*$', raw, re.M)
+    if not header:
+        return {'present': False, 'home_count': 0, 'away_count': 0, 'acquired_utc': None, 'source': 'NO_BLOCK'}
+    brace = raw.find('{', header.end())
+    if brace < 0:
+        return {'present': False, 'home_count': 0, 'away_count': 0, 'acquired_utc': None, 'source': 'NO_JSON'}
+    try:
+        obj, _ = json.JSONDecoder().raw_decode(raw[brace:])
+    except json.JSONDecodeError:
+        return {'present': False, 'home_count': 0, 'away_count': 0, 'acquired_utc': None, 'source': 'INVALID_JSON'}
+    if not isinstance(obj, dict):
+        return {'present': False, 'home_count': 0, 'away_count': 0, 'acquired_utc': None, 'source': 'INVALID_OBJECT'}
+
+    resp = obj.get('response') or []
+    home_count = 0
+    away_count = 0
+    for blk in resp if isinstance(resp, list) else []:
+        if not isinstance(blk, dict):
+            continue
+        team = blk.get('team') or {}
+        tid = str(team.get('id')) if team.get('id') is not None else None
+        tname = normalize(team.get('name') or '')
+        starters = blk.get('startXI') or []
+        cnt = len(starters) if isinstance(starters, list) else 0
+        if home_id and tid == str(home_id):
+            home_count = max(home_count, cnt)
+        elif away_id and tid == str(away_id):
+            away_count = max(away_count, cnt)
+        elif home_api and tname == normalize(home_api) and (not home_id or not tid):
+            home_count = max(home_count, cnt)
+        elif away_api and tname == normalize(away_api) and (not away_id or not tid):
+            away_count = max(away_count, cnt)
+    acq_utc = iso_dt(obj.get('_acquired_at_utc')) or iso_dt((obj.get('provenance') or {}).get('captured_at_utc'))
+    return {
+        'present': bool(resp),
+        'home_count': home_count,
+        'away_count': away_count,
+        'acquired_utc': acq_utc,
+        'source': 'DIFFERENTIAL_OR_CURRENT_BLOCK' if resp else 'EMPTY_BLOCK',
+    }
+
+
 def api_meta(raw: str) -> dict:
     # La cabecera termina antes del microcontexto histórico, evitando mezclar fixtures pasados.
     head = raw[:min(len(raw), 25000)]
+    home_id = field(head, r'^Home:\s*.+?\s*\((\d+)\)\s*$')
+    away_id = field(head, r'^Away:\s*.+?\s*\((\d+)\)\s*$')
+    home_api = field(head, r'^Home:\s*(.+?)\s*\(\d+\)\s*$')
+    away_api = field(head, r'^Away:\s*(.+?)\s*\(\d+\)\s*$')
+    initial_home_missing = 'HOME: XI NO DISPONIBLE' in raw
+    initial_away_missing = 'AWAY: XI NO DISPONIBLE' in raw
+    block_info = _extract_txt_lineup_presence(
+        raw,
+        home_id=home_id,
+        away_id=away_id,
+        home_api=home_api,
+        away_api=away_api,
+    )
+    home_present = block_info['home_count'] == 11
+    away_present = block_info['away_count'] == 11
     return {
         'event_id':field(head,r'^Event ID:\s*(\d+)\s*$'),
         'bwin_url':field(head,r'^Bwin URL:\s*(https?://\S+)'),
         'home_bwin':field(head,r'^Home Bwin:\s*(.+)$'),
         'away_bwin':field(head,r'^Away Bwin:\s*(.+)$'),
         'fixture_id':field(head,r'^Fixture ID:\s*(\d+)\s*$'),
-        'home_api':field(head,r'^Home:\s*(.+?)\s*\(\d+\)\s*$'),
-        'home_id':field(head,r'^Home:\s*.+?\s*\((\d+)\)\s*$'),
-        'away_api':field(head,r'^Away:\s*(.+?)\s*\(\d+\)\s*$'),
-        'away_id':field(head,r'^Away:\s*.+?\s*\((\d+)\)\s*$'),
+        'home_api':home_api,
+        'home_id':home_id,
+        'away_api':away_api,
+        'away_id':away_id,
         'identity_status':field(head,r'^Identity status:\s*(\S+)'),
         'status':field(head,r'^Status:\s*(\S+)'),
         'competition':field(head,r'^League:\s*(.+)$'),
@@ -283,8 +377,12 @@ def api_meta(raw: str) -> dict:
         'historical_statistics_ok':len(re.findall(r'^\s+statistics: OK\s*$',raw,re.M)),
         'historical_players_ok':len(re.findall(r'^\s+players: OK\s*$',raw,re.M)),
         'historical_players_nd':len(re.findall(r'^\s+players: N/D\s*$',raw,re.M)),
-        'xi_api_home_missing':'HOME: XI NO DISPONIBLE' in raw,
-        'xi_api_away_missing':'AWAY: XI NO DISPONIBLE' in raw,
+        'xi_api_initial_header_missing': {'home': initial_home_missing, 'away': initial_away_missing},
+        'xi_api_home_missing': not home_present if block_info['present'] else initial_home_missing,
+        'xi_api_away_missing': not away_present if block_info['present'] else initial_away_missing,
+        'xi_api_counts': {'home': block_info['home_count'], 'away': block_info['away_count']},
+        'xi_api_source': block_info['source'] if (home_present or away_present) else 'INITIAL_HEADER',
+        'xi_api_acquired_utc': block_info['acquired_utc'],
     }
 
 
@@ -765,6 +863,8 @@ def report_field_embedded(raw: str, name: str) -> str | None:
 
 def report_meta(raw: str, home: str | None = None, away: str | None = None,
                 home_bwin: str | None = None, away_bwin: str | None = None) -> dict:
+    from bet_engine.context.research_parser import parse_research_identity_and_metadata
+
     # Intentar nombres canónicos API primero. Si la API abrevia «Boyaca Chico»
     # como «Chico», una segunda lectura utiliza nombres Bwin ligados al fixture.
     xi = press_xi(raw, home, away)
@@ -777,23 +877,63 @@ def report_meta(raw: str, home: str | None = None, away: str | None = None,
         for side in ('local', 'visitante'):
             if not xi.get(side) and other.get(side):
                 xi[side] = other[side]
-    fields={name:scalar_from_report(raw,name) for name in ('kickoff_madrid','kickoff_utc','analysis_cutoff_utc','cutoff_madrid','report_generated_utc','report_completed_madrid','event_id_bwin','xi_local_estado','xi_visitante_estado','xi_local_fuente','xi_visitante_fuente','xi_local_publicado_madrid','xi_visitante_publicado_madrid','xi_local','xi_visitante')}
+
+    parsed = parse_research_identity_and_metadata(
+        raw,
+        home=home,
+        away=away,
+        home_bwin=home_bwin,
+        away_bwin=away_bwin,
+        club_matcher=same_club_report,
+    )
+    for side, entry in parsed['parallel_xi'].items():
+        if not xi.get(side):
+            xi[side] = entry['players']
+            classified.setdefault(side, entry)
+
+    fields={name:scalar_from_report(raw,name) for name in ('kickoff_madrid','kickoff_utc','analysis_cutoff_utc','cutoff_madrid','report_generated_utc','report_completed_madrid','event_id_bwin','fixture_id','xi_local_estado','xi_visitante_estado','xi_local_fuente','xi_visitante_fuente','xi_local_publicado_madrid','xi_visitante_publicado_madrid','xi_local','xi_visitante')}
+    for key, val in parsed['fields'].items():
+        if not fields.get(key):
+            fields[key] = val
     for name in ('kickoff_utc', 'kickoff_madrid', 'analysis_cutoff_utc', 'report_generated_utc'):
         if not fields.get(name):
             fields[name] = report_field_embedded(raw, name)
-    fields['event_id_bwin'] = (fields['event_id_bwin'] or scalar_from_report(raw,'Evento Bwin')
+    fields['event_id_bwin'] = (fields['event_id_bwin'] or parsed['event_id'] or scalar_from_report(raw,'Evento Bwin')
                                or scalar_from_report(raw,'Event ID Bwin') or scalar_from_report(raw,'Event ID'))
+    if not fields.get('fixture_id') and parsed['fixture_id']:
+        fields['fixture_id'] = parsed['fixture_id']
+
+    ko_dt = iso_dt(fields.get('kickoff_utc')) or iso_dt(fields.get('kickoff_madrid')) or parsed['kickoff_utc'] or parsed['kickoff_madrid']
+    cut_dt = iso_dt(fields.get('analysis_cutoff_utc')) or iso_dt(fields.get('cutoff_madrid')) or parsed['cutoff_utc']
+    gen_raw = fields.get('report_generated_utc') or fields.get('report_completed_madrid')
+    gen_dt = None if (gen_raw and str(gen_raw).strip().lower().startswith('null')) else (iso_dt(gen_raw) or parsed['generated_utc'])
+
+    source_dates_found = sorted(set(re.findall(r'\b20\d{2}-\d{2}-\d{2}(?:T\d{2}:\d{2}(?::\d{2})?(?:Z|[+-]\d{2}:\d{2}))?\b', raw)))[:30]
+
     return {
         'fields':fields,
         'teams':heading_teams(raw),
-        'kickoff_utc':iso_dt(fields.get('kickoff_utc') or fields.get('kickoff_madrid')),
-        'cutoff_utc':iso_dt(fields.get('analysis_cutoff_utc') or fields.get('cutoff_madrid')),
-        'generated_utc':iso_dt(fields.get('report_generated_utc') or fields.get('report_completed_madrid')),
+        'event_ids_found': parsed['event_ids_found'],
+        'fixture_ids_found': parsed['fixture_ids_found'],
+        'event_id_conflict': parsed['event_id_conflict'],
+        'fixture_id_conflict': parsed['fixture_id_conflict'],
+        'sources_attributed': parsed['sources_attributed'],
+        'sha256_references': parsed['sha256_references'],
+        'kickoff_utc': ko_dt,
+        'cutoff_utc': cut_dt,
+        'generated_utc': gen_dt,
         'xi':xi,
         'xi_classification': {side:entry['classification'] for side,entry in classified.items()},
         'declared_timestamps_verified': False,
+        'source_dates_found': source_dates_found,
+        'temporal_traceability': {
+            'cutoff_declared_utc': cut_dt.astimezone(UTC).isoformat() if cut_dt else None,
+            'completion_declared_utc': gen_dt.astimezone(UTC).isoformat() if gen_dt else None,
+            'runtime_completion_verified': False,
+            'mtime_or_import_is_not_creation_proof': True,
+        },
         'url_count':len(set(re.findall(r'https?://[^\s\])>]+',raw))),
-        'has_source_registry':bool(re.search(r'registro de fuentes|registro documental de fuentes|fuentes y enlaces|fuentes consultadas|fuentes relevantes',raw,re.I)),
+        'has_source_registry':bool(parsed['has_source_registry'] or re.search(r'registro de fuentes|registro documental de fuentes|fuentes y enlaces|fuentes consultadas|fuentes relevantes',raw,re.I)),
     }
 
 
@@ -842,6 +982,9 @@ def audit_api(meta: dict, out: dict, url_id: str):
         issue(out,'INFO','HISTORICAL_PLAYER_NULLS',f"Faltan estadísticas de jugadores en {meta['historical_players_nd']} fixture(s) histórico(s). No imputar cero.")
     if meta['xi_api_home_missing'] or meta['xi_api_away_missing']:
         issue(out,'INFO','API_XI_ABSENT','Falta el XI objetivo en API; no equivale a ausencia de XI en prensa ni a error del script.')
+    else:
+        acq_note = f" (captura {meta['xi_api_acquired_utc'].astimezone(UTC).isoformat()})" if meta.get('xi_api_acquired_utc') else ''
+        issue(out,'INFO','API_XI_PRESENT_IN_CONTEXT',f"XI API de ambos equipos (11+11) presente en contexto estructurado{acq_note}; proveedor no equivale a certificación federativa.")
 
 
 def audit_odds(meta:dict, out:dict, url_id:str, api:dict):
@@ -877,9 +1020,17 @@ def audit_odds(meta:dict, out:dict, url_id:str, api:dict):
 
 
 def audit_report(meta:dict, out:dict, api:dict, expected_id:str):
+    if meta.get('event_id_conflict'):
+        issue(out,'BLOCK','REPORT_CONFLICTING_EVENT_IDS',f'Reporte declara Event IDs duplicados y contradictorios: {meta.get("event_ids_found")}.')
+    if meta.get('fixture_id_conflict'):
+        issue(out,'BLOCK','REPORT_CONFLICTING_FIXTURE_IDS',f'Reporte declara Fixture IDs duplicados y contradictorios: {meta.get("fixture_ids_found")}.')
     label=meta['fields'].get('event_id_bwin')
     if label and re.fullmatch(r'\d+',label) and label!=expected_id:
         issue(out,'BLOCK','REPORT_WRONG_EVENT',f'Reporte indica evento Bwin {label} distinto del configurado {expected_id}.')
+    rep_fix = meta['fields'].get('fixture_id')
+    api_fix = api.get('fixture_id')
+    if rep_fix and api_fix and re.fullmatch(r'\d+', str(rep_fix)) and str(rep_fix) != str(api_fix):
+        issue(out,'BLOCK','REPORT_WRONG_FIXTURE',f'Reporte indica Fixture ID {rep_fix} distinto del API {api_fix}.')
     if meta['teams']:
         for i,side in enumerate(('home','away')):
             expected=api.get(side+'_api') or api.get(side+'_bwin')
@@ -1044,7 +1195,9 @@ def main() -> int:
     report=report_meta(read(report_path), api.get('home_api') if api else None, api.get('away_api') if api else None, api.get('home_bwin') if api else None, api.get('away_bwin') if api else None) if report_path and report_path.is_file() and report_path.stat().st_size else None
     if api:
         audit_api(api,output,event_id)
-        if api.get('kickoff_utc') and datetime.now(UTC)>=api['kickoff_utc']:
+        import os as _os
+        _now_utc = (iso_dt(_os.getenv('PREMATCH_NOW_UTC')) if _os.getenv('PREMATCH_NOW_UTC') else None) or datetime.now(UTC)
+        if api.get('kickoff_utc') and _now_utc>=api['kickoff_utc']:
             if args.historical:
                 issue(output,'INFO','HISTORICAL_MODE','Evento programado en el pasado: auditando archivos históricos; esto no constituye una decisión prepartido actual.')
             else:
@@ -1072,7 +1225,26 @@ def main() -> int:
                       'CANONICAL_IDENTITY_BWIN_TIME_UNKNOWN',
                       'Fixture API identificado, pero la hora Bwin no está corroborada; no habilita cuotas ni picks finales.')
             else:
-                issue(output,'INFO','CANONICAL_IDENTITY_VERIFIED',f"Fixture {identity['api_fixture_id']} vinculado al evento Bwin {event_id}.")
+                te = identity.get('temporal_identity_evidence')
+                if isinstance(te, dict) and te.get('method') == 'BWIN_EVENT_COUNTDOWN_MINUTES':
+                    te_eid = str(te.get('bwin_event_id') or '')
+                    te_obs = iso_dt(te.get('observed_at_utc'))
+                    te_ko = iso_dt(te.get('kickoff_utc'))
+                    api_ko = iso_dt(identity.get('kickoff_utc'))
+                    tol = min(4.0, float(te.get('tolerance_minutes') or 4))
+                    cd_raw = te.get('countdown_minutes')
+                    if te_eid and te_eid != str(event_id):
+                        issue(output, 'BLOCK', 'IDENTITY_TEMPORAL_WRONG_EVENT', f'Evidencia temporal pertenece a {te_eid}, esperado {event_id}.')
+                    elif not te_obs or not te_ko or not api_ko or te_obs > te_ko:
+                        issue(output, 'BLOCK', 'IDENTITY_TEMPORAL_EVIDENCE_INCOMPLETE', 'Evidencia temporal Bwin incompleta o inconsistente.')
+                    elif cd_raw is not None and abs(((te_obs + timedelta(minutes=int(cd_raw))) - te_ko).total_seconds()) > 1.0:
+                        issue(output, 'BLOCK', 'IDENTITY_TEMPORAL_CONFLICT', 'Countdown Bwin no coincide con kickoff_utc declarado.')
+                    elif abs((te_ko - api_ko).total_seconds()) / 60.0 > tol:
+                        issue(output, 'BLOCK', 'IDENTITY_TEMPORAL_CONFLICT', f'Countdown Bwin difiere de API-Football más de {tol:.0f} min.')
+                    else:
+                        issue(output,'INFO','CANONICAL_IDENTITY_VERIFIED',f"Fixture {identity['api_fixture_id']} vinculado al evento Bwin {event_id}.")
+                else:
+                    issue(output,'INFO','CANONICAL_IDENTITY_VERIFIED',f"Fixture {identity['api_fixture_id']} vinculado al evento Bwin {event_id}.")
         except (ValueError,TypeError,OSError,KeyError,json.JSONDecodeError) as err:
             issue(output,'BLOCK','IDENTITY_INVALID',str(err))
             identity=None
@@ -1093,15 +1265,32 @@ def main() -> int:
 
     if not api and (odds or report):
         issue(output,'BLOCK','NO_API_TO_COMPARE','Imposible comparar archivos sin contexto API válido.')
+    def _serialize_checks(meta_dict: dict) -> dict:
+        out_checks = {}
+        for k, v in meta_dict.items():
+            if isinstance(v, datetime):
+                if k.endswith('_utc'):
+                    out_checks[k] = v.astimezone(UTC).isoformat()
+                    out_checks[k[:-4] + '_madrid'] = local(v)
+                else:
+                    out_checks[k] = local(v)
+            else:
+                out_checks[k] = v
+        return out_checks
+
     if api:
-        output['checks']['api']={k:(local(v) if isinstance(v,datetime) else v) for k,v in api.items()}
+        output['checks']['api']=_serialize_checks(api)
     if odds:
-        output['checks']['odds']={k:(local(v) if isinstance(v,datetime) else v) for k,v in odds.items()}
+        output['checks']['odds']=_serialize_checks(odds)
     if report:
-        output['checks']['report']={k:(local(v) if isinstance(v,datetime) else v) for k,v in report.items()}
+        output['checks']['report']=_serialize_checks(report)
+        init_missing = api.get('xi_api_initial_header_missing') or {} if api else {}
         output['checks']['xi_reconciliation']={
             side: {
                 'api_xi_reported_missing': bool(api.get('xi_api_home_missing' if side=='local' else 'xi_api_away_missing')) if api else None,
+                'api_xi_initial_header_missing': bool(init_missing.get('home' if side=='local' else 'away')) if api else None,
+                'api_xi_source': api.get('xi_api_source') if api else None,
+                'api_xi_acquired_utc': api['xi_api_acquired_utc'].astimezone(UTC).isoformat() if api and api.get('xi_api_acquired_utc') else None,
                 'press_player_count':len(report['xi'].get(side,[])),
                 'press_names':report['xi'].get(side,[]),
                 'press_claimed_status':report['fields'].get('xi_'+side+'_estado') or 'NO_CALIFICADO',

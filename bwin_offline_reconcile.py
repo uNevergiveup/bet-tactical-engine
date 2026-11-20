@@ -27,6 +27,11 @@ def inspection_evidence(prior,event_id):
     return (row or {}).get('inspection') or {}
 
 def reconcile_fixture(fixture,catalog,prior,pages):
+    # Revalidate historical snapshots into a new result without mutating them.
+    # Eligibility alone is not category proof; only an exact registry entry is.
+    from filter_major_leagues import explicit_competition_category
+    explicit=explicit_competition_category(fixture)
+    if explicit:fixture={**fixture,**explicit}
     candidates=match_catalog(fixture,catalog);old=prior.get(str(fixture['fixture_id']))
     base={'fixture_id':fixture['fixture_id'],'home':fixture['home'],'away':fixture['away'],
         'home_id':fixture['home_id'],'away_id':fixture['away_id'],'kickoff_madrid':fixture['kickoff_madrid'],
@@ -58,7 +63,9 @@ def reconcile_fixture(fixture,catalog,prior,pages):
     inspect=inspection_evidence(prior,event_id);absolute=local_kickoff(inspect.get('event_start_machine_readable'))
     scoped_header=displayed_header_kickoff(inspect.get('displayed_time_evidence') or {})
     used_clock=absolute or scoped_header or clock;difference=abs((used_clock-api).total_seconds())/60 if used_clock and api else None
-    competition_score=inspect.get('competition_match_score')
+    competition_score=(competition_similarity(fixture.get('league',''),inspect.get('page_title',''),
+        league_id=fixture.get('league_id'),country=fixture.get('country'),season=fixture.get('season'))
+        if inspect.get('page_title') else inspect.get('competition_match_score'))
     title_match=None
     if inspect.get('page_title'):
         national=(norm(fixture.get('country')) in {'world','mundo','international'})
@@ -69,7 +76,9 @@ def reconcile_fixture(fixture,catalog,prior,pages):
     category=win['category_compatibility'];category_unknown=category=='CATEGORY_UNCONFIRMED'
     page_category=category_compatibility(fixture,inspect.get('page_title','')) if inspect.get('page_title') else None
     senior_inferred=senior_category_corroborated(fixture,category,competition_score,page_category)
-    if senior_inferred:category_unknown=False
+    senior_explicit=bool(explicit and str(fixture.get('category_level')).upper()=='SENIOR'
+                         and str(fixture.get('category_evidence_status')).upper()=='CORROBORATED')
+    if senior_inferred or senior_explicit:category_unknown=False
     base.update(event_id=event_id,bwin_url=win['bwin_url'],source_pages=win.get('source_pages',[]),
         name={'status':'CANDIDATE_COMPATIBLE','score':win['name_score'],'order':win['team_order_status'],
               'inspection_title_match':title_match},
@@ -77,7 +86,7 @@ def reconcile_fixture(fixture,catalog,prior,pages):
               'api':api.isoformat() if api else None,'observed':used_clock.isoformat() if used_clock else None,
               'source':'INSPECTION_ABSOLUTE' if absolute else 'SCOPED_PREMATCH_HEADER' if scoped_header else 'CATALOG_RELATIVE_CAPTURE_ANCHORED' if clock else None,
               'difference_minutes':difference},
-        category={'status':'SENIOR_COMPETITION_CORROBORATED' if senior_inferred else 'UNKNOWN_PENDING' if category_unknown else category},
+        category={'status':'SENIOR_COMPETITION_CORROBORATED' if senior_inferred or senior_explicit else 'UNKNOWN_PENDING' if category_unknown else category},
         competition={'status':'CORROBORATED_INSPECTION' if competition_ok else 'UNVERIFIED','score':competition_score},
         recovery='OFFLINE_LOCAL_CATALOG')
     if title_match is False or (inspect.get('event_id_from_url') and str(inspect.get('event_id_from_url'))!=str(event_id)):

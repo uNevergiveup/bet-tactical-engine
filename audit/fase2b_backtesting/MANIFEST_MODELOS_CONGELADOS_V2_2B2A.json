@@ -1,0 +1,170 @@
+{
+  "schema_version": "2B.2A-frozen-models",
+  "generated_utc": "2026-11-19T01:19:43.320762+00:00",
+  "supersedes_manifest": "audit/iteracion_2_2b/MANIFEST_MODELOS_CONGELADOS.json",
+  "supersedes_manifest_sha256": "17ba669f7dca3cc5900ce538e24e8ba1c3bbfb6fa52f17c356a3453048dd2f08",
+  "corpus_last_fixture_utc": "2026-11-14T19:45:00+00:00",
+  "prospective_sample_status": "PENDIENTE_MUESTRA_PROSPECTIVA",
+  "prospective_ft_found_after_cutoff_n": 0,
+  "prospective_min_sample_target": {
+    "CLUB": 200,
+    "NATIONAL_TEAM": 50
+  },
+  "historical_code_hashes_2_2b": {
+    "bet_engine/modeling/experimental_v2_1b.py": "e7cfd77d426d85ecce40bd82b6e99918764641e5ea640f0e7169009fad1f6355",
+    "bet_engine/modeling/prospective_registry.py": "0701287568209ea1341f41193286ff93f66086f14b5a610e9d508fc55572cdbb",
+    "bet_engine/modeling/distributions.py": "b85d7ab092217833234f53f0b9d90b56705c115f4b9a373a25e282ef5d5d8276",
+    "bet_engine/context/observation_store.py": "c9223b468b6ceba0ab92b805fb292766da8165047264bcd6db8eeeb5b5c812d0",
+    "config/constants.py": "8bfb38339f628868b53b81f714e3506674fa91a558f76215d228bf7282043325"
+  },
+  "change_traceability": {
+    "bet_engine/context/observation_store.py": "Modificado tras 2.2B en Fases 2A.1/2A.1B (procedencia de entrenador) y Fase 2B.2A (build_league_catalog, prefer_informative_historical_match e identidad de liga/temporada > 0).",
+    "bet_engine/context/history_quality.py": "Fase 2B.2A: same_competition_season y same_meaningful_stratum excluyen UNKNOWN y IDs <= 0.",
+    "bet_engine/modeling/distributions.py": "Fase 2B.2A: bandera opt-in strict_competition_identity=False que preserva CoherentMatchModeler_baseline_2.0_2.1A intacto y aisla la variante strict_comp_identity.",
+    "bet_engine/modeling/experimental_v2_1b.py": "Fase 2B.2A: bandera opt-in strict_competition_identity=False en ExperimentalConfig sin alterar M0..M4 congelados.",
+    "bet_engine/modeling/calibration.py": "Fase 2B.2A: WalkForwardEvaluator alineado a max_goals=12, principal PREMATCH sin filtrar rc_target y consolidación determinista."
+  },
+  "code_hashes": {
+    "bet_engine/modeling/experimental_v2_1b.py": "9031179c856b574c777d8ed8ee99c62820f27a9be9b4ee3ab05cefce56ec3be3",
+    "bet_engine/modeling/prospective_registry.py": "0701287568209ea1341f41193286ff93f66086f14b5a610e9d508fc55572cdbb",
+    "bet_engine/modeling/distributions.py": "3f690ae1493a30df63fc20301db133af0449935857f82d6b10b3febbf8c68b26",
+    "bet_engine/modeling/calibration.py": "1868c8c8fbe5b394c41262b849fe9d19268fdf8410f47dc33c0fe18daff3c380",
+    "bet_engine/context/observation_store.py": "2f0236243e74f160fae604d5e5e2f09257e4c39aa65807fad13dbef4ae143c79",
+    "bet_engine/context/history_quality.py": "1cc62f8d94f82d70d88f6e733ad6cb398290fe09644545402efc70122bfe77d2",
+    "config/constants.py": "8bfb38339f628868b53b81f714e3506674fa91a558f76215d228bf7282043325",
+    "tools/reproduce_baseline_backtest.py": "4429abf8655e9f41950d09943a2392e3975baf029974e10a93319752603cb5a7"
+  },
+  "train_fit_base_rates": {
+    "CLUB": [
+      1.5938,
+      1.339
+    ],
+    "NATIONAL_TEAM": [
+      1.8148,
+      1.4444
+    ]
+  },
+  "elo_parameters": {
+    "initial_rating": 1500.0,
+    "k_factor": 20.0,
+    "hfa": 55.0,
+    "scale": 400.0,
+    "min_matches_for_use": 3
+  },
+  "frozen_candidates": {
+    "M0": {
+      "name": "M0_baseline_L20",
+      "multiplicative": false,
+      "use_sos_opp_rates": false,
+      "sos_alpha": 0.35,
+      "use_elo": false,
+      "elo_weight": 0.25,
+      "half_life_days": null,
+      "venue_blend": 0.25,
+      "shrink_k": 8.0,
+      "rho": -0.04
+    },
+    "M0_plus_Elo": {
+      "name": "M0_plus_Elo_0.25",
+      "multiplicative": false,
+      "use_sos_opp_rates": false,
+      "sos_alpha": 0.35,
+      "use_elo": true,
+      "elo_weight": 0.25,
+      "half_life_days": null,
+      "venue_blend": 0.25,
+      "shrink_k": 8.0,
+      "rho": -0.04
+    },
+    "M3": {
+      "name": "M3_mult_sos0.4_novb",
+      "multiplicative": true,
+      "use_sos_opp_rates": true,
+      "sos_alpha": 0.4,
+      "use_elo": false,
+      "elo_weight": 0.25,
+      "half_life_days": null,
+      "venue_blend": 0.0,
+      "shrink_k": 8.0,
+      "rho": -0.04
+    },
+    "M4": {
+      "name": "M4_mult_sos0.4_novb_k12",
+      "multiplicative": true,
+      "use_sos_opp_rates": true,
+      "sos_alpha": 0.4,
+      "use_elo": false,
+      "elo_weight": 0.25,
+      "half_life_days": null,
+      "venue_blend": 0.0,
+      "shrink_k": 12.0,
+      "rho": -0.04
+    },
+    "M4_plus_Elo": {
+      "name": "M4_plus_Elo_0.25",
+      "multiplicative": true,
+      "use_sos_opp_rates": true,
+      "sos_alpha": 0.4,
+      "use_elo": true,
+      "elo_weight": 0.25,
+      "half_life_days": null,
+      "venue_blend": 0.0,
+      "shrink_k": 12.0,
+      "rho": -0.04
+    }
+  },
+  "sources": [
+    {
+      "path": "outputs/reconciliation_real_20261111/coverage_models_final/preselection_cache_recovered.json",
+      "sha256": "eda44f051bf5a51fb8ffe0546aa559f4bc4cdb0a05037017e09a8666c2227867",
+      "bytes": 2299148
+    },
+    {
+      "path": "outputs/discovery/2026-11-02_1500_0300/prospective_trial/enriched/preselection.json",
+      "sha256": "20218d6ef05c505428709f74b43749f0375de4e4c67035f14dbafbd3821c237e",
+      "bytes": 450231
+    },
+    {
+      "path": "outputs/discovery/2026-11-03_1500_0300/prospective_trial/enriched/preselection.json",
+      "sha256": "ca8327bf94636731275312ce7d7fc7229592eaee511f998e918ae3d94dbf8d2c",
+      "bytes": 121271
+    },
+    {
+      "path": "outputs/discovery/2026-11-03_1600_0200/prospective_trial/enriched/preselection.json",
+      "sha256": "bf6b6658c37f9d9e4df63be7f96799c61bad42b9f6d4ceab627a3f6f346d1584",
+      "bytes": 120772
+    },
+    {
+      "path": "outputs/discovery/2026-11-07_1500_0300/prospective_trial/enriched/preselection.json",
+      "sha256": "f1095a2f3ea9dec8719cad05102a80cd712e1d5af20d526a0a28e54a4ac94341",
+      "bytes": 22877586
+    },
+    {
+      "path": "outputs/discovery/2026-11-09_1500_0300/prospective_trial/enriched/preselection.json",
+      "sha256": "ada40f30a2acb128d396f6a24fda98450cfdceb1ac1eac82e90ebeb85f5a3d57",
+      "bytes": 1569699
+    },
+    {
+      "path": "outputs/discovery/2026-11-10_1500_0300/prospective_trial/enriched/preselection.json",
+      "sha256": "f44191416d7d1d91a06aea6f73d1184b3684f5202c8aa6bf990e2c812728008a",
+      "bytes": 2790401
+    },
+    {
+      "path": "outputs/discovery/2026-11-11_1500_0300/prospective_trial/enriched/preselection.json",
+      "sha256": "122ef053a86adff6c28cef0b7d5295a37a66bf183c9a2f26cc1a32c66ca79239",
+      "bytes": 2265733
+    },
+    {
+      "path": "outputs/discovery/2026-11-12_1500_0300/prospective_trial/enriched/preselection.json",
+      "sha256": "9f9cadb94bcd7f977fb896d03b4e5e9171724ea8b1c4985cb44644bff0fa6d5f",
+      "bytes": 830857
+    },
+    {
+      "path": "outputs/discovery/2026-11-17_1500_0300/prospective_trial/enriched/preselection.json",
+      "sha256": "705a4fe44016403e45e0ecd1459223049aba0985865b89c93786c4cec31f42f0",
+      "bytes": 512723
+    }
+  ],
+  "prospective_registry_module": "bet_engine/modeling/prospective_registry.py",
+  "prospective_cli": "tools/prospective_tracker.py"
+}

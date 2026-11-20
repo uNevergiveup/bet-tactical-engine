@@ -1,0 +1,3257 @@
+# === CORRECCIÓN PUNTUAL DE VENTANAS PREMATCH — DIFF FOCALIZADO ===
+diff --git a/bwin_market_preflight.py b/bwin_market_preflight.py
+index 100704d2..49cb115c 100644
+--- a/bwin_market_preflight.py
++++ b/bwin_market_preflight.py
+@@ -30,6 +30,7 @@ VERSION = '0.3.1-market-preflight-time-evidence'
+ ID_RE = re.compile(r'(?:-2:|:)(\d{5,12})$')
+ CATALOG_TIME_RE = re.compile(r'\b(hoy|ma(?:ñ|n)ana)\s*/\s*(\d{1,2}):(\d{2})\b', re.I)
+ CATALOG_ABS_RE = re.compile(r'\b(\d{1,2})/(\d{1,2})/(\d{2,4})\s+(\d{1,2}):(\d{2})\b')
++CATALOG_COUNTDOWN_RE = re.compile(r'\b(?:comienza|empieza)\s+en\s+(?:(?P<h>\d{1,2})\s*h(?:oras?)?\s*)?(?P<m>\d{1,3})\s*min(?:utos?)?\b', re.I)
+ LIVE_RE = re.compile(r'(?i)\blive(?:1t|2t|descanso|parado)?\b|\ben\s+vivo\b|\bdescanso\b|\b\d\s*[tT]\s*[•:]')
+ MARKET_LABEL_RE = re.compile(r'^\s*(?:mercado|market)\s*:\s*(.+?)\s*$', re.I)
+ SELECTION_LABEL_RE = re.compile(r'^\s*(?:selecci[oó]n|selection)\s*:\s*(.+?)\s*$', re.I)
+@@ -96,9 +97,18 @@ def time_evidence(match, catalog, *, tolerance_minutes=3):
+                 if y<100:y+=2000
+                 try: start=datetime(y,mon,day,h,mn,tzinfo=MADRID); method='BWIN_VISIBLE_DATED_TIME'
+                 except ValueError:pass
++        if start is None:
++            cd=CATALOG_COUNTDOWN_RE.search(raw)
++            if cd and item.get('browser_timezone', 'Europe/Madrid') == 'Europe/Madrid':
++                cd_mins = int(cd.group('h') or 0) * 60 + int(cd.group('m'))
++                if 0 < cd_mins <= 180:
++                    start = observation.astimezone(MADRID) + timedelta(minutes=cd_mins)
++                    method = 'BWIN_EVENT_COUNTDOWN_MINUTES'
+         if start is not None:
+             diff=abs((start-kickoff).total_seconds())/60
+-            candidates.append((diff,{'status':'DISPLAY_TIME_CORROBORATED' if diff<=tolerance_minutes else 'DISPLAY_TIME_CONFLICT',
++            eff_tol = 4 if method == 'BWIN_EVENT_COUNTDOWN_MINUTES' else tolerance_minutes
++            ok_status = 'COUNTDOWN_TIME_CORROBORATED' if method == 'BWIN_EVENT_COUNTDOWN_MINUTES' else 'DISPLAY_TIME_CORROBORATED'
++            candidates.append((diff,{'status':ok_status if diff<=eff_tol else 'DISPLAY_TIME_CONFLICT',
+                                      'source':method,'observed_at_utc':observation.astimezone(timezone.utc).isoformat(),
+                                      'bwin_visible_kickoff_madrid':start.isoformat(),
+                                      'api_kickoff_madrid':kickoff.astimezone(MADRID).isoformat(),
+@@ -176,7 +186,81 @@ def select_matches(data, fixture_ids, top):
+         return [byid[f] for f in dict.fromkeys(fixture_ids)]
+     found=[x for x in rows if x.get('bwin_event_id') and x.get('bwin_url')]
+     found.sort(key=lambda x:(-(float(x.get('research_priority_score') or 0)),int(x.get('fixture_id') or 0)))
+-    return found[:top]
++    return found[:top] if top else list(rows)
++
++
++def exploration_check(m, catalog, now, min_lead, max_age):
++    """Research admission only. Never upgrades the strict identity evidence."""
++    from bwin_discovery import match_catalog, catalog_relative_kickoff, category_compatibility
++    checked=validate_match(m,catalog,now,min_lead,max_age)
++    strict_reasons=list(checked['reasons'])
++    checked.update(validation_level='EXPLORATION',final_validation_reasons=strict_reasons,
++                   final_validation_pending=bool(strict_reasons),actionable_bet=False)
++    candidates=[row for row in catalog if str(row.get('bwin_event_id'))==str(m.get('bwin_event_id'))]
++    # Reapply the existing team/order/category matcher to the actual observed
++    # event. A manual confirmation is provenance, not a bypass of this gate.
++    possible=match_catalog(m,candidates)
++    hard=[r for r in strict_reasons if r in {
++        'EVENT_ID_AND_URL_MISMATCH','INSPECTED_EVENT_ID_MISMATCH','BWIN_EVENT_LIVE',
++        'INVALID_TIMEZONE_AWARE_KICKOFF','ALREADY_STARTED_OR_INSUFFICIENT_PREMATCH_MARGIN',
++        'BWIN_API_KICKOFF_CONFLICT','CATALOG_TIMESTAMP_FROM_FUTURE','DISCOVERY_SNAPSHOT_TOO_OLD'}]
++    if len(possible)!=1 or possible[0]['name_score']<.94:hard.append('TEAM_IDENTITY_NOT_CORROBORATED')
++    if m.get('candidates_found',1)>1:hard.append('AMBIGUOUS_EVENT_IDENTITY')
++    inspection=m.get('inspection') or {}
++    if inspection.get('identity_status') in {'TITLE_MISMATCH_REVIEW','EVENT_ID_CHANGED_REVIEW',
++        'KICKOFF_MISMATCH_REVIEW','CONFLICTING_TIME_SOURCES_REVIEW','KICKOFF_COUNTDOWN_MISMATCH_REVIEW',
++        'CATEGORY_CONFLICT','COMPETITION_CONFLICT'}:
++        hard.append(inspection['identity_status'])
++    if m.get('competition_compatibility')=='COMPETITION_CONFLICT':hard.append('COMPETITION_CONFLICT')
++    page_category=category_compatibility(m,inspection.get('page_title') or '')
++    if page_category in {'GENDER_CONFLICT','NON_ADULT_CONFLICT'}:hard.append('CATEGORY_CONFLICT')
++    kickoff=isodt(m.get('kickoff_madrid'))
++    event_time=isodt(inspection.get('event_start_machine_readable'))
++    if not event_time and len(candidates)==1:event_time=catalog_relative_kickoff(candidates[0])
++    if event_time and kickoff and abs((event_time-kickoff).total_seconds())>15*60:
++        hard.append('BWIN_API_KICKOFF_CONFLICT')
++    warnings=[]
++    if any(r in strict_reasons for r in ('KICKOFF_NOT_CORROBORATED','NO_TIMESTAMPED_CATALOG_EVIDENCE')):
++        warnings.append('TIME_UNCONFIRMED')
++    if not m.get('gender') or m.get('gender')=='UNKNOWN' or not m.get('category_evidence_status'):
++        warnings.append('CATEGORY_UNKNOWN')
++    if not m.get('competition_similarity') or m.get('competition_similarity',0)<.82:
++        warnings.append('COMPETITION_UNCONFIRMED')
++    checked['final_validation_pending']=bool(strict_reasons or warnings)
++    checked['final_validation_reasons']=sorted(set(strict_reasons+warnings))
++    if m.get('manual_identity_review',{}).get('decision')=='REJECT':hard.append('MANUAL_IDENTITY_REJECTED')
++    checked.update(reasons=sorted(set(hard)),warnings=warnings,
++                   status='BLOCKED' if hard else 'READY_FOR_SCRAPER')
++    return checked
++
++
++def reviewed_discovery(data, path, source_sha256):
++    """Apply auditable user decisions to a copy, preserving the source snapshot."""
++    import copy
++    doc=copy.deepcopy(data);review=json.loads(path.read_text(encoding='utf-8'))
++    if review.get('source_discovery_sha256')!=source_sha256:
++        raise ValueError('MANUAL_REVIEW_SOURCE_CONTENT_MISMATCH')
++    seen=set()
++    for decision in review.get('decisions',[]):
++        fid=decision['fixture_id']
++        if fid in seen:raise ValueError('DUPLICATE_MANUAL_DECISION')
++        seen.add(fid)
++        if (decision.get('decision') not in {'CONFIRM','CORRECT','REJECT'} or
++            not decision.get('reviewer') or not decision.get('evidence') or not isodt(decision.get('reviewed_at'))):
++            raise ValueError('MANUAL_REVIEW_REQUIRES_REVIEWER_TIME_AND_EVIDENCE')
++        matches=[m for m in doc['matches'] if m['fixture_id']==fid]
++        if len(matches)!=1:raise ValueError('MANUAL_FIXTURE_NOT_UNIQUE')
++        m=matches[0]
++        m['manual_identity_review']=decision
++        if decision['decision']=='CORRECT':
++            event=decision['event']
++            if published_event_id(event.get('bwin_url'))!=str(event.get('bwin_event_id')):
++                raise ValueError('MANUAL_EVENT_ID_URL_CONFLICT')
++            m.update(bwin_event_id=str(event['bwin_event_id']),bwin_url=event['bwin_url'],
++                     status='POSSIBLE_EVENT_FOUND',identity_status='NOT_VERIFIED',inspection=None,candidates_found=1)
++            doc['catalog_observed']=[e for e in doc.get('catalog_observed',[])
++                                      if str(e.get('bwin_event_id'))!=str(event['bwin_event_id'])]+[event]
++    return doc
+ 
+ def validate_match(m, catalog, now, min_lead, max_age):
+     info={'fixture_id':m.get('fixture_id'),'home':m.get('home'),'away':m.get('away'),
+@@ -197,7 +281,8 @@ def validate_match(m, catalog, now, min_lead, max_age):
+     if inspection.get('is_live') is True: reasons.append('BWIN_EVENT_LIVE')
+     kickoff=isodt(m.get('kickoff_madrid'))
+     if not kickoff: reasons.append('INVALID_TIMEZONE_AWARE_KICKOFF')
+-    elif (kickoff-now).total_seconds() < min_lead*60: reasons.append('ALREADY_STARTED_OR_INSUFFICIENT_PREMATCH_MARGIN')
++    elif (kickoff-now).total_seconds() <= 0 or (kickoff-now).total_seconds() < min_lead*60:
++        reasons.append('ALREADY_STARTED_OR_INSUFFICIENT_PREMATCH_MARGIN')
+     evidence=time_evidence(m,catalog)
+     # A verified relative countdown is permitted ONLY when no conflicting Bwin
+     # clock was found, is tied to the same catalog event and has a real capture time.
+@@ -367,41 +452,80 @@ def snapshot_odds(path,eid):
+             'warnings':warnings,'status':status,
+             '_parsed_selection_rows':rows}
+ 
+-def run_scraper(root,out,eid,url,refresh=False,immutable=False):
+-    if refresh:
+-        # Capture in a new directory first. A failed scrape never replaces the
+-        # canonical snapshot; every previous byte remains recoverable by SHA.
+-        canonical=root/'outputs'/'matches'/eid/'inputs'/f'cuotas_bwin_{eid}.txt'
++def run_scraper(root,out,eid,url,refresh=False,immutable=False,timeout_seconds=240,scraper_attempts=1):
++    root=Path(root).resolve();out=Path(out).resolve();eid=str(eid)
++    canonical=root/'outputs'/'matches'/eid/'inputs'/f'cuotas_bwin_{eid}.txt'
++    if published_event_id(url)!=eid:
++        return {'returncode':None,'error':'EVENT_ID_URL_CONFLICT'}
++    if immutable or refresh:
+         if (canonical.parent.parent/'manifest.json').exists() and not immutable:
+             return {'returncode':None,'error':'Evento preparado: usar prematch_single.py refresh-odds para actualizar manifest e invalidar derivados'}
+-        if canonical.exists():
+-            old=snapshot_odds(canonical,eid)
+-            stage=canonical.parent.parent/'staging'/utcnow().strftime('%Y%m%dT%H%M%S%fZ')/eid/'inputs'
+-            stage.mkdir(parents=True,exist_ok=False)
+-            env=os.environ.copy();env.update(PREMATCH_BATCH_MODE='1',PREMATCH_EVENT_ID=eid,PREMATCH_EVENT_DATA_DIR=str(stage.resolve()),PREMATCH_IMMUTABLE_CAPTURE='1')
+-            log=stage/'scraper.log'
+-            with log.open('w') as fh:
+-                code=subprocess.run([sys.executable,'-u',str(root/'scraper_bwin.py'),'--url',url],cwd=root,env=env,stdout=fh,stderr=subprocess.STDOUT).returncode
+-            fresh=stage/canonical.name
+-            if code or not fresh.is_file():return {'returncode':code,'error':'Recaptura fallida; snapshot previo intacto','log':str(log)}
++        # Use precisely the operational staging contract already enforced by
++        # scraper_bwin.rutas_salida_evento. The batch archive is never an env path.
++        started=utcnow().astimezone(timezone.utc);stamp=started.strftime('%Y%m%dT%H%M%S%fZ')
++        stage=canonical.parent.parent/'staging'/stamp/eid/'inputs'
++        history=out/'captures'/eid/stamp
++        stage.mkdir(parents=True,exist_ok=False);history.mkdir(parents=True,exist_ok=False)
++        fresh=stage/canonical.name;archived=history/canonical.name;log=history/'scraper.log'
++        old_sha=hashlib.sha256(canonical.read_bytes()).hexdigest() if canonical.is_file() else None
++        info={'returncode':None,'log':str(log),'started_at_utc':started.isoformat(),
++              'operational_inputs':str(stage),'archive_directory':str(history),
++              'original_snapshot_path':str(canonical),'original_sha256':old_sha}
++        env=os.environ.copy();env.update(PREMATCH_BATCH_MODE='1',PREMATCH_EVENT_ID=eid,
++            PREMATCH_EVENT_DATA_DIR=str(stage),PREMATCH_IMMUTABLE_CAPTURE='1')
++        command=[sys.executable,'-u',str(root/'scraper_bwin.py'),'--url',url,'--intentos',str(scraper_attempts)]
++        info['command']=command
++        try:
++            with log.open('w',encoding='utf-8') as fh:
++                result=subprocess.run(command,cwd=root,env=env,stdout=fh,stderr=subprocess.STDOUT,timeout=timeout_seconds)
++            info['returncode']=result.returncode
++            if result.returncode:
++                raise ValueError('SCRAPER_EXIT_NONZERO')
++            if not fresh.is_file():raise ValueError('NO_NEW_SCRAPER_OUTPUT')
+             declared=re.findall(r'(?m)^TXT:\s*(.+?\.txt)\s*$',log.read_text(encoding='utf-8',errors='replace'))
+-            if not declared or Path(declared[-1].strip()).resolve()!=fresh.resolve():
+-                return {'returncode':None,'error':'Recaptura sin declaración TXT exacta; snapshot previo intacto','log':str(log)}
+-            snap=snapshot_odds(fresh,eid)
+-            capture=isodt(snap['capture_declared_madrid']);now=utcnow()
+-            if not capture or not 0<=(now-capture).total_seconds()<=120 or not old.get('capture_declared_madrid') or capture<=isodt(old['capture_declared_madrid']):
+-                return {'returncode':None,'error':'Recaptura sin tiempo nuevo verificable; snapshot previo intacto'}
++            declared_path=Path(declared[-1].strip()) if declared else None
++            if declared_path and not declared_path.is_absolute():declared_path=root/declared_path
++            if not declared_path or declared_path.resolve()!=fresh.resolve():raise ValueError('SCRAPER_PATH_NOT_DECLARED')
++            snap=snapshot_odds(fresh,eid);captured=isodt(snap.get('capture_declared_madrid'))
++            if not captured or not started-timedelta(seconds=5)<=captured<=utcnow()+timedelta(seconds=5):
++                raise ValueError('CAPTURE_NOT_FROM_THIS_ATTEMPT')
++            if snap.get('source_url')!=url:raise ValueError('CAPTURE_URL_MISMATCH')
++            if (snap['status']!='MARKET_TRIPLES_EXTRACTED' or not snap['selection_triplets_verified'] or
++                snap.get('invalid_price_values') or snap.get('unparsed_colon_lines') or
++                snap.get('selection_count_matches_scraper_header') is False):
++                raise ValueError('CAPTURE_MARKETS_OR_COUNTS_INVALID')
++            current_sha=hashlib.sha256(canonical.read_bytes()).hexdigest() if canonical.is_file() else None
++            if current_sha!=old_sha:raise ValueError('ORIGINAL_CHANGED_DURING_CAPTURE')
++            shutil.copy2(fresh,archived)
++            if hashlib.sha256(archived.read_bytes()).hexdigest()!=snap['sha256']:raise ValueError('ARCHIVE_SHA_MISMATCH')
++            info.update(archived_snapshot_path=str(archived),snapshot_sha256=snap['sha256'],
++                        capture_madrid=snap['capture_declared_madrid'],canonical_unchanged=True)
+             if immutable:
+-                if hashlib.sha256(canonical.read_bytes()).hexdigest()!=old['sha256']:raise ValueError('ORIGINAL_CHANGED_DURING_CAPTURE')
+-                return {'returncode':0,'fresh_snapshot_path':str(fresh),'original_snapshot_path':str(canonical),'original_sha256':old['sha256'],'canonical_unchanged':True,'log':str(log)}
+-            archive=canonical.parent.parent/'archives'/('odds_'+now.strftime('%Y%m%dT%H%M%S%fZ'))
+-            archive.mkdir(parents=True,exist_ok=False)
+-            previous=archive/canonical.name
+-            shutil.copy2(canonical,previous)
+-            if hashlib.sha256(previous.read_bytes()).hexdigest()!=old['sha256']:raise ValueError('ARCHIVE_SHA_MISMATCH')
+-            (archive/'provenance.json').write_text(json.dumps({'original_path':str(canonical),'sha256':old['sha256'],'replacement_sha256':snap['sha256'],'archived_at_utc':now.isoformat()},indent=2))
+-            shutil.copy2(fresh,canonical)
+-            return {'returncode':0,'fresh_snapshot_path':str(canonical),'archived_previous':str(previous),'log':str(log)}
++                info['fresh_snapshot_path']=str(archived)
++            else:
++                if old_sha:
++                    previous=history/'previous'/canonical.name;previous.parent.mkdir()
++                    shutil.copy2(canonical,previous)
++                    if hashlib.sha256(previous.read_bytes()).hexdigest()!=old_sha:raise ValueError('PREVIOUS_ARCHIVE_SHA_MISMATCH')
++                    info['archived_previous']=str(previous)
++                canonical.parent.mkdir(parents=True,exist_ok=True)
++                shutil.copy2(archived,canonical)
++                info.update(fresh_snapshot_path=str(canonical),canonical_unchanged=False)
++        except (OSError,ValueError,subprocess.TimeoutExpired) as exc:
++            info.pop('fresh_snapshot_path',None)
++            info['error']=f'{type(exc).__name__}: {exc}'
++            info['timed_out']=isinstance(exc,subprocess.TimeoutExpired)
++        finally:
++            info['canonical_unchanged']=(hashlib.sha256(canonical.read_bytes()).hexdigest() if canonical.is_file() else None)==old_sha
++            info['finished_at_utc']=utcnow().isoformat()
++            info['duration_seconds']=round((isodt(info['finished_at_utc'])-started).total_seconds(),6)
++            text=log.read_text(encoding='utf-8',errors='replace') if log.is_file() else ''
++            info['subprocess_output_tail']=text[-4000:]
++            if 'error' in info and text:info['error']+=' | '+text[-1500:].strip()
++            diagnostics=stage.parent/'scraper'
++            if diagnostics.is_dir():shutil.copytree(diagnostics,history/'scraper_diagnostics')
++            (history/'provenance.json').write_text(json.dumps(info,ensure_ascii=False,indent=2)+'\n',encoding='utf-8')
++        return info
+     script=root/'scraper_bwin.py'
+     if not script.is_file():return {'returncode':None,'error':f'No existe {script}; no se ejecutó scraping'}
+     path=root/'outputs'/'matches'/eid/'inputs'/f'cuotas_bwin_{eid}.txt'
+@@ -412,17 +536,19 @@ def run_scraper(root,out,eid,url,refresh=False,immutable=False):
+     env['PREMATCH_BATCH_MODE']='1'
+     env['PREMATCH_EVENT_ID']=eid
+     env['PREMATCH_EVENT_DATA_DIR']=str(path.parent.resolve())
+-    command=[sys.executable,'-u',str(script),'--url',url]
++    command=[sys.executable,'-u',str(script),'--url',url,'--intentos',str(scraper_attempts)]
+     started=utcnow()
+     try:
+         with log.open('w',encoding='utf-8') as fh:
+             fh.write(f'# {started.isoformat()} | Event ID {eid} | {script.name}\n');fh.flush()
+-            completed=subprocess.run(command,cwd=root,env=env,stdout=fh,stderr=subprocess.STDOUT,check=False)
++            completed=subprocess.run(command,cwd=root,env=env,stdout=fh,stderr=subprocess.STDOUT,check=False,timeout=timeout_seconds)
+         code=completed.returncode
+-    except OSError as ex: return {'returncode':None,'error':f'{type(ex).__name__}: {ex}','log':str(log)}
++    except (OSError,subprocess.TimeoutExpired) as ex: return {'returncode':None,'error':f'{type(ex).__name__}: {ex}','log':str(log)}
+     info={'returncode':code,'log':str(log),'started_at_utc':started.isoformat(),
+           'finished_at_utc':utcnow().isoformat()}
+-    if code != 0:info['error']='El scraper devolvió código distinto de cero'
++    if code != 0:
++        tail=log.read_text(encoding='utf-8',errors='replace')[-4000:]
++        info.update(error='El scraper devolvió código distinto de cero: '+tail[-1500:],subprocess_output_tail=tail)
+     # Require new output (not a previously existing file) and the declared TXT path.
+     if code==0:
+         text=log.read_text(encoding='utf-8',errors='replace')
+@@ -529,7 +655,13 @@ def main(argv=None):
+     p.add_argument('--min-odd-candidate',type=str,default='1.20',help='Cuota mínima para pasar el filtro de precio')
+     p.add_argument('--min-odd-observation',type=str,default='1.10',help='Cuota mínima para mantener en observación')
+     p.add_argument('--fixture-id',action='append',type=int,default=[])
+-    p.add_argument('--top',type=int,default=1)
++    p.add_argument('--top',type=int,default=0,help='0=todos; sin recorte implícito del inventario')
++    p.add_argument('--exploration',action='store_true',help='Permite hora/categoría pendientes para investigar, nunca para apuestas')
++    p.add_argument('--max-captures',type=int,default=0,help='0=todos; límite de intentos, incluidos fallos')
++    p.add_argument('--capture-timeout-seconds',type=int,default=240)
++    p.add_argument('--resume',action='store_true',help='Reutilizar solo capturas de este lote con mismos hashes y aún frescas')
++    p.add_argument('--identity-review',type=Path,help='Decisiones manuales identificadas y con evidencia; nunca fuerza VERIFIED')
++    p.add_argument('--write-identity-review',type=Path,help='Crear plantilla de revisión manual, sin red')
+     p.add_argument('--root',type=Path,default=Path.cwd())
+     p.add_argument('--output-dir',type=Path,default=Path('outputs/discovery/market_preflight'))
+     p.add_argument('--run-scraper',action='store_true',help='EJECUTAR scraper_bwin.py para encuentros validos; por defecto solo auditoria')
+@@ -540,7 +672,11 @@ def main(argv=None):
+     p.add_argument('--audit-txt',type=Path,help='Auditar un TXT indicado sin navegar, basado en su captura declarada; exige exactamente un --fixture-id')
+     p.add_argument('--min-lead-minutes',type=int,default=5)
+     p.add_argument('--max-discovery-age-minutes',type=int,default=180)
++    p.add_argument('--now-utc',help='Reloj UTC explícito opcional para evaluación reproducible')
+     args=p.parse_args(argv)
++    now_override=isodt(args.now_utc) if args.now_utc else None
++    if args.now_utc and (now_override is None or now_override.tzinfo is None):
++        p.error('--now-utc inválido: requiere ISO8601 con zona horaria')
+     if args.run_scraper:
+         from prematch_execution_control import require_external_confirmation
+         try:require_external_confirmation(args.confirm_external)
+@@ -551,7 +687,7 @@ def main(argv=None):
+         p.error('Usa solo uno: --run-scraper, --reuse-existing o --audit-txt')
+     if args.audit_txt and len(set(args.fixture_id))!=1:
+         p.error('--audit-txt exige exactamente un --fixture-id')
+-    if args.top<1:p.error('--top debe ser >=1')
++    if args.top<0 or args.max_captures<0 or args.capture_timeout_seconds<1:p.error('Presupuestos inválidos')
+     try:
+         candidate_limit=Decimal(args.min_odd_candidate)
+         observation_limit=Decimal(args.min_odd_observation)
+@@ -560,19 +696,66 @@ def main(argv=None):
+     except (ValueError,ArithmeticError):p.error('Umbrales: 1 < --min-odd-observation <= --min-odd-candidate')
+     if args.min_lead_minutes<0 or args.max_discovery_age_minutes<1:p.error('Margen o antigüedad inválidos')
+     root=args.root.resolve();out=args.output_dir.resolve();data=read_discovery(args.discovery)
++    if args.write_identity_review:
++        template={'source_discovery_sha256':hashlib.sha256(args.discovery.read_bytes()).hexdigest(),
++                  'decisions':[],
++                  'example':{'fixture_id':None,'decision':'CONFIRM','reviewer':'',
++                             'reviewed_at':'ISO8601 con offset','evidence':'ruta/hash o descripción comprobable',
++                             'event':{'bwin_event_id':'','bwin_url':'','text':'','text_observed_at_utc':''}}}
++        with args.write_identity_review.open('x',encoding='utf-8') as fh:json.dump(template,fh,ensure_ascii=False,indent=2)
++        return 0
++    source_path=args.discovery
++    if args.identity_review:
++        data=reviewed_discovery(data,args.identity_review,hashlib.sha256(args.discovery.read_bytes()).hexdigest())
++        out.mkdir(parents=True,exist_ok=True);source_path=out/'reviewed_discovery.json'
++        reviewed_bytes=(json.dumps(data,ensure_ascii=False,indent=2)+'\n').encode()
++        if source_path.exists() and source_path.read_bytes()!=reviewed_bytes:p.error('MANUAL_REVIEW_WRITE_ONCE_CONFLICT')
++        source_path.write_bytes(reviewed_bytes)
+     statistical_index={}
+     if args.preselection:
+         try:_,statistical_index=quality_gate.load_preselection(args.preselection)
+         except (OSError,ValueError,json.JSONDecodeError) as ex:p.error(f'Preselection inválida: {ex}')
+     selected=select_matches(data,args.fixture_id,args.top)
+-    results=[]
++    previous={};report_path=out/'market_preflight.json'
++    if report_path.exists():
++        if not args.resume:p.error('Salida existente: usa otro directorio o --resume explícito')
++        old=json.loads(report_path.read_text())
++        if old.get('source_sha256')!=hashlib.sha256(source_path.read_bytes()).hexdigest():p.error('RESUME_DISCOVERY_CHANGED')
++        if (old.get('validation_level','STRICT')!=('EXPLORATION' if args.exploration else 'STRICT') or
++            old.get('min_odd_candidate')!=str(candidate_limit) or old.get('min_odd_observation')!=str(observation_limit)):
++            p.error('RESUME_VALIDATION_CONTRACT_CHANGED')
++        prehash=hashlib.sha256(args.preselection.read_bytes()).hexdigest() if args.preselection else None
++        if old.get('source_preselection_sha256')!=prehash:p.error('RESUME_STATISTICS_CHANGED')
++        previous={str(m['fixture_id']):m for m in old.get('matches',[])}
++        table=out/'market_selection_review.csv'
++        if table.is_file():
++            with table.open(encoding='utf-8-sig',newline='') as fh:
++                for row in csv.DictReader(fh):
++                    prior=previous.get(str(row['fixture_id']))
++                    if prior is not None:
++                        prior.setdefault('_quality_rows',[]).append({k:v for k,v in row.items()
++                                                                   if k not in {'fixture_id','bwin_event_id'}})
++    results=[];attempts=0
++    owners={}
++    for m in data['matches']:
++        if m.get('bwin_event_id'):owners.setdefault(str(m['bwin_event_id']),set()).add(str(m['fixture_id']))
+     for m in selected:
+         eid=str(m.get('bwin_event_id') or '')
+         target=root/'outputs'/'matches'/eid/'inputs'/f'cuotas_bwin_{eid}.txt'
+         audit_path=args.audit_txt.resolve() if args.audit_txt else target if args.reuse_existing else None
+         declared_time=declared_capture_time(audit_path) if audit_path and audit_path.is_file() else None
+-        validation_at=declared_time.astimezone(timezone.utc) if declared_time else utcnow()
+-        checked=validate_match(m,data.get('catalog_observed',[]),validation_at,args.min_lead_minutes,args.max_discovery_age_minutes)
++        validation_at=declared_time.astimezone(timezone.utc) if declared_time else (now_override.astimezone(timezone.utc) if now_override else utcnow())
++        check=exploration_check if args.exploration else validate_match
++        checked=check(m,data.get('catalog_observed',[]),validation_at,args.min_lead_minutes,args.max_discovery_age_minutes)
++        if len(owners.get(eid,set()))>1:
++            checked['reasons'].append('BWIN_EVENT_REUSED_ACROSS_FIXTURES');checked['status']='BLOCKED'
++        prior=previous.get(str(m['fixture_id']),{})
++        prior_snap=prior.get('snapshot',{});prior_path=Path(prior_snap.get('snapshot_path') or '_missing_')
++        prior_time=isodt(prior_snap.get('capture_declared_madrid'))
++        if (args.resume and checked['status']=='READY_FOR_SCRAPER' and prior_path.is_file() and prior_time and
++            0<=(utcnow()-prior_time).total_seconds()<=args.max_discovery_age_minutes*60 and
++            hashlib.sha256(prior_path.read_bytes()).hexdigest()==prior_snap.get('sha256')):
++            results.append(prior);continue
+         if audit_path:
+             checked['time_validation_basis']='SCRAPER_TXT_DECLARED_CAPTURE_TIME' if declared_time else 'CURRENT_TIME_FALLBACK_NO_CAPTURE_TIME'
+             checked['audit_mode']='RETROSPECTIVE_SNAPSHOT_NOT_CURRENT_ODDS'
+@@ -581,9 +764,15 @@ def main(argv=None):
+         if checked['status']!='READY_FOR_SCRAPER':
+             print(f"[{m.get('fixture_id')}] BLOQUEADO: {', '.join(checked['reasons'])}",flush=True)
+             results.append(checked);continue
+-        print(f"[{m.get('fixture_id')}] {m.get('home')}–{m.get('away')} | bwin={eid} | hora CORROBORADA",flush=True)
++        clock_label='TIME_UNCONFIRMED' if 'TIME_UNCONFIRMED' in checked.get('warnings',[]) else 'hora CORROBORADA'
++        print(f"[{m.get('fixture_id')}] {m.get('home')}–{m.get('away')} | bwin={eid} | {clock_label}",flush=True)
+         if args.run_scraper:
+-            checked['scraper']=run_scraper(root,out,eid,m['bwin_url'],refresh=args.refresh_existing,immutable=args.immutable_capture)
++            if args.max_captures and attempts>=args.max_captures:
++                checked['status']='NOT_EVALUATED_BUDGET';checked['reasons'].append('CAPTURE_BUDGET_REACHED')
++                results.append(checked);continue
++            attempts+=1
++            checked['scraper']=run_scraper(root,out,eid,m['bwin_url'],refresh=args.refresh_existing,
++                immutable=args.immutable_capture,timeout_seconds=args.capture_timeout_seconds)
+             found=(checked['scraper'] or {}).get('fresh_snapshot_path')
+             if found:
+                 try:
+@@ -615,8 +804,15 @@ def main(argv=None):
+                 checked['status']='QUALITY_GATE_ERROR'
+         print(f"   {checked['status']}" + (f" | cuotas={checked['snapshot']['selection_triplets_verified']}" if 'snapshot' in checked else ''),flush=True)
+         results.append(checked)
+-    payload={'schema_version':VERSION,'generated_at_utc':utcnow().isoformat(),'source_discovery':str(args.discovery),
+-             'source_sha256':hashlib.sha256(args.discovery.read_bytes()).hexdigest(),'action':'RUN_SCRAPER' if args.run_scraper else 'AUDIT_TXT' if args.audit_txt else 'REUSE_EXISTING' if args.reuse_existing else 'AUDIT_ONLY',
++    pending=[m['fixture_id'] for m in results if m['status']=='NOT_EVALUATED_BUDGET']
++    retryable=[m['fixture_id'] for m in results if m['status'] in {'SCRAPER_FAILED_OR_UNVERIFIED','SCRAPER_OUTPUT_INVALID'}]
++    payload={'schema_version':VERSION,'generated_at_utc':utcnow().isoformat(),'source_discovery':str(source_path),
++             'source_sha256':hashlib.sha256(source_path.read_bytes()).hexdigest(),'action':'RUN_SCRAPER' if args.run_scraper else 'AUDIT_TXT' if args.audit_txt else 'REUSE_EXISTING' if args.reuse_existing else 'AUDIT_ONLY',
++             'validation_level':'EXPLORATION' if args.exploration else 'STRICT',
++             'batch_summary':{'planned':len(selected),'attempted_this_invocation':attempts,
++                 'status':'INCOMPLETE' if pending else 'COMPLETED_WITH_ERRORS' if retryable else 'COMPLETED',
++                 'pending_fixture_ids':pending,'retryable_fixture_ids':retryable,
++                 'states':dict(__import__('collections').Counter(m['status'] for m in results))},
+              'timezone':'Europe/Madrid','prematch_only':True,
+              'source_preselection':str(args.preselection) if args.preselection else None,
+              'source_preselection_sha256':hashlib.sha256(args.preselection.read_bytes()).hexdigest() if args.preselection else None,
+@@ -626,7 +822,8 @@ def main(argv=None):
+     print(f"Salida: {out/'market_preflight.json'} | {out/'market_preflight.csv'} | {out/'market_preflight.md'}")
+     print(f"Selecciones: {out/'market_selection_review.csv'} | investigables: {out/'market_research_shortlist.csv'}")
+     success_statuses={'READY_NOT_EXECUTED','MARKET_TRIPLES_EXTRACTED','HISTORICAL_MARKET_TRIPLES_EXTRACTED'}
+-    return 0 if results and all(x['status'] in success_statuses for x in results) else 2
++    # A structured per-fixture rejection/failure is not a global CLI failure.
++    return 0
+ 
+ from prematch_execution_control import confirmed_cli
+ main = confirmed_cli(main)
+diff --git a/prematch_daily.py b/prematch_daily.py
+index 598b5def..772d333a 100644
+--- a/prematch_daily.py
++++ b/prematch_daily.py
+@@ -10,6 +10,7 @@ import os
+ import re
+ import shutil
+ import sys
++import time as performance_clock
+ from datetime import timedelta, timezone
+ from pathlib import Path
+ from types import SimpleNamespace
+@@ -21,6 +22,55 @@ from prematch_runtime import reusable_preparation, scan, stamp, verified_preflig
+ # of an already prepared handoff is a lighter operation and may run until T-5;
+ # it still requires fresh quotes and all identity/integrity checks.
+ REVIEW_MIN_LEAD_MINUTES = 5
++MANUAL_BWIN_MIN_LEAD_MINUTES = 5
++
++
++def subprocess_component_seconds(base):
++    """Nested subprocess diagnostics; never added again to daily totals."""
++    groups = {
++        'api_fixture_and_history': {'discover_fixtures.py', 'preselect_matches.py'},
++        'statistical_processing': {'filter_major_leagues.py', 'prematch_pattern_discovery.py',
++                                   'prematch_pattern_engine.py'},
++        'bwin_discovery': {'bwin_discovery.py'},
++        'bwin_preflight': {'bwin_market_preflight.py'},
++        'commercial_scanner': {'prematch_opportunity_scanner.py'},
++    }
++    totals={key:0.0 for key in groups};totals['other']=0.0
++    path=Path(base)/'logs/pipeline_stage_timings.jsonl'
++    if not path.is_file():return totals
++    for line in path.read_text(encoding='utf-8').splitlines():
++        try:row=json.loads(line);elapsed=float(row.get('elapsed_seconds',0) or 0)
++        except (ValueError,TypeError,json.JSONDecodeError):continue
++        group=next((name for name,scripts in groups.items() if row.get('script') in scripts),'other')
++        totals[group]+=elapsed
++    return {key:round(value,4) for key,value in totals.items()}
++
++
++def complete_daily_metrics(base, doc, daily_started, exclusive, ended=None):
++    """Publish non-overlapping daily totals plus clearly nested diagnostics."""
++    ended=performance_clock.perf_counter() if ended is None else ended
++    daily_total=max(0.0,ended-daily_started)
++    exclusive={key:round(max(0.0,float(value)),4) for key,value in exclusive.items()}
++    accounted=sum(exclusive.values())
++    exclusive['unattributed_orchestration']=round(max(0.0,daily_total-accounted),4)
++    scan_internal=dict(doc.get('phase_metrics') or {})
++    metrics={
++        'schema_version':'2.0-daily-complete-timings',
++        'scope':'ONE_PREMATCH_DAILY_COMMAND',
++        'daily_total_elapsed_seconds':round(daily_total,4),
++        'exclusive_phase_seconds':exclusive,
++        'exclusive_phase_sum_seconds':round(sum(exclusive.values()),4),
++        'scan_internal_phase_seconds':scan_internal,
++        'subprocess_component_seconds_nested':subprocess_component_seconds(base),
++        'accounting':'exclusive phases sum to daily total; scan/subprocess breakdowns are nested diagnostics and must not be added again',
++    }
++    path=Path(doc.get('phase_metrics_path') or Path(base)/'phase_metrics.json')
++    trial.dump(path,metrics)
++    doc['phase_metrics']=metrics;doc['phase_metrics_path']=str(path)
++    if doc.get('run_handoff'):
++        trial.dump(Path(doc['run_handoff']),doc)
++    trial.dump(Path(base)/'handoff_prematch.json',doc)
++    return metrics
+ 
+ 
+ def run_optional_predictor(root, folder, args):
+@@ -228,7 +278,8 @@ def bwin_ranking_links(canonical, catalog, when, source, min_lead=45):
+             api = dict(fixture);api.setdefault('category_status',api.get('filter_status'))
+             api_ok = api_fixture_verification(api,now=when)[0]=='API_FIXTURE_VERIFIED'
+             category_ok = (api.get('gender')=='M' and row.get('category_compatibility')=='COMPATIBLE_OR_UNKNOWN') or (api.get('gender')=='F' and row.get('category_compatibility')=='FEMALE_CORROBORATED')
+-            competition_ok = competition_similarity(api.get('league',''), inspection.get('page_title',''))>=.82
++            competition_ok = competition_similarity(api.get('league',''), inspection.get('page_title',''),
++                league_id=api.get('league_id'),country=api.get('country'),season=api.get('season'))>=.82
+             order_ok = row.get('team_order_status') in ('HOME_AWAY','HOME_AWAY_TOKEN')
+             timezone_ok = evidence.get('time_evidence',{}).get('status')=='ABSOLUTE_TIME_VERIFIED' or catalog.get('user_time_reference')=='Europe/Madrid'
+             if api_ok and category_ok and competition_ok and order_ok and timezone_ok and evidence['status']=='READY_FOR_SCRAPER':
+@@ -307,7 +358,8 @@ def operational_research(args, now=None):
+     begin, finish = trial.local_window(day, start, end)
+     prepath = args.preselection
+     if prepath is None:
+-        prepath = trial.window_path(root, day, start, end) / 'prospective_trial/enriched/preselection.json'
++        window_folder = trial.window_path(root, day, start, end)
++        prepath = trial.latest_evaluation(window_folder) / 'prospective_trial/enriched/preselection.json'
+     prepath = prepath.resolve()
+     # Never search yesterday's directories as a fallback for a missing day.
+     for parent in prepath.parents:
+@@ -402,12 +454,13 @@ def operational_research(args, now=None):
+                 player_evidence = {'status': 'VERIFIED_CACHED_EVIDENCE', 'players_with_exposure': supported_players,
+                                    'source_sha256': trial.sha(player_path), 'bonus': min(3, supported_players*.25)}
+         components['player_evidence_bonus'] = player_evidence['bonus']
++        components['declared_coverage_bonus'] = 0.0
+         rests = {}
+         for side in ('home','away'):
+             rows = patterns.discovery.clean_observations(fixture, side, when)
+             rests[side] = round((ko-patterns._dt(rows[0]['kickoff_utc'])).total_seconds()/3600, 2) if rows else None
+         components['short_rest_penalty'] = 3 if any(v is not None and v < 72 for v in rests.values()) else 0
+-        score = round(components['tactical_quality'] + components['player_evidence_bonus'] - sum(v for k,v in components.items() if k.endswith('penalty')), 4)
++        score = round(components['tactical_quality'] + components['player_evidence_bonus'] + components['declared_coverage_bonus'] - sum(v for k,v in components.items() if k.endswith('penalty')), 4)
+         entry = {'fixture_id': fid, 'home': fixture['home'], 'away': fixture['away'], 'kickoff_madrid': ko.astimezone(trial.TZ).isoformat(),
+                  'research_priority': score, 'components': components, 'coverage': evaluated['coverage_summary'],
+                  'supported_signals': evaluated['signal_count'], 'contradictions': evaluated['contradictions'],
+@@ -533,7 +586,8 @@ def daily_tactical_research(args):
+     _,start,end=trial.resolve_window(config,args.window,args.start,args.end)
+     day=trial.parse_date_relative(args.date,today=when.astimezone(trial.TZ).date()) if args.date else automatic_day(when,start,end)
+     begin,finish=trial.local_window(day,start,end)
+-    source=(args.preselection or trial.window_path(root,day,start,end)/'prospective_trial/enriched/preselection.json').resolve()
++    window_folder=trial.window_path(root,day,start,end)
++    source=(args.preselection or trial.latest_evaluation(window_folder)/'prospective_trial/enriched/preselection.json').resolve()
+     if not source.is_file():
+         from prematch_tactical_history import prepare_research_from_cache
+         prepare_research_from_cache(root,source,when)
+@@ -560,7 +614,8 @@ def discovery_status(root, day, window=None):
+     config, _, _ = trial.load_window_config(root)
+     profile, start, end = trial.resolve_window(config, window, None, None)
+     day = trial.parse_date_relative(day) if not hasattr(day, 'isoformat') or isinstance(day, str) else day
+-    folder = trial.window_path(root, day, start, end)
++    window_folder = trial.window_path(root, day, start, end)
++    folder = trial.latest_evaluation(window_folder)
+     phase1 = root / 'outputs' / 'phase1' / folder.name
+     tracked = {
+         'handoff': folder / 'prospective_trial' / 'handoff_prematch.json',
+@@ -574,6 +629,7 @@ def discovery_status(root, day, window=None):
+         'profile': profile,
+         'date': day.isoformat(),
+         'folder': str(folder),
++        'window_folder': str(window_folder),
+         'reads_only': True,
+         'network': False,
+         'actionable_bet': False,
+@@ -604,7 +660,227 @@ def discovery_status(root, day, window=None):
+     return report
+ 
+ 
++def _latest_daily_run(base: Path) -> Path | None:
++    runs = sorted(p for p in (base / 'daily_runs').glob('*') if p.is_dir()) if (base / 'daily_runs').is_dir() else []
++    return runs[-1] if runs else None
++
++
++def diagnose_fixture(root, day, fixture_id: int, window=None, eval_dir: Path | None = None) -> dict:
++    """Strictly read-only diagnostic per fixture_id on frozen artifacts. Zero API/Bwin."""
++    root = Path(root).expanduser().resolve()
++    config, _, _ = trial.load_window_config(root)
++    profile, start, end = trial.resolve_window(config, window, None, None)
++    parsed_day = trial.parse_date_relative(day) if day and (not hasattr(day, 'isoformat') or isinstance(day, str)) else day
++    if eval_dir is not None:
++        folder = Path(eval_dir).expanduser().resolve()
++        window_folder = folder.parent.parent if folder.parent.name == 'evaluations' else folder.parent
++    else:
++        if parsed_day is None:
++            raise ValueError('Se requiere --date YYYY-MM-DD o --eval-dir')
++        window_folder = trial.window_path(root, parsed_day, start, end)
++        folder = trial.latest_evaluation(window_folder)
++    base = folder / 'prospective_trial'
++    if not base.is_dir():
++        raise FileNotFoundError(f'No existe evaluación congelada en {folder}')
++
++    fid_int = int(fixture_id)
++    fid_str = str(fid_int)
++    evidence_files: dict[str, str] = {}
++
++    def _read_optional(name: str, path: Path):
++        if path.is_file():
++            evidence_files[name] = str(path)
++            return trial.read(path)
++        return None
++
++    major_doc = _read_optional('fixtures_major', folder / 'fixtures_major.json') or {}
++    pre_doc = _read_optional('preselection', base / 'enriched/preselection.json') or {}
++    tac_doc = _read_optional('tactical_signal_engine', base / 'tactical/tactical_signal_engine.json') or {}
++    disc_doc = _read_optional('bwin_discovery', base / 'bwin/shared/bwin_discovery.json') or {}
++    audit_doc = _read_optional('identity_audit', base / 'bwin/identity_audit/identity_audit.json') or {}
++    handoff_doc = _read_optional('handoff_prematch', base / 'handoff_prematch.json') or {}
++    run_dir = _latest_daily_run(base)
++    ledger_doc = _read_optional('candidate_ledger', run_dir / 'candidate_ledger.json') if run_dir else None
++    if ledger_doc is None:
++        ledger_doc = _read_optional('candidate_ledger', base / 'candidate_ledger.json') or {}
++    scanner_doc = _read_optional('opportunity_scan', run_dir / 'opportunity/opportunity_scan.json') if run_dir else {}
++
++    pre_row = next((m for m in pre_doc.get('matches', []) if str(m.get('fixture_id')) == fid_str), None)
++    major_rows = major_doc.get('fixtures', []) + major_doc.get('excluded', []) + major_doc.get('review', [])
++    major_row = next((m for m in major_rows if str(m.get('fixture_id')) == fid_str), None)
++    match_meta = pre_row or major_row
++    if match_meta is None:
++        raise LookupError(f'Fixture {fid_str} no encontrado en {folder}')
++
++    stat_row = next((r for r in tac_doc.get('statistical_ranking', []) if str(r.get('fixture_id')) == fid_str), None)
++    tactical_row = next((r for r in tac_doc.get('ranking', []) if str(r.get('fixture_id')) == fid_str), None)
++    tac_fixture = (tac_doc.get('fixtures') or {}).get(fid_str) or {}
++    disc_row = next((m for m in disc_doc.get('matches', []) if str(m.get('fixture_id')) == fid_str), None)
++    audit_row = next((f for f in audit_doc.get('fixtures', []) if str(f.get('fixture_id')) == fid_str), None)
++    ledger_row = next((r for r in ledger_doc.get('fixtures', []) if str(r.get('fixture_id')) == fid_str), None)
++    scan_row = next((a for a in (scanner_doc or {}).get('audits', []) if str(a.get('fixture_id')) == fid_str), None)
++
++    preflight_paths = []
++    if run_dir and (run_dir / 'preflight').is_dir():
++        preflight_paths.extend(sorted((run_dir / 'preflight').glob(f'{fid_str}_*/market_preflight.json')))
++    if (base / 'preflight').is_dir():
++        preflight_paths.extend(sorted((base / 'preflight').glob(f'{fid_str}_*/market_preflight.json')))
++    preflight_match = None
++    if preflight_paths:
++        evidence_files['market_preflight'] = str(preflight_paths[-1])
++        pf_doc = trial.read(preflight_paths[-1])
++        preflight_match = next((m for m in pf_doc.get('matches', []) if str(m.get('fixture_id')) == fid_str), None)
++
++    bwin_eid = (
++        (preflight_match or {}).get('bwin_event_id')
++        or (disc_row or {}).get('bwin_event_id')
++        or (audit_row or {}).get('bwin_event_id')
++    )
++    manifest_path = root / 'outputs/matches' / str(bwin_eid) / 'manifest.json' if bwin_eid else None
++    manifest_present = bool(manifest_path and manifest_path.is_file())
++    if manifest_present:
++        evidence_files['canonical_manifest'] = str(manifest_path)
++
++    # Preview offline local catalog rematch with current rules (purely read-only, 0 network).
++    local_rematch = []
++    catalog_observed = disc_doc.get('catalog_observed', [])
++    if catalog_observed and pre_row:
++        from bwin_discovery import match_catalog
++        local_rematch = [
++            {
++                'bwin_event_id': c.get('bwin_event_id'),
++                'bwin_url': c.get('bwin_url'),
++                'name_score': c.get('name_score'),
++                'home_similarity': c.get('home_similarity'),
++                'away_similarity': c.get('away_similarity'),
++                'team_order_status': c.get('team_order_status'),
++                'category_compatibility': c.get('category_compatibility'),
++                'competition_similarity': c.get('competition_similarity'),
++            }
++            for c in match_catalog(pre_row, catalog_observed)[:3]
++        ]
++
++    # Exact blocking phase & root cause diagnosis
++    scraper_info = (preflight_match or {}).get('scraper') or {}
++    scraper_err = str(scraper_info.get('error') or '')
++    ledger_state = (ledger_row or {}).get('state')
++    ledger_reason = str((ledger_row or {}).get('reason') or '')
++    if major_row and any(m.get('fixture_id') == fid_int for m in major_doc.get('excluded', [])):
++        blocking_phase = 'league_filter'
++        root_cause = str(major_row.get('filter_reason') or 'EXCLUDED_BY_LEAGUE_POLICY')
++        recommended_action = 'No elegible por política actual de competiciones; no forzar manualmente.'
++    elif pre_row is None or pre_row.get('data_readiness_status') in ('EVALUACION_INCOMPLETA', 'PENDIENTE_DETALLE'):
++        blocking_phase = 'api_coverage'
++        root_cause = f"Cobertura insuficiente/incompleta en preselection: {pre_row.get('data_readiness_status') if pre_row else 'AUSENTE_EN_PRESELECTION'}"
++        recommended_action = 'Revisar cobertura histórica API antes de usar para análisis táctico.'
++    elif (preflight_match or {}).get('status') == 'SCRAPER_FAILED_OR_UNVERIFIED' or 'refresh-odds' in scraper_err or 'SCRAPER_CAPTURE_FAILED' in ledger_reason:
++        blocking_phase = 'capture_or_preflight'
++        root_cause = scraper_err or ledger_reason or 'SCRAPER_FAILED_OR_UNVERIFIED'
++        if 'refresh-odds' in scraper_err or manifest_present:
++            recommended_action = (
++                'Evento ya preparado (manifest.json presente): ejecutar corrida diaria con --refresh-existing-odds '
++                '(usará --immutable-capture sin alterar el manifest) o usar prematch_single.py refresh-odds.'
++            )
++        else:
++            recommended_action = 'Reintentar captura Bwin acotada para este evento.'
++    elif (disc_row or {}).get('status') == 'EVENT_REQUIRES_REVIEW' or (audit_row or {}).get('link_status') in {'NAME_MISMATCH', 'TIME_CONFLICT', 'CATEGORY_CONFLICT', 'AMBIGUOUS_LINK'}:
++        blocking_phase = 'bwin_identity_validation'
++        root_cause = f"{(audit_row or {}).get('link_status') or (disc_row or {}).get('status')}: {','.join((audit_row or {}).get('reason_codes') or [])}"
++        recommended_action = 'No relajar umbrales: verificar manualmente si Bwin corresponde al mismo torneo, categoría y hora exacta.'
++    elif (disc_row or {}).get('status') == 'NOT_FOUND_IN_SCANNED_PAGES':
++        blocking_phase = 'bwin_discovery'
++        if local_rematch:
++            root_cause = (
++                f"Evento PRESENTE en catalog_observed.json ({local_rematch[0]['bwin_event_id']}) "
++                f"pero no coincidió en la corrida congelada por alias/nombre de equipo."
++            )
++            recommended_action = 'Ejecutar nueva evaluación diaria para inspeccionar la página del evento ya recuperado y capturar cuotas.'
++        else:
++            root_cause = f"{(disc_row or {}).get('discovery_diagnostic') or 'NOT_FOUND_IN_SCANNED_PAGES'}: no observado en {len(disc_doc.get('pages', []))} páginas inspeccionadas."
++            recommended_action = 'Comprobar manualmente si el evento/liga está listado en Bwin o pendiente de publicación.'
++    elif scan_row and scan_row.get('status') != 'VERIFIED':
++        blocking_phase = 'opportunity_scanner'
++        root_cause = f"{scan_row.get('status')}: {','.join(scan_row.get('reasons') or [])}"
++        recommended_action = 'Corregir validez temporal o integridad SHA del snapshot Bwin antes de operar.'
++    elif scan_row and scan_row.get('status') == 'VERIFIED':
++        blocking_phase = 'NONE'
++        root_cause = 'IDENTIDAD_Y_CUOTAS_VERIFICADAS'
++        recommended_action = 'Candidato verificado para investigación manual (requiere cuotas finales T-60/T-15 y revisión de XI).'
++    else:
++        blocking_phase = ledger_state or 'UNRESOLVED'
++        root_cause = ledger_reason or 'SIN_DIAGNOSTICO_ESPECIFICO'
++        recommended_action = 'Revisar candidate_ledger y logs de preflight.'
++
++    pending_checks = ['Ninguna ventaja económica ni probabilidad calibrada demostrada']
++    if not (preflight_match or {}).get('snapshot'):
++        pending_checks.append('Falta captura Bwin verificada')
++    pending_checks.append('Confirmación de XI oficial (22 titulares) y cuotas finales (<15m antes de KO<=60m)')
++
++    return {
++        'schema_version': '1.0-fixture-diagnosis',
++        'reads_only': True,
++        'network': False,
++        'actionable_bet': False,
++        'profile': profile,
++        'date': parsed_day.isoformat() if parsed_day else None,
++        'evaluation_dir': str(folder),
++        'match': {
++            'fixture_id': fid_int,
++            'home': match_meta.get('home'),
++            'away': match_meta.get('away'),
++            'country': match_meta.get('country'),
++            'league': match_meta.get('league'),
++            'league_id': match_meta.get('league_id'),
++            'kickoff_madrid': match_meta.get('kickoff_madrid'),
++        },
++        'api_coverage': {
++            'data_readiness_score': pre_row.get('data_readiness_score') if pre_row else None,
++            'data_readiness_status': pre_row.get('data_readiness_status') if pre_row else None,
++            'coverage_summary': tac_fixture.get('coverage_summary'),
++            'research_missing_evidence': (tactical_row or {}).get('research_missing_evidence'),
++        },
++        'independent_statistical_score': {
++            'statistical_ranking_position': (stat_row or {}).get('position'),
++            'statistical_research_score': (stat_row or {}).get('statistical_research_score'),
++            'signal_count': (stat_row or {}).get('signal_count'),
++            'signal_families': (stat_row or {}).get('signal_families'),
++            'contradictions': (stat_row or {}).get('contradictions'),
++            'tactical_selection_tier': (tactical_row or {}).get('selection_tier'),
++            'tactical_priority_score': (tactical_row or {}).get('priority_score'),
++            'tactical_eligible': (tactical_row or {}).get('eligible'),
++        },
++        'bwin_identity': {
++            'discovery_status': (disc_row or {}).get('status'),
++            'discovery_diagnostic': (disc_row or {}).get('discovery_diagnostic'),
++            'audit_link_status': (audit_row or {}).get('link_status'),
++            'audit_reason_codes': (audit_row or {}).get('reason_codes'),
++            'bwin_event_id': bwin_eid,
++            'bwin_url': (disc_row or {}).get('bwin_url') or (audit_row or {}).get('bwin_url'),
++            'canonical_manifest_present': manifest_present,
++            'local_catalog_rematch_preview': local_rematch,
++        },
++        'odds_preflight_scanner': {
++            'ledger_state': ledger_state,
++            'ledger_reason': ledger_reason,
++            'preflight_status': (preflight_match or {}).get('status'),
++            'scraper_error': scraper_err or None,
++            'snapshot_path': ((preflight_match or {}).get('snapshot') or {}).get('snapshot_path'),
++            'selection_triplets_verified': ((preflight_match or {}).get('snapshot') or {}).get('selection_triplets_verified'),
++            'capture_declared_madrid': ((preflight_match or {}).get('snapshot') or {}).get('capture_declared_madrid'),
++            'scanner_status': (scan_row or {}).get('status'),
++            'scanner_reasons': (scan_row or {}).get('reasons'),
++            'selected_in_handoff': str(handoff_doc.get('fixture_id')) == fid_str,
++        },
++        'blocking_phase': blocking_phase,
++        'root_cause': root_cause,
++        'evidence_files': evidence_files,
++        'recommended_action': recommended_action,
++        'pending_checks': pending_checks,
++    }
++
++
+ def main(argv=None):
++    daily_started=performance_clock.perf_counter()
+     arguments=list(sys.argv[1:] if argv is None else argv)
+     if arguments and arguments[0] in ('prepare','dry-run','run'):
+         from prematch_execution_control import main as controlled_main
+@@ -617,7 +893,20 @@ def main(argv=None):
+     mode.add_argument('--prepare-fixture', action='store_true')
+     mode.add_argument('--status', action='store_true',
+                       help='Solo lectura del handoff de --date. No usa manifest.json ni red')
++    mode.add_argument('--diagnose-fixture', action='store_true',
++                      help='Diagnóstico en solo lectura por --fixture-id en evaluación existente. 0 API / 0 Bwin')
++    mode.add_argument('--bind-bwin-url', action='store_true',
++                      help='Registra y valida URL(s) Bwin manuales asociadas a --fixture-id sin saltar controles PREMATCH')
++    parser.add_argument('--manual-bwin-url', action='append', default=[],
++                        help='Vinculación manual <FIXTURE_ID>=<BWIN_URL> (repetible)')
++    parser.add_argument('--manual-bwin-file', type=Path,
++                        help='Archivo JSON/CSV con pares fixture_id y bwin_url')
++    parser.add_argument('--verify-manual-bwin', action='store_true',
++                        help='Revalida en vivo la página del evento Bwin para URLs manuales (requiere --confirm-external)')
++    parser.add_argument('--scrape-manual-bwin', action='store_true',
++                        help='Tras verificar identidad manual, captura/reintenta cuotas con scraper (requiere --confirm-external)')
+     parser.add_argument('--fixture-id', type=int)
++    parser.add_argument('--eval-dir', type=Path, help='Directorio explícito de evaluación para --diagnose-fixture')
+     parser.add_argument('--preselection', type=Path)
+     parser.add_argument('--fixtures-input', type=Path)
+     parser.add_argument('--output-dir', type=Path)
+@@ -640,14 +929,15 @@ def main(argv=None):
+     parser.add_argument('--review-min-lead',type=int,default=REVIEW_MIN_LEAD_MINUTES,
+                         help='Margen mínimo para revalidar un handoff ya preparado (>=5; no cambia la preparación T-45)')
+     parser.add_argument('--window', choices=['normal','ampliada'])
+-    parser.add_argument('--competition-scope',choices=['adult-open','domestic-top-tier'],default='adult-open',
+-                        help='adult-open: todas las competiciones adultas; domestic-top-tier: filtro legado')
++    parser.add_argument('--competition-scope',choices=['adult-open','domestic-top-tier','top-tier-and-senior-cups'],default='adult-open',
++                        help='adult-open: todas las competiciones adultas; top-tier-and-senior-cups: 1a division M/F y copas absolutas; domestic-top-tier: filtro legado')
+     parser.add_argument('--dry-run', '--show-config', dest='dry_run', action='store_true')
+     parser.add_argument('--next-window', action='store_true', help='Preparar la siguiente franja si la actual ya no tiene candidatos útiles')
+     parser.add_argument('--review', type=Path, help='Revalidar el handoff antes de continuar manualmente')
+     parser.add_argument('--root', type=Path, default=Path(__file__).resolve().parent)
+     parser.add_argument('--max-matches', type=int, default=5,help='Tamaño del lote de evaluación API; todos los candidatos del horizonte se evalúan')
+     parser.add_argument('--history', type=int, default=20, help='Históricos por equipo (4..50; default 20)')
++    parser.add_argument('--coverage-rules',type=Path,help='Reglas JSON de prioridad estadística y planificación')
+     parser.add_argument('--details', type=int, default=8, help='Detalles por equipo (1..history; default 8)')
+     parser.add_argument('--max-scrapes', type=int, default=0, help='Presupuesto de capturas verificadas; 0 = todos los candidatos del horizonte')
+     parser.add_argument('--refresh-existing-odds',action='store_true',help='Autoriza recaptura con archivo SHA de snapshots caducados del mismo evento')
+@@ -660,19 +950,260 @@ def main(argv=None):
+     parser.add_argument('--market-mapping-preflight', action='append', type=Path, default=[])
+     parser.add_argument('--market-mapping-only', action='store_true',
+                         help='Reprocesa sólo snapshots locales; nunca llama prepare, scan, API ni Bwin')
+-    parser.add_argument('--discovery-retries', type=int, default=2)
++    parser.add_argument('--discovery-retries', type=int, default=1,
++                        help='Máximo de descubrimientos completos por fixture sin identidad persistida (default 1)')
++    parser.add_argument('--bwin-identity-catalog', type=Path,
++                        help='Reconciliación Fixture ID/Event ID persistida; se reinspecciona la URL directa')
+     parser.add_argument('--min-lead', type=int, default=45)
++    parser.add_argument('--manual-bwin-min-lead', type=int, default=MANUAL_BWIN_MIN_LEAD_MINUTES,
++                        help='Margen mínimo para vincular/verificar/capturar URL manual Bwin (>=5; no cambia preparación T-45)')
+     parser.add_argument('--max-odds-age', type=int, default=120)
++    parser.add_argument('--shadow-mode', action='store_true',
++                        help='Opt-in: ejecuta Bet Engine en Shadow Mode sobre snapshots locales sin alterar salidas operativas')
++    mode.add_argument('--shadow-preanalyze', action='store_true',
++                      help='Ciclo T-24h offline: preanaliza preselection y persiste ranking sin picks definitivos')
++    mode.add_argument('--shadow-status', action='store_true',
++                      help='Planificador secuencial: muestra cola por proximidad y disponibilidad (default 13:00 Europe/Madrid)')
++    mode.add_argument('--shadow-finalize', action='store_true',
++                      help='Finaliza 1 partido en Shadow Mode reutilizando T-24h y recalculando la cola')
++    parser.add_argument('--shadow-dir', type=Path, help='Directorio persistente para ciclo T-24h Shadow')
++    parser.add_argument('--available-from', default='13:00', help='Hora local de disponibilidad (HH:MM, default 13:00)')
++    parser.add_argument('--now-utc', help='Reloj UTC explícito para pruebas reproducibles T-24h/proximidad')
++    parser.add_argument('--manual-select', help='Event ID manual para desempates de calidad equivalente')
++    parser.add_argument('--event-id', help='Event ID explícito para --shadow-finalize')
++    parser.add_argument('--odds-json', type=Path, help='Snapshot de cuotas frescas JSON para --shadow-finalize offline')
++    parser.add_argument('--manual-lineups', type=Path, help='Archivo JSON estructurado de XI manuales confirmados para --shadow-finalize')
++    parser.add_argument('--lineup-cutoff-minutes', type=int, default=15, help='Corte prepartido para exigir 22 titulares confirmados (default 15)')
++    parser.add_argument('--fallback-on-missing-lineups', action='store_true', help='Si faltan 22 titulares confirmados en el corte, descartar para auditoría y avanzar al siguiente candidato')
++    parser.add_argument('--user-manual-absent', action='store_true', help='Simula/marca ausencia de incorporación manual de XI por el usuario')
++    parser.add_argument('--auto-continue-next', action='store_true', help='Tras descartar por falta de XI, ejecuta automáticamente el siguiente candidato elegible del plan')
++    parser.add_argument('--next-odds-json', type=Path, help='Cuotas frescas JSON para el candidato de continuación automática')
++    parser.add_argument('--next-manual-lineups', type=Path, help='XI manuales JSON para el candidato de continuación automática')
+     args = parser.parse_args(argv)
+     if args.dry_run and any((args.rank,args.prepare_fixture,args.sync_bwin,args.reconcile_schedule,
+-                            args.tactical_research,args.market_mapping_only,args.online)):
++                            args.tactical_research,args.market_mapping_only,args.online,args.bind_bwin_url)):
+         print(json.dumps({'status':'DRY_RUN_NO_EXTERNAL_EXECUTION','date':args.date,
+                           'online_requested':args.online,'external_calls':0,'stages_executed':0},indent=2))
+         return 0
+-    if not args.dry_run and (args.online or args.sync_bwin or args.prepare_fixture or not any((args.status,args.tactical_research,args.market_mapping_only,args.rank,args.review))):
++    manual_bwin_offline_only = (args.bind_bwin_url or bool(args.manual_bwin_url or args.manual_bwin_file)) and not (
++        args.online or args.sync_bwin or args.prepare_fixture or args.verify_manual_bwin or args.scrape_manual_bwin
++    )
++    if not args.dry_run and (args.online or args.sync_bwin or args.prepare_fixture or args.verify_manual_bwin or args.scrape_manual_bwin or (not manual_bwin_offline_only and not any((args.status,args.diagnose_fixture,args.tactical_research,args.market_mapping_only,args.rank,args.review,args.shadow_preanalyze,args.shadow_status,args.shadow_finalize)))):
+         from prematch_execution_control import require_external_confirmation
+         try:require_external_confirmation(args.confirm_external)
+         except ValueError as error:parser.error(str(error))
++    if args.shadow_preanalyze or args.shadow_status or args.shadow_finalize:
++        if not args.date:
++            parser.error('--shadow-preanalyze/--shadow-status/--shadow-finalize requieren --date YYYY-MM-DD')
++        root = args.root.expanduser().resolve()
++        action = 'preanalyze' if args.shadow_preanalyze else 'status' if args.shadow_status else 'finalize'
++        try:
++            from bet_engine.orchestration import run_daily_shadow_lifecycle
++            res = run_daily_shadow_lifecycle(
++                root,
++                action=action,
++                date_str=args.date,
++                preselection_path=args.preselection,
++                shadow_dir=args.shadow_dir,
++                available_from=args.available_from,
++                now_utc=args.now_utc,
++                manual_select_event_id=args.manual_select,
++                event_id=args.event_id,
++                odds_json_path=args.odds_json,
++                max_odds_age_minutes=args.max_odds_age,
++                min_lead_minutes=args.min_lead,
++                manual_lineup_path=args.manual_lineups,
++                lineup_cutoff_minutes=args.lineup_cutoff_minutes,
++                fallback_on_missing_lineups=args.fallback_on_missing_lineups,
++                user_manual_absent=args.user_manual_absent,
++                auto_continue_next=args.auto_continue_next,
++                next_odds_json_path=args.next_odds_json,
++                next_manual_lineup_path=args.next_manual_lineups,
++            )
++            print(json.dumps(res, ensure_ascii=False, indent=2))
++            return 0
++        except (ValueError, OSError, KeyError, FileNotFoundError) as exc:
++            print('ERROR: ' + str(exc), file=sys.stderr)
++            return 2
++    if args.bind_bwin_url or ((args.manual_bwin_url or args.manual_bwin_file) and not args.online):
++        if not args.date and not args.eval_dir:
++            parser.error('--bind-bwin-url requiere --date YYYY-MM-DD o --eval-dir <PATH>')
++        if not args.manual_bwin_url and not args.manual_bwin_file:
++            parser.error('--bind-bwin-url requiere --manual-bwin-url <FID>=<URL> o --manual-bwin-file <PATH>')
++        try:
++            from bwin_manual_links import (
++                ManualBwinLinkError,
++                load_manual_bwin_file,
++                load_manual_links,
++                manual_links_path,
++                parse_manual_bwin_spec,
++                register_manual_bwin_urls,
++                verify_manual_bwin_links_online,
++            )
++            from prematch_runtime import classify_existing_snapshot, stamp as _runtime_stamp, verified_preflight
++            from prematch_daily_csv import export_daily
++
++            root = args.root.expanduser().resolve()
++            if args.eval_dir:
++                eval_dir = args.eval_dir.expanduser().resolve()
++            else:
++                config, _, _ = trial.load_window_config(root)
++                _, start, end = trial.resolve_window(config, args.window, args.start, args.end)
++                window_folder = trial.window_path(root, trial.parse_date_relative(args.date), start, end)
++                eval_dir = trial.latest_evaluation(window_folder)
++
++            bindings: list[tuple[int, str]] = [parse_manual_bwin_spec(s) for s in args.manual_bwin_url]
++            if args.manual_bwin_file:
++                bindings.extend(load_manual_bwin_file(args.manual_bwin_file))
++
++            manual_min_lead = int(getattr(args, 'manual_bwin_min_lead', MANUAL_BWIN_MIN_LEAD_MINUTES))
++            if manual_min_lead < MANUAL_BWIN_MIN_LEAD_MINUTES:
++                raise ManualBwinLinkError(
++                    f'MANUAL_BWIN_MINIMUM_5_MINUTES:{manual_min_lead}<{MANUAL_BWIN_MIN_LEAD_MINUTES}'
++                )
++
++            now_dt = trial.dt(args.now_utc) if args.now_utc else None
++            if args.now_utc and now_dt is None:
++                raise ManualBwinLinkError(f'INVALID_NOW_UTC:{args.now_utc}')
++            manual_now_madrid = now_dt.astimezone(trial.TZ) if now_dt is not None else trial.now_madrid()
++            reg = register_manual_bwin_urls(
++                eval_dir,
++                bindings,
++                now_utc=now_dt,
++                min_lead_minutes=manual_min_lead,
++            )
++            ver = None
++            scraped = []
++            if args.verify_manual_bwin or args.scrape_manual_bwin:
++                ver = verify_manual_bwin_links_online(
++                    eval_dir,
++                    [fid for fid, _ in bindings],
++                    min_lead_minutes=manual_min_lead,
++                    now_utc=now_dt,
++                )
++            if args.scrape_manual_bwin:
++                base = eval_dir / 'prospective_trial'
++                prepath = base / 'enriched/preselection.json'
++                if not prepath.is_file():
++                    raise ManualBwinLinkError(f'PRESELECTION_REQUIRED_FOR_SCRAPE:{prepath}')
++                pre_doc = trial.read(prepath)
++                pre_by_fid = {int(m['fixture_id']): m for m in pre_doc.get('matches', []) if m.get('fixture_id') is not None}
++                store = load_manual_links(eval_dir)
++                manual_args = SimpleNamespace(**vars(args))
++                manual_args.min_lead = manual_min_lead
++                for fid, _ in bindings:
++                    entry = (store.get('links') or {}).get(str(fid)) or {}
++                    op_block = entry.get('operational_block') or {}
++                    if op_block.get('blocked'):
++                        scraped.append({
++                            'fixture_id': fid,
++                            'status': entry.get('operational_status') or 'OPERATIONAL_BLOCK_TEMPORAL',
++                            'identity_status': entry.get('identity_status'),
++                            'operational_block': op_block,
++                        })
++                        continue
++                    if entry.get('identity_status') != 'BWIN_MANUAL_LINK_VERIFIED':
++                        scraped.append({'fixture_id': fid, 'status': 'SKIPPED_NOT_VERIFIED', 'identity_status': entry.get('identity_status')})
++                        continue
++                    fixture = pre_by_fid.get(fid)
++                    if not fixture:
++                        scraped.append({'fixture_id': fid, 'status': 'SKIPPED_NOT_IN_PRESELECTION'})
++                        continue
++                    disc_path = Path((entry.get('verification') or {}).get('discovery_json') or '')
++                    eid = str(entry.get('extracted_event_id') or '')
++                    dest = base / 'daily_runs' / f'manual_{_runtime_stamp()}' / 'preflight' / f'{fid}_manual'
++                    target = root / 'outputs/matches' / eid / 'inputs' / f'cuotas_bwin_{eid}.txt'
++                    has_manifest = bool(eid) and (root / 'outputs/matches' / eid / 'manifest.json').exists()
++                    refresh_args = []
++                    if target.exists():
++                        if getattr(args, 'refresh_existing_odds', False):
++                            refresh_args = ['--refresh-existing', '--immutable-capture'] if has_manifest else ['--refresh-existing']
++                        else:
++                            cls, detail = classify_existing_snapshot(target, eid, entry.get('bwin_url', ''), manual_now_madrid, args.max_odds_age)
++                            if cls == 'REUSABLE_EXISTING_SNAPSHOT':
++                                refresh_args = ['--reuse-existing']
++                    cmd_pre = [
++                        '--discovery', str(disc_path), '--preselection', str(prepath),
++                        '--fixture-id', str(fid), '--root', str(root),
++                        '--min-lead-minutes', str(manual_min_lead), '--output-dir', str(dest),
++                    ]
++                    if args.now_utc:
++                        cmd_pre.extend(['--now-utc', str(args.now_utc)])
++                    if '--reuse-existing' not in refresh_args:
++                        cmd_pre.append('--run-scraper')
++                    cmd_pre.extend(refresh_args)
++                    if args.confirm_external:
++                        cmd_pre.append('--confirm-external')
++                    try:
++                        trial.run(root, 'bwin_market_preflight.py', cmd_pre, base / 'logs')
++                        verified_preflight(root, dest / 'market_preflight.json', fixture, prepath, manual_args)
++                        entry['quote_capture_status'] = 'CAPTURED_VERIFIED'
++                        entry['operational_status'] = 'CLEAR'
++                        entry['operational_block'] = None
++                        entry['last_preflight'] = str((dest / 'market_preflight.json').resolve())
++                        scraped.append({'fixture_id': fid, 'status': 'CAPTURED_VERIFIED', 'preflight': entry['last_preflight']})
++                    except (trial.TrialError, OSError, ValueError, KeyError) as exc:
++                        err_text = str(exc)
++                        is_temporal_err = 'ALREADY_STARTED_OR_INSUFFICIENT_PREMATCH_MARGIN' in err_text or 'POST_KICKOFF' in err_text
++                        if is_temporal_err:
++                            entry['quote_capture_status'] = 'BLOCKED_TEMPORAL_WINDOW'
++                            entry['operational_status'] = 'OPERATIONAL_BLOCK_TEMPORAL'
++                            entry['operational_block'] = {
++                                'blocked': True,
++                                'block_type': 'TEMPORAL_WINDOW_BLOCK',
++                                'operation': 'scrape_manual_bwin',
++                                'reason': err_text,
++                                'min_lead_minutes': manual_min_lead,
++                                'checked_at_utc': manual_now_madrid.astimezone(timezone.utc).isoformat(),
++                            }
++                            scraped.append({
++                                'fixture_id': fid,
++                                'status': 'BLOCKED_TEMPORAL_WINDOW',
++                                'identity_status': entry.get('identity_status'),
++                                'error': err_text,
++                            })
++                        else:
++                            entry['quote_capture_status'] = 'CAPTURE_FAILED'
++                            entry['last_scrape_error'] = err_text
++                            scraped.append({'fixture_id': fid, 'status': 'CAPTURE_FAILED', 'error': err_text})
++                trial.dump(manual_links_path(eval_dir), store)
++
++            if (eval_dir / 'fixtures.json').is_file() and (eval_dir / 'prospective_trial/candidate_ledger.json').is_file():
++                export_daily(eval_dir / 'prospective_trial')
++
++            print(json.dumps({
++                'registration': reg,
++                'live_verification': ver,
++                'scrape_results': scraped,
++                'operation_windows': {
++                    'preparation_min_lead_minutes': args.min_lead,
++                    'manual_bwin_min_lead_minutes': manual_min_lead,
++                    'review_min_lead_minutes': REVIEW_MIN_LEAD_MINUTES,
++                },
++            }, ensure_ascii=False, indent=2))
++            has_live_conflict = bool(ver and ver.get('failed'))
++            has_temporal_block = bool(reg.get('temporal_blocked_count') or (ver and ver.get('temporal_blocked')))
++            has_scrape_block = any(
++                str(item.get('status') or '').startswith(('OPERATIONAL_BLOCK_', 'BLOCKED_', 'CAPTURE_FAILED', 'SKIPPED_NOT_VERIFIED'))
++                for item in scraped
++            )
++            return 0 if (reg['conflict_count'] == 0 and not has_live_conflict and not has_temporal_block and not has_scrape_block) else 2
++        except (ManualBwinLinkError, ValueError, OSError, KeyError, trial.TrialError) as exc:
++            print('ERROR: ' + str(exc), file=sys.stderr)
++            return 2
++
++    if args.diagnose_fixture:
++        if not args.fixture_id:
++            parser.error('--diagnose-fixture requiere --fixture-id <FID>')
++        if not args.date and not args.eval_dir:
++            parser.error('--diagnose-fixture requiere --date YYYY-MM-DD o --eval-dir <PATH>')
++        try:
++            report = diagnose_fixture(args.root, args.date, args.fixture_id, args.window, args.eval_dir)
++            print(json.dumps(report, ensure_ascii=False, indent=2))
++            return 0
++        except (ValueError, OSError, LookupError, KeyError, trial.TrialError) as exc:
++            print('ERROR: ' + str(exc), file=sys.stderr)
++            return 2
+     if args.status:
+         if not args.date:
+             parser.error('--status requiere --date YYYY-MM-DD')
+@@ -696,7 +1227,8 @@ def main(argv=None):
+         try:
+             config, _, _ = trial.load_window_config(root)
+             _, start, end = trial.resolve_window(config, args.window, args.start, args.end)
+-            folder = trial.window_path(root, trial.parse_date_relative(args.date), start, end)
++            window_folder = trial.window_path(root, trial.parse_date_relative(args.date), start, end)
++            folder = trial.latest_evaluation(window_folder)
+             output, counts = run_optional_market_mapping(root, folder, args)
+             print(json.dumps({'status':'OFFLINE_SNAPSHOT_MAPPING', 'path':str(output), 'counts':counts,
+                               'actionable_bet':False,'next_action':'Revisar market_mapping.md: resolver causas pendientes y comprobar identidad/cuotas antes del uso actual',
+@@ -713,8 +1245,8 @@ def main(argv=None):
+             print(json.dumps(operational_research(args), ensure_ascii=False, indent=2)); return 0
+         except (ValueError, OSError, KeyError, TypeError, trial.TrialError) as exc:
+             print('ERROR: '+str(exc), file=sys.stderr); return 2
+-    if args.evaluation_budget<0 or args.discovery_budget<0 or not __import__("math").isfinite(args.horizon_hours) or args.horizon_hours<0 or args.bwin_top<1 or args.max_scrapes<0 or min(args.max_matches,args.max_odds_age)<1 or args.min_lead<45 or args.review_min_lead<REVIEW_MIN_LEAD_MINUTES or args.discovery_retries<0 or not 4 <= args.history <= 50 or not 1 <= args.details <= args.history:
+-        parser.error('Límites inválidos; history 4..50, details 1..history, preparación >=45 y review >=5 minutos')
++    if args.evaluation_budget<0 or args.discovery_budget<0 or not __import__("math").isfinite(args.horizon_hours) or args.horizon_hours<0 or args.bwin_top<1 or args.max_scrapes<0 or min(args.max_matches,args.max_odds_age)<1 or args.min_lead<45 or args.review_min_lead<REVIEW_MIN_LEAD_MINUTES or not 0 <= args.discovery_retries <= 3 or not 4 <= args.history <= 50 or not 1 <= args.details <= args.history:
++        parser.error('Límites inválidos; history 4..50, details 1..history, discovery-retries 0..3, preparación >=45 y review >=5 minutos')
+     if args.date and args.next_window:
+         parser.error('--date y --next-window son alternativas')
+     if args.check_final_odds and not args.review:
+@@ -725,12 +1257,14 @@ def main(argv=None):
+         root = args.root.expanduser().resolve()
+         config, _, _ = trial.load_window_config(root)
+         profile, args.start, args.end = trial.resolve_window(config, args.window,args.start,args.end)
+-        day = trial.parse_date_relative(args.date) if args.date else automatic_day(trial.now_madrid(), args.start, args.end)
++        execution_reference = trial.now_madrid()
++        args.execution_reference = execution_reference
++        day = trial.parse_date_relative(args.date, execution_reference.date()) if args.date else automatic_day(execution_reference, args.start, args.end)
+         if args.next_window:
+             day += timedelta(days=1)
+-        folder = trial.window_path(root, day, args.start, args.end)
++        window_folder = trial.window_path(root, day, args.start, args.end)
+         begin, finish = trial.local_window(day, args.start, args.end)
+-        print(f'PERFIL {profile}: {begin.isoformat()} → {finish.isoformat()} | HORIZONTE {args.horizon_hours} h (0=toda la ventana)\nSALIDA {folder}', flush=True)
++        print(f'PERFIL {profile}: {begin.isoformat()} → {finish.isoformat()} | HORIZONTE {args.horizon_hours} h (0=toda la ventana)\nVENTANA {window_folder}', flush=True)
+         if args.dry_run:
+             return 0
+         args.team=[]
+@@ -742,11 +1276,22 @@ def main(argv=None):
+                 fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+             except BlockingIOError:
+                 raise trial.TrialError('PREMATCH_ALREADY_RUNNING') from None
++            exclusive={};phase_started=performance_clock.perf_counter()
++            folder, evaluation_mode = trial.resolve_evaluation(
++                window_folder, day, args, execution_reference)
++            if evaluation_mode == 'RESUME_FROZEN_EVALUATION':
++                frozen_reference = trial.dt(trial.evaluation_manifest(folder).get('reference_madrid'))
++                if frozen_reference is None:
++                    raise trial.TrialError('RESUME_EVALUATION_REFERENCE_INVALID')
++                args.execution_reference = frozen_reference
++            exclusive['evaluation_resolution_and_lock']=performance_clock.perf_counter()-phase_started
++            print(f'EVALUACIÓN {evaluation_mode}: {folder}', flush=True)
++            phase_started=performance_clock.perf_counter()
+             try:
+                 major = folder / 'fixtures_major.json'
+                 if major.is_file():
+                     existing_policy = trial.read(major).get('policy',{}).get('competition_tier')
+-                    expected_policy = 'ADULT_OPEN' if args.competition_scope == 'adult-open' else 'DOMESTIC_TOP_TIER'
++                    expected_policy = {'adult-open': 'ADULT_OPEN', 'domestic-top-tier': 'DOMESTIC_TOP_TIER', 'top-tier-and-senior-cups': 'TOP_TIER_AND_SENIOR_CUPS'}[args.competition_scope]
+                     if existing_policy != expected_policy:
+                         raise trial.TrialError('COMPETITION_SCOPE_CHANGED: preparacion anterior no reutilizable')
+                 reusable_preparation(root, folder, day, args)
+@@ -769,34 +1314,63 @@ def main(argv=None):
+                                 os.environ['PREMATCH_COMPETITION_SCOPE'] = previous_scope
+                 except trial.TrialError as exc:
+                     # An empty candidate set is a normal, explicit terminal state.
+-                    status = 'NO_VALID_CANDIDATE' if str(exc).startswith('No hay partidos futuros') else 'INSUFFICIENT_EVIDENCE'
++                    status = 'NO_VALID_CANDIDATE' if str(exc).startswith('No hay partidos futuros') else 'TECHNICAL_FAILURE'
+                     path = folder / 'prospective_trial/handoff_prematch.json'
+-                    trial.dump(path, {'schema_version':'1.0-prematch-handoff','status':status,
++                    failure_doc = {'schema_version':'1.0-prematch-handoff','status':status,
+                                'generated_madrid':trial.now_madrid().isoformat(), 'actionable_bet':False,
+-                               'discard_reasons':[{'phase':'prepare','reason':str(exc)}]})
++                               'discard_reasons':[{'phase':'prepare','reason':str(exc)}]}
++                    evaluation_path=folder/'evaluation_manifest.json'
++                    if evaluation_path.is_file():
++                        evaluation=trial.evaluation_manifest(folder)
++                        failure_doc.update(evaluation_id=evaluation['evaluation_id'],
++                            evaluation_manifest=str(evaluation_path),
++                            evaluation_manifest_sha256=trial.sha(evaluation_path),
++                            execution_reference_madrid=evaluation['reference_madrid'])
++                    trial.dump(path, failure_doc)
++                    exclusive['preparation_total']=performance_clock.perf_counter()-phase_started
++                    complete_daily_metrics(folder/'prospective_trial',failure_doc,daily_started,exclusive)
+                     print(f'{status}: {path}', flush=True)
+                     return 0 if status=='NO_VALID_CANDIDATE' else 2
++            exclusive['preparation_total']=performance_clock.perf_counter()-phase_started
++            phase_started=performance_clock.perf_counter()
+             predictive_out = run_optional_predictor(root, folder, args)
++            exclusive['optional_predictor']=performance_clock.perf_counter()-phase_started
+             if predictive_out:
+                 print(f'Predictor offline congelado: {predictive_out}', flush=True)
+             transcript = folder / 'prospective_trial/logs' / f'daily_scan_{stamp()}.log'
+             transcript.parent.mkdir(parents=True, exist_ok=True)
+             print(f'Verificando capturas y scanner; registro: {transcript}', flush=True)
++            phase_started=performance_clock.perf_counter()
+             with transcript.open('w', encoding='utf-8') as output, contextlib.redirect_stdout(output):
+                 doc = scan(root, folder, day, args)
++            exclusive['scan_total']=performance_clock.perf_counter()-phase_started
++            phase_started=performance_clock.perf_counter()
+             mapping_out = run_optional_market_mapping(root, folder, args, predictive_out)
++            exclusive['optional_market_mapping']=performance_clock.perf_counter()-phase_started
+             if mapping_out:
+                 print(f'Market mapping offline: {mapping_out[0]} ({mapping_out[1]})', flush=True)
++            if getattr(args, 'shadow_mode', False):
++                try:
++                    from bet_engine.orchestration import run_shadow_daily_optin
++                    sh_daily = run_shadow_daily_optin(root, folder, day.isoformat())
++                    print(f'Shadow Mode diario (opt-in): {sh_daily}', flush=True)
++                except Exception as exc:
++                    print(f'[SHADOW_WARN] fallo no bloqueante en daily: {exc}', flush=True)
+             from prematch_daily_csv import export_daily
++            phase_started=performance_clock.perf_counter()
+             rows=export_daily(folder/'prospective_trial')
++            csv_exported=True
++            exclusive['csv_export']=performance_clock.perf_counter()-phase_started
++            complete_daily_metrics(folder/'prospective_trial',doc,daily_started,exclusive)
+             print(f"{doc['status']}: {folder / 'prospective_trial/handoff_prematch.json'}", flush=True)
+             print(f'CSV: {folder / "prospective_trial/partidos_diarios.csv"} | filas={len(rows)}',flush=True)
+-            return 0 if doc['status'] in ('READY_FOR_MANUAL_RESEARCH','NO_VALID_CANDIDATE') else 2
++            return 0 if doc['status'] in ('READY_FOR_MANUAL_RESEARCH','NO_VALID_CANDIDATE','INSUFFICIENT_EVIDENCE') else 2
+     except (trial.TrialError, OSError, ValueError, KeyError, TypeError, argparse.ArgumentTypeError) as exc:
+         print(f'ERROR: {exc}', file=sys.stderr)
+         return 2
+     finally:
+-        if 'folder' in locals() and not args.dry_run:
++        if ('folder' in locals() and not args.dry_run and
++                (folder/'prospective_trial').is_dir() and not locals().get('csv_exported',False)):
+             from prematch_daily_csv import export_daily
+             export_daily(folder/'prospective_trial')
+ 
+diff --git a/prematch_runtime.py b/prematch_runtime.py
+index 3a24d3af..5ca551ce 100644
+--- a/prematch_runtime.py
++++ b/prematch_runtime.py
+@@ -7,6 +7,7 @@ from __future__ import annotations
+ import csv
+ import json
+ import shutil
++import time
+ import zipfile
+ from datetime import timedelta, timezone
+ from pathlib import Path
+@@ -17,6 +18,76 @@ from market_quality_gate import is_period, is_player_market
+ from prematch_opportunity_scanner import match_identity, validate_snapshot
+ 
+ 
++def classify_existing_snapshot(target: Path, event_id: str, expected_url: str, now_ref, max_odds_age_minutes: int) -> tuple[str, str]:
++    """Classify a pre-existing Bwin TXT snapshot without relaxing or overwriting it."""
++    from bwin_market_preflight import snapshot_odds
++    try:
++        snap = snapshot_odds(target, str(event_id))
++    except (OSError, ValueError) as exc:
++        return 'INCOMPATIBLE_EXISTING_SNAPSHOT', str(exc)
++    src_url = snap.get('source_url')
++    if expected_url and src_url and str(src_url).strip() != str(expected_url).strip():
++        return 'INCOMPATIBLE_EXISTING_SNAPSHOT', f"URL_MISMATCH: {src_url}"
++    cap_raw = snap.get('capture_declared_madrid')
++    cap = trial.dt(cap_raw)
++    if cap is None:
++        return 'INCOMPATIBLE_EXISTING_SNAPSHOT', 'NO_VALID_DECLARED_CAPTURE_TIME'
++    age_sec = now_ref.timestamp() - cap.timestamp()
++    if age_sec < -120:
++        return 'INCOMPATIBLE_EXISTING_SNAPSHOT', f'FUTURE_CAPTURE_TIMESTAMP: {cap.isoformat()}'
++    if age_sec > max_odds_age_minutes * 60:
++        return 'STALE_EXISTING_ODDS', f"Captura {cap.isoformat()} caducada ({round(age_sec / 60, 1)}m > {max_odds_age_minutes}m)"
++    return 'REUSABLE_EXISTING_SNAPSHOT', cap.isoformat()
++
++
++def _sibling_preflights(folder: Path, current_base: Path) -> list[Path]:
++    """Locate verified market_preflight.json files in sibling evaluations of the same day window."""
++    parent = folder.parent
++    if not parent.is_dir():
++        return []
++    found = []
++    for p in sorted(parent.glob('*/prospective_trial/daily_runs/*/preflight/*/market_preflight.json'), reverse=True):
++        if current_base not in p.parents:
++            found.append(p)
++    for p in sorted(parent.glob('*/prospective_trial/preflight/*/market_preflight.json'), reverse=True):
++        if current_base not in p.parents:
++            found.append(p)
++    return found
++
++
++def _rebind_sibling_preflight(root: Path, base: Path, dest: Path, sib_path: Path, fixture: dict, prepath: Path, args):
++    """Safely re-audit a fresh, identity-matched TXT from a sibling evaluation without scraping."""
++    doc = trial.read(sib_path)
++    matches = [m for m in doc.get('matches', []) if str(m.get('fixture_id')) == str(fixture['fixture_id'])]
++    if len(matches) != 1:
++        raise trial.TrialError('SIBLING_PREFLIGHT_FIXTURE_NOT_UNIQUE')
++    pm = matches[0]
++    eid = str(pm.get('bwin_event_id') or '')
++    bwin_url = str(pm.get('bwin_url') or '')
++    if not eid.isdigit():
++        raise trial.TrialError('SIBLING_PREFLIGHT_EVENT_MISSING')
++    snap = pm.get('snapshot') or {}
++    target = resolve_source(root, snap.get('snapshot_path'), snap.get('sha256'))
++    cls, detail = classify_existing_snapshot(target, eid, bwin_url, trial.now_madrid(), args.max_odds_age)
++    if cls != 'REUSABLE_EXISTING_SNAPSHOT':
++        raise trial.TrialError(f'{cls}: {detail}')
++    disc_path = resolve_source(root, doc.get('source_discovery'), doc.get('source_sha256'))
++    disc_doc = trial.read(disc_path)
++    events = [e for e in disc_doc.get('matches', []) if str(e.get('fixture_id')) == str(fixture['fixture_id'])]
++    if len(events) != 1 or match_identity(fixture, events[0]):
++        raise trial.TrialError('SIBLING_DISCOVERY_IDENTITY_MISMATCH')
++    checked = validate_match(events[0], disc_doc.get('catalog_observed', []), trial.now_madrid(), args.min_lead, 180)
++    if checked['status'] != 'READY_FOR_SCRAPER':
++        raise trial.TrialError(','.join(checked['reasons']))
++    trial.run(root, 'bwin_market_preflight.py', [
++        '--discovery', str(disc_path), '--preselection', str(prepath),
++        '--fixture-id', str(fixture['fixture_id']), '--reuse-existing',
++        '--root', str(root), '--min-lead-minutes', str(args.min_lead),
++        '--output-dir', str(dest)
++    ], base / 'logs')
++    return verified_preflight(root, dest / 'market_preflight.json', fixture, prepath, args)
++
++
+ def resolve_source(root, raw, digest=None):
+     from prematch_paths import local_reference
+     try:
+@@ -65,8 +136,9 @@ def reusable_preparation(root, folder, day, args):
+     for f in pre['matches']:
+         if str(f['fixture_id']) not in allowed or match_identity(f, allowed[str(f['fixture_id'])]):
+             raise trial.TrialError('PREPARATION_FIXTURE_IDENTITY_MISMATCH')
+-    expected=trial.select_fixtures(trial.read(major),getattr(args,'team',[]),0,trial.now_madrid(),
+-                                   args.min_lead,getattr(args,'horizon_hours',3))
++    reference=trial.execution_reference(args)
++    expected=trial.select_fixtures(trial.read(major),getattr(args,'team',None) or [],0,reference,
++                                   args.min_lead,getattr(args,'horizon_hours',3) or 0)
+     expected_ids={str(f['fixture_id']) for f in expected}
+     covered_ids={str(f['fixture_id']) for f in pre['matches']}
+     deferred_ids={str(i) for i in summary.get('evaluation_deferred_ids',[])}
+@@ -90,8 +162,10 @@ def reusable_preparation(root, folder, day, args):
+ 
+ def verified_preflight(root, path, fixture, prepath, args):
+     """Recheck originals, actual TXT and time; a previous success flag is insufficient."""
++    now_arg = trial.dt(getattr(args, 'now_utc', None))
++    now_ref = now_arg.astimezone(trial.TZ) if now_arg is not None else trial.now_madrid()
+     cutoff = trial.dt(fixture.get('analysis_cutoff_utc'))
+-    if cutoff is None or cutoff > trial.now_madrid():
++    if cutoff is None or cutoff > now_ref:
+         raise trial.TrialError('FIXTURE_ANALYSIS_CUTOFF_AFTER_NOW_OR_UNDATED')
+     doc = trial.read(path)
+     matches = [m for m in doc.get('matches', []) if str(m.get('fixture_id')) == str(fixture['fixture_id'])]
+@@ -111,16 +185,29 @@ def verified_preflight(root, path, fixture, prepath, args):
+     event = events[0]
+     if any(str(match.get(k)) != str(event.get(k)) for k in ('bwin_event_id', 'bwin_url')):
+         raise trial.TrialError('PREFLIGHT_DISCOVERY_EVENT_CONFLICT')
+-    checked = validate_match(event, discovery.get('catalog_observed', []), trial.now_madrid(), args.min_lead, 180)
++    checked = validate_match(event, discovery.get('catalog_observed', []), now_ref, args.min_lead, 180)
+     if checked['status'] != 'READY_FOR_SCRAPER':
+         raise trial.TrialError(','.join(checked['reasons']))
++    if not match.get('snapshot'):
++        scraper_err = (match.get('scraper') or {}).get('error')
++        status = match.get('status') or 'SCRAPER_FAILED_OR_UNVERIFIED'
++        raise trial.TrialError(f'SCRAPER_CAPTURE_FAILED: {scraper_err or status}')
+     reasons, _, _ = validate_snapshot(fixture, match, doc, path, prepath, None,
+-                                     trial.now_madrid(), args.max_odds_age, args.min_lead, False, project_root=root)
++                                     now_ref, args.max_odds_age, args.min_lead, False, project_root=root)
+     if reasons:
+         raise trial.TrialError(','.join(reasons))
+     snapshot = match.get('snapshot', {})
+     expected = root / 'outputs/matches' / str(match['bwin_event_id']) / 'inputs' / f"cuotas_bwin_{match['bwin_event_id']}.txt"
+-    if Path(snapshot['snapshot_path']).resolve() != expected.resolve():
++    actual_snapshot = Path(snapshot['snapshot_path']).resolve()
++    manifest_exists = (expected.parent.parent / 'manifest.json').exists()
++    immutable_root = (Path(path).resolve().parent / 'captures' / str(match['bwin_event_id'])).resolve()
++    is_immutable_capture = (
++        manifest_exists
++        and actual_snapshot.name == expected.name
++        and immutable_root in actual_snapshot.parents
++        and (match.get('scraper') or {}).get('canonical_unchanged') is True
++    )
++    if actual_snapshot != expected.resolve() and not is_immutable_capture:
+         raise trial.TrialError('SNAPSHOT_EVENT_DIRECTORY_MISMATCH')
+     gate = match.get('quality_gate', {})
+     if gate.get('join_status') != 'MATCHED_FIXTURE_TEAMS_GENDER_KICKOFF':
+@@ -150,28 +237,22 @@ def verified_preflight(root, path, fixture, prepath, args):
+ 
+ 
+ def discovery_for(root, base, fixture, args, failures):
+-    """Use a revalidated retry first. Refresh only this fixture, with bounded attempts."""
++    """Reuse local evidence, reconcile auto vs manual without silent override, then direct/bounded discovery."""
+     fid = fixture['fixture_id']
+     paths = sorted((base / 'bwin').rglob('bwin_discovery.json'),
+                    key=lambda p: (p.parent.name != 'bwin', str(p)), reverse=True)
+-    for attempt in range(args.discovery_retries + 1):
+-        if attempt:
+-            dest = base / 'bwin' / f'retry_{fid}_{stamp()}'
+-            try:
+-                trial.run(root, 'bwin_discovery.py', ['--input', str(base / 'enriched/preselection.json'),
+-                          '--fixture-id', str(fid), '--headless', '--output-dir', str(dest)], base / 'logs')
+-                paths = [dest / 'bwin_discovery.json']
+-            except trial.TrialError as exc:
+-                failures.append({'fixture_id': fid, 'phase': 'discovery', 'attempt': attempt, 'reason': str(exc)})
+-                paths = []
+-        for path in paths:
++    auto_paths = [p for p in paths if not p.parent.name.startswith('manual_')]
++
++    def validate_paths(candidates):
++        for path in candidates:
+             try:
+                 doc = trial.read(path)
+                 matches = [m for m in doc.get('matches', []) if str(m.get('fixture_id')) == str(fid)]
+                 if len(matches) != 1:
+                     continue
+                 if not matches[0].get('bwin_event_id'):
+-                    failures.append({'fixture_id':fid,'phase':'discovery_validation','reason':'NOT_FOUND_IN_SCANNED_PAGES','path':str(path)})
++                    failures.append({'fixture_id':fid,'phase':'discovery_validation','reason':'NOT_FOUND_IN_SCANNED_PAGES',
++                                     'offer_proven_absent':False,'note':'No observado en las páginas escaneadas; no demuestra ausencia en Bwin.','path':str(path)})
+                     continue
+                 if match_identity(fixture, matches[0]):
+                     raise trial.TrialError('DISCOVERY_FIXTURE_IDENTITY_MISMATCH')
+@@ -182,8 +263,218 @@ def discovery_for(root, base, fixture, args, failures):
+                                  'reason': ','.join(checked['reasons'])})
+             except (trial.TrialError, OSError, ValueError, KeyError) as exc:
+                 failures.append({'fixture_id': fid, 'phase': 'discovery_validation', 'reason': str(exc)})
++        return None
++
++    cached_auto = validate_paths(auto_paths)
++
++    def _first_auto_with_event():
++        for ap in auto_paths:
++            try:
++                doc = trial.read(ap)
++                ms = [m for m in doc.get('matches', []) if str(m.get('fixture_id')) == str(fid) and m.get('bwin_event_id')]
++                if len(ms) == 1:
++                    return ap, ms[0]
++            except (OSError, ValueError, KeyError, TypeError):
++                continue
++        return None, None
++
++    manual_path = base / 'bwin/manual_bwin_links.json'
++    if manual_path.is_file():
++        from bwin_manual_links import (
++            _atomic_json,
++            evaluate_observed_manual_identity,
++            load_manual_links,
++            manual_links_path,
++            verify_manual_bwin_links_online,
++        )
++        store = load_manual_links(base.parent)
++        m_links = dict(store.get('links') or {})
++        m_entry = m_links.get(str(fid))
++        if m_entry:
++            manual_eid = str(m_entry.get('extracted_event_id') or '')
++            auto_path, auto_row = (cached_auto[0], cached_auto[1]) if cached_auto else _first_auto_with_event()
++            if auto_row and auto_row.get('bwin_event_id'):
++                auto_eid = str(auto_row.get('bwin_event_id'))
++                now_iso = trial.now_madrid().astimezone(timezone.utc).isoformat()
++                if auto_eid == manual_eid:
++                    if m_entry.get('auto_reconciliation', {}).get('status') != 'AUTO_AND_MANUAL_AGREE':
++                        m_entry['auto_reconciliation'] = {
++                            'status': 'AUTO_AND_MANUAL_AGREE',
++                            'auto_event_id': auto_eid,
++                            'manual_event_id': manual_eid,
++                            'auto_discovery_path': str(auto_path),
++                            'resolution': 'SAME_EVENT_ID_CONFIRMED',
++                            'resolved_at_utc': now_iso,
++                        }
++                        m_links[str(fid)] = m_entry
++                        store['links'] = m_links
++                        _atomic_json(manual_links_path(base.parent), store)
++                else:
++                    if cached_auto:
++                        failures.append({
++                            'fixture_id': fid,
++                            'phase': 'discovery_manual_reconciliation',
++                            'failure_class': 'DOMAIN',
++                            'reason': 'AUTO_VS_MANUAL_EVENT_ID_CONFLICT',
++                            'auto_event_id': auto_eid,
++                            'manual_event_id': manual_eid,
++                            'auto_path': str(auto_path),
++                            'resolution': 'ACCREDITED_AUTO_DISCOVERY_REVALIDATED_AND_PRESERVED',
++                        })
++                        m_entry['identity_status'] = 'BWIN_IDENTITY_CONFLICT'
++                        m_entry['conflict_reasons'] = sorted(set((m_entry.get('conflict_reasons') or []) + [
++                            f'AUTO_DISCOVERY_ALREADY_VERIFIED_DIFFERENT_EVENT:auto={auto_eid},manual={manual_eid}'
++                        ]))
++                        m_entry['auto_reconciliation'] = {
++                            'status': 'CONFLICT_WITH_ACCREDITED_AUTO',
++                            'auto_event_id': auto_eid,
++                            'manual_event_id': manual_eid,
++                            'auto_discovery_path': str(auto_path),
++                            'resolution': 'ACCREDITED_AUTO_DISCOVERY_REVALIDATED_AND_PRESERVED',
++                            'resolved_at_utc': now_iso,
++                        }
++                        m_links[str(fid)] = m_entry
++                        store['links'] = m_links
++                        _atomic_json(manual_links_path(base.parent), store)
++                        return cached_auto
++                    failures.append({
++                        'fixture_id': fid,
++                        'phase': 'discovery_manual_reconciliation',
++                        'failure_class': 'DOMAIN',
++                        'reason': 'DISCREPANCY_MANUAL_VS_UNVERIFIED_AUTO',
++                        'auto_event_id': auto_eid,
++                        'manual_event_id': manual_eid,
++                        'auto_status': auto_row.get('status'),
++                        'auto_path': str(auto_path),
++                        'resolution': 'UNVERIFIED_AUTO_NOT_ACCREDITED_REQUIRE_MANUAL_VALIDATION',
++                    })
++                    m_entry['auto_reconciliation'] = {
++                        'status': 'DISCREPANCY_WITH_UNVERIFIED_AUTO',
++                        'auto_event_id': auto_eid,
++                        'manual_event_id': manual_eid,
++                        'auto_status': auto_row.get('status'),
++                        'auto_discovery_path': str(auto_path),
++                        'resolution': 'UNVERIFIED_AUTO_NOT_ACCREDITED_REQUIRE_MANUAL_VALIDATION',
++                        'resolved_at_utc': now_iso,
++                    }
++                    m_links[str(fid)] = m_entry
++                    store['links'] = m_links
++                    _atomic_json(manual_links_path(base.parent), store)
++
++            if cached_auto:
++                return cached_auto
++
++            m_status = m_entry.get('identity_status')
++            if m_status == 'BWIN_IDENTITY_CONFLICT':
++                raise trial.TrialError('BWIN_MANUAL_IDENTITY_CONFLICT:' + ','.join(m_entry.get('conflict_reasons') or ['CONFLICT']))
++            if m_status == 'BWIN_MANUAL_LINK_PENDING_VALIDATION':
++                if getattr(args, 'confirm_external', False):
++                    from bwin_manual_links import MANUAL_BWIN_MIN_LEAD_MINUTES
++                    now_arg = trial.dt(getattr(args, 'now_utc', None))
++                    verify_manual_bwin_links_online(
++                        base.parent,
++                        [int(fid)],
++                        min_lead_minutes=MANUAL_BWIN_MIN_LEAD_MINUTES,
++                        now_utc=now_arg.astimezone(timezone.utc) if now_arg else None,
++                    )
++                    store = load_manual_links(base.parent)
++                    m_entry = (store.get('links') or {}).get(str(fid)) or m_entry
++                    m_status = m_entry.get('identity_status')
++                    if m_status == 'BWIN_IDENTITY_CONFLICT':
++                        raise trial.TrialError('BWIN_MANUAL_IDENTITY_CONFLICT:' + ','.join(m_entry.get('conflict_reasons') or ['CONFLICT']))
++                    op_block = m_entry.get('operational_block') or {}
++                    if op_block.get('blocked'):
++                        raise trial.TrialError(str(op_block.get('reason') or 'PREMATCH_MANUAL_LEAD_WINDOW_EXPIRED'))
++                    if m_status == 'BWIN_MANUAL_LINK_PENDING_VALIDATION':
++                        raise trial.TrialError('BWIN_MANUAL_LINK_PENDING_VALIDATION:' + ','.join(m_entry.get('pending_reasons') or ['INSUFFICIENT_EVIDENCE']))
++                else:
++                    raise trial.TrialError('BWIN_MANUAL_LINK_PENDING_VALIDATION')
++            if m_status == 'BWIN_MANUAL_LINK_VERIFIED':
++                v_disc = ((m_entry.get('verification') or {}).get('discovery_json'))
++                if v_disc and Path(v_disc).is_file():
++                    v_doc = trial.read(Path(v_disc))
++                    v_matches = [m for m in v_doc.get('matches', []) if str(m.get('fixture_id')) == str(fid)]
++                    if len(v_matches) == 1:
++                        obs = v_matches[0].get('inspection') or {}
++                        re_st, re_conf, re_pend, _ = evaluate_observed_manual_identity(fixture, manual_eid, v_matches[0], obs)
++                        if re_st != 'BWIN_MANUAL_LINK_VERIFIED':
++                            raise trial.TrialError('BWIN_MANUAL_LINK_REVALIDATION_FAILED:' + ','.join(re_conf or re_pend or [re_st]))
++                    res = validate_paths([Path(v_disc)])
++                    if res:
++                        return res
++                    raise trial.TrialError('BWIN_MANUAL_LINK_REVALIDATION_FAILED')
++    elif cached_auto:
++        return cached_auto
++
++    identity_catalog = getattr(args, 'bwin_identity_catalog', None)
++    if identity_catalog is None:
++        candidate = root / 'outputs/control/runs/python_engine_real_v1/bwin_reconciliation_objective5_1_v1/reconciliation_73.json'
++        identity_catalog = candidate if candidate.is_file() else None
++    if identity_catalog:
++        from bwin_discovery import verified_identity_candidates
++        try:
++            bindings, _ = verified_identity_candidates(Path(identity_catalog), [fixture])
++        except (OSError, ValueError, json.JSONDecodeError) as exc:
++            failures.append({'fixture_id':fid,'phase':'persisted_identity','failure_class':'TECHNICAL',
++                             'reason':str(exc),'path':str(identity_catalog)})
++            bindings = {}
++        if fid in bindings:
++            dest = base / 'bwin' / f'direct_{fid}_{stamp()}'
++            try:
++                cmd_direct = [
++                    '--input', str(base / 'enriched/preselection.json'),
++                    '--fixture-id', str(fid), '--headless', '--output-dir', str(dest),
++                    '--verified-identity-catalog', str(identity_catalog), '--direct-verified-only',
++                    '--no-country-discovery', '--inspection-retries', '0',
++                ]
++                if getattr(args, 'confirm_external', False):
++                    cmd_direct.append('--confirm-external')
++                trial.run(root, 'bwin_discovery.py', cmd_direct, base / 'logs')
++                result = validate_paths([dest / 'bwin_discovery.json'])
++                if result:
++                    return result
++                raise trial.TrialError('PERSISTED_DIRECT_ROUTE_REVALIDATION_FAILED')
++            except trial.TrialError as exc:
++                failures.append({'fixture_id':fid,'phase':'direct_identity_revalidation',
++                                 'failure_class':'TECHNICAL' if 'terminó con código' in str(exc) else 'DOMAIN',
++                                 'attempt':1,'reason':str(exc),'path':str(identity_catalog)})
++                raise
++
++    # A shared acquisition has already compared every fixture locally and
++    # performed its bounded country extension.  Reopening the complete calendar
++    # for this single fixture cannot prove absence and caused the 13-Nov retry
++    # storm. Preserve its explicit audit state and leave any further directed
++    # search as a separate, budgeted manual operation.
++    audit_path=base/'bwin/identity_audit/identity_audit.json'
++    if audit_path.is_file():
++        audit=trial.read(audit_path)
++        rows=[row for row in audit.get('fixtures',[]) if str(row.get('fixture_id'))==str(fid)]
++        if len(rows)==1 and rows[0].get('link_status')!='VERIFIED_LINK':
++            state=rows[0].get('link_status','SEARCH_INCOMPLETE')
++            reasons=','.join(rows[0].get('reason_codes',[]))
++            failures.append({'fixture_id':fid,'phase':'shared_catalog_matching','failure_class':'DOMAIN',
++                             'reason':state+(':'+reasons if reasons else ''),'path':str(audit_path)})
++            raise trial.TrialError(f'SHARED_CATALOG_MATCH_UNRESOLVED:{state}:{reasons}')
++
++    for attempt in range(1, getattr(args, 'discovery_retries', 1) + 1):
+         if not trial.kickoff_valid(fixture, trial.now_madrid(), args.min_lead):
+             break
++        dest = base / 'bwin' / f'retry_{fid}_{stamp()}'
++        try:
++            cmd_retry = [
++                '--input', str(base / 'enriched/preselection.json'),
++                '--fixture-id', str(fid), '--headless', '--output-dir', str(dest),
++                '--inspection-retries', '0',
++            ]
++            if getattr(args, 'confirm_external', False):
++                cmd_retry.append('--confirm-external')
++            trial.run(root, 'bwin_discovery.py', cmd_retry, base / 'logs')
++            result = validate_paths([dest / 'bwin_discovery.json'])
++            if result:
++                return result
++        except trial.TrialError as exc:
++            failures.append({'fixture_id': fid, 'phase': 'discovery', 'failure_class':'TECHNICAL',
++                             'attempt': attempt, 'reason': str(exc)})
+     reasons=[f['reason'] for f in failures if str(f.get('fixture_id'))==str(fid) and f.get('phase')=='discovery_validation']
+     raise trial.TrialError('DISCOVERY_RETRIES_EXHAUSTED: '+(reasons[-1] if reasons else 'NO_BWIN_EVIDENCE'))
+ 
+@@ -203,11 +494,13 @@ def write_handoff(root, run_dir, ready, failures, scanner=None, min_lead=45, max
+            # can therefore be revalidated/refreshed at T-5 without claiming
+            # that its original deep preparation happened that late.
+            'minimum_lead_minutes': min_lead,
++           'manual_bwin_minimum_lead_minutes': 5,
+            'review_minimum_lead_minutes': 5,
+            'refresh_minimum_lead_minutes': 5,
+            'finish_minimum_lead_minutes': 5,
+            'operation_windows': {
+                'preparation': {'minimum_lead_minutes': min_lead, 'purpose': 'full discovery/context/preflight'},
++               'manual_bwin_bind_verify_scrape': {'minimum_lead_minutes': 5, 'purpose': 'bind, verify online and capture manual Bwin URL before kickoff'},
+                'review': {'minimum_lead_minutes': 5, 'purpose': 'revalidate prepared handoff'},
+                'refresh_odds': {'minimum_lead_minutes': 5, 'purpose': 'new Bwin capture'},
+                'retry_context': {'minimum_lead_minutes': 5, 'purpose': 'new API context without scraper'},
+@@ -273,8 +566,15 @@ def write_handoff(root, run_dir, ready, failures, scanner=None, min_lead=45, max
+             '', f"Comando de revisión: `{doc['next_command']}`", ''
+         ]), encoding='utf-8')
+         doc['research_brief'] = str(brief)
++        doc['run_outcome']='RESEARCH_HANDOFF_READY_NOT_A_BET'
++    elif any(x.get('failure_class')=='TECHNICAL' for x in failures):
++        doc['status'] = 'TECHNICAL_FAILURE'
++        doc['run_outcome'] = 'TECHNICAL_FAILURE_REQUIRES_RETRY_OR_FIX'
+     elif failures and any(x.get('phase') not in ('temporal',) for x in failures):
+         doc['status'] = 'INSUFFICIENT_EVIDENCE'
++        doc['run_outcome'] = 'NO_BET_LEGITIMATE'
++    else:
++        doc['run_outcome'] = 'NO_ELIGIBLE_FIXTURE_IN_WINDOW'
+     run_dir.mkdir(parents=True, exist_ok=True)
+     trial.dump(run_dir / 'handoff_prematch.json', doc)
+     return doc
+@@ -417,12 +717,15 @@ def write_comparison_audit(root, base, run_dir, tactical, comparison_ready, doc,
+ 
+ 
+ def scan(root, folder, day, args):
++    scan_started=time.perf_counter();phase_timings={}
++    reference=trial.execution_reference(args)
+     args.max_odds_age = getattr(args, 'max_odds_age', 120)
+-    args.discovery_retries = getattr(args, 'discovery_retries', 2)
++    args.discovery_retries = getattr(args, 'discovery_retries', 1)
+     from prematch_audit import CandidateLedger, failure_state
+     base = folder / 'prospective_trial'
+     ledger=CandidateLedger.load(base/'candidate_ledger.json')
+-    prepared=reusable_preparation(root, folder, day, args)
++    phase_started=time.perf_counter();prepared=reusable_preparation(root, folder, day, args)
++    phase_timings['reusable_preparation']=round(time.perf_counter()-phase_started,4)
+     discovery_deferred={str(i) for i in prepared.get('discovery_deferred_ids',[])}
+     run_dir = base / 'daily_runs' / stamp()
+     prepath = base / 'enriched/preselection.json'
+@@ -440,11 +743,13 @@ def scan(root, folder, day, args):
+         for f in major.get('excluded',[])+major.get('review',[]):
+             ledger.record(f,'FILTRADO_POR_LIGA','league_filter',f.get('filter_reason'))
+         for f in major.get('fixtures',[]):
+-            reason=trial.scope_reason(f,trial.now_madrid(),args.min_lead,getattr(args,'horizon_hours',3))
++            reason=trial.scope_reason(f,reference,args.min_lead,getattr(args,'horizon_hours',3))
+             if reason:ledger.record(f,'EXCLUIDO_POR_HORARIO','scope',reason)
+     from prematch_tactical_signal_engine import run_engine,diversified_order
+-    tactical_pre=run_engine(prepath,base/'patterns/pattern_engine.json' if (base/'patterns/pattern_engine.json').is_file() else None,
++    phase_started=time.perf_counter();tactical_pre=run_engine(prepath,base/'patterns/pattern_engine.json' if (base/'patterns/pattern_engine.json').is_file() else None,
+         base/'tactical',root,profiles=root/'config/tactical_profiles/profiles.json')
++    phase_timings['statistical_ranking_precommercial']=round(time.perf_counter()-phase_started,4)
++    phase_started=time.perf_counter()
+     fixtures=diversified_order(fixtures,{fid:x['priority_score'] for fid,x in tactical_pre['fixtures'].items()})
+     failures, ready = [], []
+     preflights = list((base / 'preflight').rglob('market_preflight.json'))
+@@ -456,13 +761,13 @@ def scan(root, folder, day, args):
+         if str(fid) in discovery_deferred:
+             ledger.record(fixture,'DIFERIDO_POR_PRESUPUESTO','bwin_discovery','DISCOVERY_BUDGET_NOT_ANALYZED')
+             continue
+-        reason=trial.scope_reason(fixture,trial.now_madrid(),args.min_lead,getattr(args,'horizon_hours',3))
++        reason=trial.scope_reason(fixture,reference,args.min_lead,getattr(args,'horizon_hours',3))
+         if reason:
+             ledger.record(fixture,'EXCLUIDO_POR_HORARIO','scope',reason)
+             failures.append({'fixture_id': fid, 'phase': 'temporal', 'reason': reason})
+             continue
+-        if ('data_readiness_score' in fixture and fixture['data_readiness_score'] is None) or not fixture.get('details_checked',True) or fixture.get('data_readiness_status') in ('EVALUACION_INCOMPLETA','PENDIENTE_DETALLE'):
+-            ledger.record(fixture,'SIN_COBERTURA','preselection',fixture.get('data_readiness_status'))
++        if ('data_readiness_score' in fixture and fixture['data_readiness_score'] is None) or not fixture.get('details_checked',True) or fixture.get('data_readiness_status') in ('EVALUACION_INCOMPLETA','PENDIENTE_DETALLE') or fixture.get('evidence_tier') in ('NO_STATISTICAL_DATA','BELOW_MINIMUM_EVIDENCE'):
++            ledger.record(fixture,'SIN_COBERTURA','preselection',fixture.get('evidence_tier') or fixture.get('data_readiness_status'))
+             failures.append({'fixture_id':fid,'phase':'coverage','reason':'INSUFFICIENT_STATISTICAL_COVERAGE'})
+             continue
+         if args.max_scrapes and len(ready) >= args.max_scrapes:
+@@ -483,40 +788,84 @@ def scan(root, folder, day, args):
+                 failures.append({'fixture_id': fid, 'phase': 'reuse', 'path': str(path), 'reason': str(exc)})
+         if reused:
+             continue
++        sibling_used = False
++        for sib_idx, sib_path in enumerate(_sibling_preflights(folder, base)):
++            try:
++                if not any(str(m.get('fixture_id')) == str(fid) for m in trial.read(sib_path).get('matches', [])):
++                    continue
++                dest = run_dir / 'preflight' / f'{fid}_reuse_{sib_idx}'
++                match = _rebind_sibling_preflight(root, base, dest, sib_path, fixture, prepath, args)
++                ready.append((fixture, match, dest / 'market_preflight.json'))
++                sibling_used = True
++                print(f'[{fid}] Snapshot fresco de evaluación previa reauditado y vinculado; sin scraping nuevo.', flush=True)
++                break
++            except (trial.TrialError, OSError, ValueError, KeyError, TypeError) as exc:
++                ledger.record(fixture, failure_state(exc), 'sibling_reuse', str(exc), str(sib_path))
++                failures.append({'fixture_id': fid, 'phase': 'sibling_reuse', 'path': str(sib_path), 'reason': str(exc)})
++        if sibling_used:
++            continue
+         try:
+-            for known in (base / 'bwin').rglob('bwin_discovery.json'):
+-                for event in trial.read(known).get('matches', []):
+-                    eid = str(event.get('bwin_event_id') or '')
+-                    if str(event.get('fixture_id')) == str(fid) and eid.isdigit():
+-                        existing = root / 'outputs/matches' / eid / 'inputs' / f'cuotas_bwin_{eid}.txt'
+-                        if existing.is_file() and not getattr(args,'refresh_existing_odds',False):
+-                            raise trial.TrialError('EXISTING_ODDS_NOT_REUSABLE: preservado; pasar al siguiente candidato')
+             path, event = discovery_for(root, base, fixture, args, failures)
+-            target = root / 'outputs/matches' / str(event['bwin_event_id']) / 'inputs' / f"cuotas_bwin_{event['bwin_event_id']}.txt"
+-            if target.exists() and not getattr(args,'refresh_existing_odds',False):
+-                # A stale or unauthenticated snapshot is preserved. Move on, never overwrite it.
+-                raise trial.TrialError('EXISTING_ODDS_NOT_REUSABLE: se conserva; pasar al siguiente candidato')
+-            for attempt in range(args.discovery_retries + 1):
++            eid = str(event.get('bwin_event_id') or '')
++            target = root / 'outputs/matches' / eid / 'inputs' / f'cuotas_bwin_{eid}.txt'
++            if target.exists():
++                cls, detail = classify_existing_snapshot(
++                    target, eid, str(event.get('bwin_url') or ''), trial.now_madrid(), args.max_odds_age
++                )
++                if not getattr(args, 'refresh_existing_odds', False):
++                    if cls == 'REUSABLE_EXISTING_SNAPSHOT':
++                        # Only reuse via --reuse-existing if discovery catalog observation isn't newer than TXT capture.
++                        obs_dt = trial.dt((event.get('time_evidence') or {}).get('observed_at_utc') or (event.get('inspection') or {}).get('observed_at_utc'))
++                        cap_dt = trial.dt(detail)
++                        if obs_dt and cap_dt and obs_dt <= cap_dt + timedelta(minutes=2):
++                            dest = run_dir / 'preflight' / f'{fid}_reuse_local'
++                            trial.run(root, 'bwin_market_preflight.py', [
++                                '--discovery', str(path), '--preselection', str(prepath),
++                                '--fixture-id', str(fid), '--reuse-existing', '--root', str(root),
++                                '--min-lead-minutes', str(args.min_lead), '--output-dir', str(dest)
++                            ], base / 'logs')
++                            match = verified_preflight(root, dest / 'market_preflight.json', fixture, prepath, args)
++                            ready.append((fixture, match, dest / 'market_preflight.json'))
++                            continue
++                        raise trial.TrialError(f'CROSS_RUN_SNAPSHOT_WITHOUT_PREFLIGHT ({detail}): preservado; usar --refresh-existing-odds para recapturar')
++                    raise trial.TrialError(f'{cls}: {detail}; preservado, usar --refresh-existing-odds para recapturar')
++            capture_attempts=max(1,args.discovery_retries)
++            for attempt in range(capture_attempts):
+                 dest = run_dir / 'preflight' / f'{fid}_{attempt}'
+                 try:
+-                    refresh_args=['--refresh-existing'] if getattr(args,'refresh_existing_odds',False) and target.exists() else []
+-                    trial.run(root, 'bwin_market_preflight.py', ['--discovery', str(path), '--preselection', str(prepath),
+-                              '--fixture-id', str(fid), '--run-scraper', '--root', str(root),
+-                              '--min-lead-minutes', str(args.min_lead), '--output-dir', str(dest),*refresh_args], base / 'logs')
++                    has_manifest = bool(eid) and (root / 'outputs/matches' / eid / 'manifest.json').exists()
++                    if getattr(args, 'refresh_existing_odds', False) and target.exists():
++                        refresh_args = ['--refresh-existing', '--immutable-capture'] if has_manifest else ['--refresh-existing']
++                    else:
++                        refresh_args = []
++                    cmd_preflight = [
++                        '--discovery', str(path), '--preselection', str(prepath),
++                        '--fixture-id', str(fid), '--run-scraper', '--root', str(root),
++                        '--min-lead-minutes', str(args.min_lead), '--output-dir', str(dest), *refresh_args,
++                    ]
++                    if getattr(args, 'confirm_external', False):
++                        cmd_preflight.append('--confirm-external')
++                    trial.run(root, 'bwin_market_preflight.py', cmd_preflight, base / 'logs')
+                     match = verified_preflight(root, dest / 'market_preflight.json', fixture, prepath, args)
+                     ready.append((fixture, match, dest / 'market_preflight.json'))
+                     break
+                 except (trial.TrialError, OSError, ValueError, KeyError) as exc:
+                     ledger.record(fixture,failure_state(exc),'capture',str(exc))
+-                    failures.append({'fixture_id': fid, 'phase': 'capture', 'attempt': attempt, 'reason': str(exc)})
+-                    if target.exists() or attempt == args.discovery_retries:
++                    failures.append({'fixture_id': fid, 'phase': 'capture', 'attempt': attempt,
++                                     'failure_class':'TECHNICAL' if 'terminó con código' in str(exc) else 'DOMAIN',
++                                     'reason': str(exc)})
++                    if target.exists() or attempt == capture_attempts-1:
+                         break
+                     # Reinspect only this event before retrying, with all identity/time gates.
+                     path, event = discovery_for(root, base, fixture, args, failures)
+         except (trial.TrialError, OSError, ValueError, KeyError, TypeError) as exc:
+             ledger.record(fixture,failure_state(exc),'capture',str(exc))
+-            failures.append({'fixture_id': fid, 'phase': 'capture', 'reason': str(exc)})
++            failures.append({'fixture_id': fid, 'phase': 'capture',
++                             'failure_class':'TECHNICAL' if 'terminó con código' in str(exc) else 'DOMAIN',
++                             'reason': str(exc)})
++    phase_timings['identity_discovery_and_capture']=round(time.perf_counter()-phase_started,4)
+     scanner_path = None
++    phase_started=time.perf_counter()
+     if ready:
+         out = run_dir / 'opportunity'
+         cmd = ['--preselection', str(prepath), '--pattern', str(base / 'patterns/pattern_engine.json'),
+@@ -540,7 +889,8 @@ def scan(root, folder, day, args):
+             for fixture,_,_ in ready:
+                 ledger.record(fixture,'SIN_CUOTAS','opportunity_scanner',str(exc))
+             ready = [];scanner_path=None
+-            failures.append({'phase': 'scanner', 'reason': str(exc)})
++            failures.append({'phase': 'scanner', 'failure_class':'TECHNICAL', 'reason': str(exc)})
++    phase_timings['commercial_scanner']=round(time.perf_counter()-phase_started,4)
+     # Enlace comercial sidecar: nunca participa en tiers ni en write_handoff.
+     sport_queue=base/'patterns_v2/research_queue_sport.json'
+     if sport_queue.is_file():
+@@ -557,9 +907,10 @@ def scan(root, folder, day, args):
+     # Keep every independently captured and scanner-verified fixture for the
+     # comparative audit, even if its tactical evidence later prevents selection.
+     comparison_ready=list(final_ready)
+-    tactical=run_engine(prepath,base/'patterns/pattern_engine.json' if (base/'patterns/pattern_engine.json').is_file() else None,
++    phase_started=time.perf_counter();tactical=run_engine(prepath,base/'patterns/pattern_engine.json' if (base/'patterns/pattern_engine.json').is_file() else None,
+         run_dir/'tactical',root,preflights=[path for _,_,path in final_ready],scanner=scanner_path,
+         profiles=root/'config/tactical_profiles/profiles.json')
++    phase_timings['final_statistical_and_commercial_views']=round(time.perf_counter()-phase_started,4)
+     (base/'tactical').mkdir(parents=True,exist_ok=True)
+     for name in ('tactical_signal_engine.json','TACTICAL_SELECTION_REPORT.md'):
+         shutil.copy2(run_dir/'tactical'/name,base/'tactical'/name)
+@@ -591,6 +942,75 @@ def scan(root, folder, day, args):
+         brief=Path(doc['research_brief'])
+         brief.write_text(brief.read_text(encoding='utf-8')+f"\nNivel {doc['selection_tier']}; elegible comercial actual: {doc['eligible']}; carencias: {doc['research_missing_evidence']}.\nSeñales descriptivas (no EV): `{doc['tactical_signal_json']}`.\nReporte de prioridad: `{doc['tactical_report']}`.\n",encoding='utf-8')
+     doc['tactical_selection_ranking']=tactical['ranking']
++    doc['statistical_research_ranking']=tactical.get('statistical_ranking',[])
++    doc['ranking_separation']=tactical.get('ranking_separation',{})
++    verified_fids = {str(f['fixture_id']) for f, _, _ in final_ready}
++    from bwin_manual_links import load_manual_links, resolve_bwin_search_status, QUEUE_SCHEMA
++    manual_links_map = (load_manual_links(folder).get('links') or {})
++    disc_by_fid = {}
++    if (base / 'bwin/bwin_discovery.json').is_file():
++        for dm in trial.read(base / 'bwin/bwin_discovery.json').get('matches', []):
++            if dm.get('fixture_id') is not None:
++                disc_by_fid[str(dm['fixture_id'])] = dm
++    reconciliation_queue = []
++    for s_row in tactical.get('statistical_ranking', []):
++        sfid = str(s_row['fixture_id'])
++        lrow = ledger.rows.get(sfid)
++        drow = disc_by_fid.get(sfid)
++        mrow = manual_links_map.get(sfid)
++        b_status = resolve_bwin_search_status(ledger_row=lrow, discovery_row=drow, manual_link=mrow)
++        reconciliation_queue.append({
++            'fixture_id': s_row['fixture_id'],
++            'statistical_position': s_row.get('position'),
++            'statistical_research_score': s_row.get('statistical_research_score'),
++            'home': s_row['home'],
++            'away': s_row['away'],
++            'bwin_search_status': b_status,
++            'commercial_verified': sfid in verified_fids,
++            'offer_proven_absent': False,
++            'manual_url_provided': (mrow or {}).get('bwin_url'),
++            'extracted_event_id': (mrow or {}).get('extracted_event_id') or (drow or {}).get('bwin_event_id'),
++            'quote_capture_status': (mrow or {}).get('quote_capture_status') or ('CAPTURED_VERIFIED' if sfid in verified_fids else 'NOT_CAPTURED'),
++            'bwin_ledger_state': (lrow or {}).get('state'),
++            'bwin_reason': (lrow or {}).get('reason'),
++        })
++    trial.dump(base / 'bwin/bwin_reconciliation_queue.json', {
++        'schema_version': QUEUE_SCHEMA,
++        'generated_madrid': trial.now_madrid().isoformat(),
++        'offer_proven_absent_policy': 'NEVER_INFERS_ABSENCE_FROM_INCOMPLETE_OR_BUDGETED_SEARCH',
++        'queue': reconciliation_queue,
++    })
++    doc['bwin_reconciliation_queue'] = str(base / 'bwin/bwin_reconciliation_queue.json')
++    doc['research_pending_candidates'] = [
++        {
++            'fixture_id': s_row['fixture_id'],
++            'home': s_row['home'],
++            'away': s_row['away'],
++            'statistical_research_score': s_row.get('statistical_research_score'),
++            'signal_count': s_row.get('signal_count', 0),
++            'signal_families': s_row.get('signal_families', []),
++            'research_status': 'RESEARCH_PENDING',
++            'commercial_verified': False,
++            'bwin_search_status': resolve_bwin_search_status(
++                ledger_row=ledger.rows.get(str(s_row['fixture_id'])),
++                discovery_row=disc_by_fid.get(str(s_row['fixture_id'])),
++                manual_link=manual_links_map.get(str(s_row['fixture_id'])),
++            ),
++            'bwin_ledger_state': (ledger.rows.get(str(s_row['fixture_id'])) or {}).get('state'),
++            'bwin_reason': (ledger.rows.get(str(s_row['fixture_id'])) or {}).get('reason'),
++            'offer_proven_absent': False,
++        }
++        for s_row in tactical.get('statistical_ranking', [])
++        if str(s_row['fixture_id']) not in verified_fids
++        and (s_row.get('signal_count', 0) > 0 or (s_row.get('statistical_research_score') or 0) >= 50)
++        and (ledger.rows.get(str(s_row['fixture_id'])) or {}).get('state') not in {'IDENTIDAD_INCORRECTA', 'EXCLUIDO_POR_HORARIO'}
++    ]
++    identity_audit_path=base/'bwin/identity_audit/identity_audit.json'
++    if identity_audit_path.is_file():
++        identity_audit=trial.read(identity_audit_path)
++        doc['identity_coverage_audit']={'path':str(identity_audit_path.resolve()),
++            'sha256':trial.sha(identity_audit_path),'schema_version':identity_audit.get('schema_version'),
++            'metrics':identity_audit.get('metrics',{}),'network_used':identity_audit.get('network_used')}
+     if doc.get('fixture_id') is not None:
+         doc['routing_reason']='Prioridad conjunta de señal, cobertura por familia, diversidad, identidad, margen y scanner; ver ranking y reporte táctico. No representa valor financiero.'
+     doc['horizon_hours']=getattr(args,'horizon_hours',3)
+@@ -603,12 +1023,29 @@ def scan(root, folder, day, args):
+     doc['evidence_comparison_status']='EVIDENCE_COMPARISON_COMPLETE' if doc['eligible_candidate_target_reached'] else 'COMPARISON_INCOMPLETE'
+     doc['comparison_status']=doc['evidence_comparison_status']
+     doc['comparison_verified_events']=len(comparison_ready)
++    phase_timings['total']=round(time.perf_counter()-scan_started,4)
++    phase_timings['discovery_retry_directories_in_window']=len(list((base/'bwin').glob('retry_*')))
++    phase_timings['direct_identity_directories_in_window']=len(list((base/'bwin').glob('direct_*')))
++    trial.dump(run_dir/'phase_metrics.json',phase_timings)
++    doc['phase_metrics']=phase_timings
++    doc['phase_metrics_path']=str(run_dir/'phase_metrics.json')
++    evaluation_path=folder/'evaluation_manifest.json'
++    if evaluation_path.is_file():
++        evaluation=trial.evaluation_manifest(folder)
++        doc['evaluation_id']=evaluation['evaluation_id']
++        doc['evaluation_manifest']=str(evaluation_path)
++        doc['evaluation_manifest_sha256']=trial.sha(evaluation_path)
++        doc['execution_reference_madrid']=evaluation['reference_madrid']
+     doc['comparison_audit']=str(root/'outputs/engineering/prematch_comparison_v2')
+     doc['comparison_zip']=str(root/'outputs/engineering/prematch_comparison_v2.zip')
+     ledger.write(run_dir/'candidate_ledger.json');ledger.write()
+     trial.dump(run_dir/'handoff_prematch.json',doc)
+     # Latest pointer contains the complete result, with immutable run outputs retained.
+     doc['run_handoff'] = str(run_dir / 'handoff_prematch.json')
++    if doc.get('status') == 'READY_FOR_MANUAL_RESEARCH':
++        doc['canonical_prepare_command'] = (
++            f'"{__import__("sys").executable}" "{root / "prematch_case.py"}" '
++            f'prepare --handoff "{run_dir / "handoff_prematch.json"}"')
+     trial.dump(base / 'handoff_prematch.json', doc)
+     from prematch_daily_csv import export_daily
+     export_daily(base)
+--- /dev/null	2026-11-18 18:16:31
++++ bwin_manual_links.py	2026-11-18 18:12:10
+@@ -0,0 +1,871 @@
++#!/usr/bin/env python3
++"""Gestión auditable de URLs Bwin manuales y cola de reconciliación (sin saltar controles PREMATCH)."""
++from __future__ import annotations
++
++import csv
++import json
++import os
++import re
++from datetime import datetime, timezone
++from pathlib import Path
++from typing import Any
++from urllib.parse import unquote, urlparse
++
++import bwin_discovery as bd
++import prematch_prospective_trial as trial
++
++MANUAL_LINKS_SCHEMA = "1.0-manual-bwin-links"
++QUEUE_SCHEMA = "1.0-bwin-reconciliation-queue"
++MANUAL_BWIN_MIN_LEAD_MINUTES = 5
++PREPARE_MIN_LEAD_MINUTES = 45
++MARKDOWN_URL_RE = re.compile(r"\[[^\]]*\]\([^)]*\)")
++
++CANONICAL_BWIN_STATES = frozenset({
++    "BWIN_VERIFIED",
++    "BWIN_NOT_SCANNED_BUDGET",
++    "BWIN_SEARCH_INCOMPLETE",
++    "BWIN_NOT_FOUND_IN_SCANNED_PAGES",
++    "BWIN_IDENTITY_CONFLICT",
++    "BWIN_MANUAL_LINK_PENDING_VALIDATION",
++    "BWIN_MANUAL_LINK_VERIFIED",
++})
++
++
++class ManualBwinLinkError(ValueError):
++    """Error de validación o identidad en vinculación manual de URL Bwin."""
++
++
++def _atomic_json(path: Path, payload: Any) -> None:
++    path.parent.mkdir(parents=True, exist_ok=True)
++    tmp = path.with_name(f"{path.name}.{os.getpid()}.tmp")
++    tmp.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
++    tmp.replace(path)
++
++
++def parse_manual_bwin_spec(spec: str) -> tuple[int, str]:
++    """Parsea '<FIXTURE_ID>=<BWIN_URL>' de forma estricta."""
++    if "=" not in str(spec or ""):
++        raise ManualBwinLinkError(f"MANUAL_BWIN_SPEC_INVALID_FORMAT:{spec!r} (esperado <FIXTURE_ID>=<URL>)")
++    fid_raw, url_raw = str(spec).split("=", 1)
++    fid_raw = fid_raw.strip()
++    url = url_raw.strip()
++    if not fid_raw.isdigit() or int(fid_raw) <= 0:
++        raise ManualBwinLinkError(f"MANUAL_BWIN_INVALID_FIXTURE_ID:{fid_raw!r}")
++    if not url:
++        raise ManualBwinLinkError(f"MANUAL_BWIN_EMPTY_URL:fixture_id={fid_raw}")
++    return int(fid_raw), url
++
++
++def load_manual_bwin_file(path: Path) -> list[tuple[int, str]]:
++    """Carga pares (fixture_id, bwin_url) desde JSON o CSV."""
++    p = Path(path)
++    if not p.is_file():
++        raise ManualBwinLinkError(f"MANUAL_BWIN_FILE_NOT_FOUND:{p}")
++    if p.suffix.lower() == ".csv":
++        with p.open(encoding="utf-8-sig", newline="") as fh:
++            rows = list(csv.DictReader(fh))
++    else:
++        doc = json.loads(p.read_text(encoding="utf-8-sig"))
++        rows = doc if isinstance(doc, list) else (doc.get("links") or doc.get("bindings") or doc.get("fixtures") or [])
++    pairs: list[tuple[int, str]] = []
++    for row in rows:
++        if not isinstance(row, dict):
++            raise ManualBwinLinkError("MANUAL_BWIN_FILE_ROW_INVALID")
++        fid = row.get("fixture_id")
++        url = str(row.get("bwin_url") or row.get("url") or "").strip()
++        if not str(fid or "").isdigit() or int(fid) <= 0 or not url:
++            raise ManualBwinLinkError(f"MANUAL_BWIN_FILE_ROW_INCOMPLETE:{row!r}")
++        pairs.append((int(fid), url))
++    return pairs
++
++
++def parse_manual_bwin_url(url: str, base_url: str = bd.BASE) -> dict[str, Any]:
++    """Valida dominio/esquema HTTPS directo de Bwin (rechaza Markdown) y extrae Event ID."""
++    raw = str(url or "").strip()
++    if not raw:
++        raise ManualBwinLinkError("MANUAL_BWIN_URL_EMPTY")
++    if MARKDOWN_URL_RE.search(raw) or "[" in raw or "]" in raw:
++        raise ManualBwinLinkError(
++            f"MANUAL_BWIN_URL_MARKDOWN_FORMAT_FORBIDDEN:{raw} "
++            "(introduce únicamente la URL HTTPS directa sin sintaxis Markdown [texto](url))"
++        )
++    if any(ch.isspace() for ch in raw) or raw.count("://") != 1 or "<" in raw or ">" in raw or "(" in raw or ")" in raw:
++        raise ManualBwinLinkError(f"MANUAL_BWIN_URL_INVALID_SYNTAX:{raw}")
++    parsed = urlparse(raw)
++    base_host = (urlparse(base_url).hostname or "www.bwin.es").lower()
++    host = (parsed.hostname or "").lower()
++    if (
++        parsed.scheme != "https"
++        or not host
++        or parsed.username
++        or parsed.password
++        or (host != base_host and not host.endswith(".bwin.es"))
++    ):
++        raise ManualBwinLinkError(f"MANUAL_BWIN_URL_INVALID_HOST_OR_SCHEME:{raw}")
++    event_id = bd.extract_event_id(raw)
++    if not event_id or not event_id.isdigit():
++        raise ManualBwinLinkError(f"MANUAL_BWIN_URL_MISSING_EVENT_ID:{raw}")
++    path = unquote(parsed.path or "")
++    slug = path.rstrip("/").rsplit("/", 1)[-1]
++    return {
++        "bwin_url": raw,
++        "bwin_event_id": event_id,
++        "slug": slug,
++        "host": host,
++    }
++
++
++def _evaluate_manual_temporal_window(
++    fixture: dict[str, Any] | None,
++    now_utc: datetime,
++    min_lead_minutes: int,
++    *,
++    operation: str,
++) -> tuple[bool, dict[str, Any] | None]:
++    now_ref = now_utc.astimezone(timezone.utc)
++    if not fixture:
++        return False, {
++            "blocked": True,
++            "block_type": "TEMPORAL_WINDOW_BLOCK",
++            "operation": operation,
++            "reason": "FIXTURE_NOT_IN_EVALUATION",
++            "min_lead_minutes": int(min_lead_minutes),
++            "remaining_minutes": None,
++            "checked_at_utc": now_ref.isoformat(),
++        }
++    ko = bd.local_kickoff(fixture.get("kickoff_madrid") or fixture.get("kickoff_utc"))
++    if ko is None:
++        return False, {
++            "blocked": True,
++            "block_type": "TEMPORAL_WINDOW_BLOCK",
++            "operation": operation,
++            "reason": "INVALID_OR_MISSING_KICKOFF",
++            "min_lead_minutes": int(min_lead_minutes),
++            "remaining_minutes": None,
++            "checked_at_utc": now_ref.isoformat(),
++        }
++    remaining_min = (ko.astimezone(timezone.utc) - now_ref).total_seconds() / 60.0
++    if remaining_min <= 0:
++        return False, {
++            "blocked": True,
++            "block_type": "POST_KICKOFF_FORBIDDEN",
++            "operation": operation,
++            "reason": "POST_KICKOFF_PREMATCH_FORBIDDEN",
++            "min_lead_minutes": int(min_lead_minutes),
++            "remaining_minutes": round(remaining_min, 3),
++            "checked_at_utc": now_ref.isoformat(),
++        }
++    if remaining_min < float(min_lead_minutes):
++        return False, {
++            "blocked": True,
++            "block_type": "TEMPORAL_WINDOW_BLOCK",
++            "operation": operation,
++            "reason": "PREMATCH_MANUAL_LEAD_WINDOW_EXPIRED",
++            "min_lead_minutes": int(min_lead_minutes),
++            "remaining_minutes": round(remaining_min, 3),
++            "checked_at_utc": now_ref.isoformat(),
++        }
++    return True, None
++
++
++def _effective_national_context(fixture: dict[str, Any]) -> bool:
++    if bd.is_national_team_context(fixture):
++        return True
++    h_norm = bd.norm(fixture.get("home"))
++    a_norm = bd.norm(fixture.get("away"))
++    return h_norm in bd._NATIONAL_TEAM_EQUIVALENCE or a_norm in bd._NATIONAL_TEAM_EQUIVALENCE
++
++
++def _slug_team_check(
++    fixture: dict[str, Any],
++    slug: str,
++    all_fixtures: dict[int, dict[str, Any]] | None = None,
++) -> tuple[str, str | None]:
++    """Evalúa el slug sin bloquear traducciones o alias válidos de forma arbitraria.
++
++    Retorna:
++      - ('OK', None) si el slug coincide y respeta el orden local/visitante.
++      - ('CONFLICT', motivo) solo ante conflicto positivo (orden invertido o coincidencia con otro fixture).
++      - ('UNVERIFIED', motivo) si el slug no coincide léxicamente offline (p. ej. traducción no catalogada).
++    """
++    clean_slug = bd.norm(slug.replace("-", " ").replace(":", " "))
++    tokens = [w for w in clean_slug.split() if not w.isdigit() and w not in {"eventos", "sports", "es"}]
++    if len(tokens) < 2:
++        return "UNVERIFIED", "URL_SLUG_TOO_SHORT_FOR_OFFLINE_CHECK"
++    evidence = " ".join(tokens)
++    nat = _effective_national_context(fixture)
++    home = str(fixture.get("home") or "")
++    away = str(fixture.get("away") or "")
++    h_sim = bd.team_similarity(home, evidence, national_context=nat)
++    a_sim = bd.team_similarity(away, evidence, national_context=nat)
++    order = bd.team_order_status(home, away, evidence, national_context=nat)
++    if order.endswith("_CONFLICT") and min(h_sim, a_sim) >= 0.70:
++        return "CONFLICT", f"URL_SLUG_TEAM_ORDER_REVERSED:{order}"
++    if min(h_sim, a_sim) >= 0.70:
++        return "OK", None
++    if all_fixtures and max(h_sim, a_sim) < 0.35:
++        target_fid = int(fixture.get("fixture_id") or 0)
++        for other_fid, other in all_fixtures.items():
++            if int(other_fid) == target_fid:
++                continue
++            o_nat = _effective_national_context(other)
++            oh = bd.team_similarity(str(other.get("home") or ""), evidence, national_context=o_nat)
++            oa = bd.team_similarity(str(other.get("away") or ""), evidence, national_context=o_nat)
++            if oh >= 0.82 and oa >= 0.82:
++                return "CONFLICT", f"URL_SLUG_MATCHES_OTHER_FIXTURE:{other_fid}"
++    if max(h_sim, a_sim) < 0.35:
++        return "UNVERIFIED", f"URL_SLUG_UNVERIFIED_OFFLINE:home_sim={round(h_sim,3)},away_sim={round(a_sim,3)}"
++    return "UNVERIFIED", f"URL_SLUG_PARTIAL_MATCH_OFFLINE:home_sim={round(h_sim,3)},away_sim={round(a_sim,3)}"
++
++
++def _stored_auto_discoveries(eval_dir: Path, fixture_id: int) -> list[dict[str, Any]]:
++    """Lee descubrimientos automáticos previos (excluyendo manual_*) para el fixture."""
++    bwin_root = eval_dir / "prospective_trial/bwin"
++    if not bwin_root.is_dir():
++        return []
++    found: list[dict[str, Any]] = []
++    for p in sorted(bwin_root.rglob("bwin_discovery.json")):
++        if p.parent.name.startswith("manual_"):
++            continue
++        try:
++            doc = json.loads(p.read_text(encoding="utf-8"))
++        except (OSError, json.JSONDecodeError):
++            continue
++        for row in doc.get("matches", []):
++            if str(row.get("fixture_id")) == str(fixture_id) and row.get("bwin_event_id"):
++                found.append({"path": str(p.resolve()), "row": row})
++    return found
++
++
++def _load_eval_fixtures(eval_dir: Path) -> tuple[dict[int, dict[str, Any]], dict[int, dict[str, Any]]]:
++    """Carga fixtures descubiertos y estados de filtro de categoría en la evaluación."""
++    fx_path = eval_dir / "fixtures.json"
++    if not fx_path.is_file():
++        raise ManualBwinLinkError(f"EVALUATION_FIXTURES_MISSING:{fx_path}")
++    fx_doc = json.loads(fx_path.read_text(encoding="utf-8"))
++    by_id: dict[int, dict[str, Any]] = {}
++    for row in fx_doc.get("fixtures", []):
++        if row.get("fixture_id") is not None:
++            by_id[int(row["fixture_id"])] = dict(row)
++
++    major_by_id: dict[int, dict[str, Any]] = {}
++    major_path = eval_dir / "fixtures_major.json"
++    if major_path.is_file():
++        m_doc = json.loads(major_path.read_text(encoding="utf-8"))
++        for key in ("fixtures", "review", "excluded"):
++            for row in m_doc.get(key, []):
++                if row.get("fixture_id") is not None:
++                    major_by_id[int(row["fixture_id"])] = dict(row)
++                    by_id.setdefault(int(row["fixture_id"]), dict(row))
++
++    pre_path = eval_dir / "prospective_trial/enriched/preselection.json"
++    if pre_path.is_file():
++        p_doc = json.loads(pre_path.read_text(encoding="utf-8"))
++        for row in p_doc.get("matches", []):
++            if row.get("fixture_id") is not None:
++                fid = int(row["fixture_id"])
++                merged = {**by_id.get(fid, {}), **row}
++                by_id[fid] = merged
++    return by_id, major_by_id
++
++
++def manual_links_path(eval_dir: Path) -> Path:
++    return Path(eval_dir) / "prospective_trial/bwin/manual_bwin_links.json"
++
++
++def load_manual_links(eval_dir: Path) -> dict[str, Any]:
++    path = manual_links_path(eval_dir)
++    if path.is_file():
++        return json.loads(path.read_text(encoding="utf-8"))
++    return {"schema_version": MANUAL_LINKS_SCHEMA, "links": {}}
++
++
++def register_manual_bwin_urls(
++    eval_dir: Path,
++    bindings: list[tuple[int, str]],
++    *,
++    base_url: str = bd.BASE,
++    now_utc: datetime | None = None,
++    min_lead_minutes: int = MANUAL_BWIN_MIN_LEAD_MINUTES,
++) -> dict[str, Any]:
++    """Registra y valida offline una o varias URLs Bwin asociadas a fixture_id.
++
++    No salta controles PREMATCH ni altera el ranking estadístico ni snapshots congelados.
++    """
++    if not bindings:
++        raise ManualBwinLinkError("MANUAL_BWIN_NO_BINDINGS_PROVIDED")
++    lead_floor = int(min_lead_minutes)
++    if lead_floor < MANUAL_BWIN_MIN_LEAD_MINUTES:
++        raise ManualBwinLinkError(
++            f"MANUAL_BWIN_MIN_LEAD_BELOW_SAFETY_FLOOR:{lead_floor}<{MANUAL_BWIN_MIN_LEAD_MINUTES}"
++        )
++    eval_dir = Path(eval_dir)
++    now = (now_utc or datetime.now(timezone.utc)).astimezone(timezone.utc)
++    by_id, major_by_id = _load_eval_fixtures(eval_dir)
++
++    # Validar duplicados y conflictos dentro del lote suministrado
++    batch_by_fid: dict[int, dict[str, Any]] = {}
++    batch_by_eid: dict[str, int] = {}
++    parsed_items: list[tuple[int, dict[str, Any]]] = []
++    for fid, raw_url in bindings:
++        parsed = parse_manual_bwin_url(raw_url, base_url=base_url)
++        eid = parsed["bwin_event_id"]
++        if fid in batch_by_fid:
++            prev = batch_by_fid[fid]
++            if prev["bwin_event_id"] != eid or prev["bwin_url"] != parsed["bwin_url"]:
++                raise ManualBwinLinkError(
++                    f"MANUAL_BWIN_DUPLICATE_FIXTURE_CONFLICT:fixture_id={fid},events=({prev['bwin_event_id']},{eid})"
++                )
++            continue  # duplicado idéntico en el mismo comando: idempotente
++        if eid in batch_by_eid and batch_by_eid[eid] != fid:
++            raise ManualBwinLinkError(
++                f"MANUAL_BWIN_DUPLICATE_EVENT_ACROSS_FIXTURES:event_id={eid},fixtures=({batch_by_eid[eid]},{fid})"
++            )
++        batch_by_fid[fid] = parsed
++        batch_by_eid[eid] = fid
++        parsed_items.append((fid, parsed))
++
++    store = load_manual_links(eval_dir)
++    links: dict[str, Any] = dict(store.get("links") or {})
++
++    # Verificar conflicto de mismo bwin_event_id ya asignado a otro fixture distinto
++    existing_eid_to_fid = {
++        str(v.get("extracted_event_id")): str(k)
++        for k, v in links.items()
++        if v.get("extracted_event_id") and v.get("identity_status") != "BWIN_IDENTITY_CONFLICT"
++    }
++
++    registered: list[dict[str, Any]] = []
++    conflicts: list[dict[str, Any]] = []
++    temporal_blocked: list[dict[str, Any]] = []
++
++    for fid, parsed in parsed_items:
++        fid_str = str(fid)
++        eid = parsed["bwin_event_id"]
++        if eid in existing_eid_to_fid and existing_eid_to_fid[eid] != fid_str:
++            raise ManualBwinLinkError(
++                f"MANUAL_BWIN_EVENT_ALREADY_BOUND:event_id={eid},existing_fixture={existing_eid_to_fid[eid]},new_fixture={fid}"
++            )
++        fixture = by_id.get(fid)
++        if not fixture:
++            raise ManualBwinLinkError(f"MANUAL_BWIN_FIXTURE_NOT_IN_EVALUATION:{fid}")
++        if str(fixture.get("status") or "").upper() != "NS":
++            raise ManualBwinLinkError(f"MANUAL_BWIN_NON_PREMATCH_STATUS:{fid}:{fixture.get('status')}")
++        ko = bd.local_kickoff(fixture.get("kickoff_madrid") or fixture.get("kickoff_utc"))
++        if ko is None or ko.astimezone(timezone.utc) <= now:
++            raise ManualBwinLinkError(f"MANUAL_BWIN_MATCH_ALREADY_STARTED:{fid}")
++        temp_ok, temp_block = _evaluate_manual_temporal_window(
++            fixture,
++            now,
++            lead_floor,
++            operation="bind_manual_bwin",
++        )
++        major_row = major_by_id.get(fid) or fixture
++        if str(major_row.get("filter_status") or "").upper() == "EXCLUDED":
++            reason = major_row.get("filter_reason") or "EXCLUDED"
++            if any(tok in str(reason) for tok in ("YOUTH", "RESERVE", "NOT_PREMATCH", "CLUB_FRIENDLY")):
++                raise ManualBwinLinkError(f"MANUAL_BWIN_EXCLUDED_CATEGORY:{fid}:{reason}")
++
++        slug_state, slug_reason = _slug_team_check(fixture, parsed["slug"], all_fixtures=by_id)
++        auto_rows = _stored_auto_discoveries(eval_dir, fid)
++        verified_auto = next((a for a in auto_rows if a["row"].get("status") == "IDENTITY_VERIFIED_AUTOMATICALLY"), None)
++        any_auto = verified_auto or (auto_rows[0] if auto_rows else None)
++
++        prev_entry = links.get(fid_str) or {}
++        if (
++            prev_entry.get("extracted_event_id") == eid
++            and prev_entry.get("url_provided", {}).get("bwin_url") == parsed["bwin_url"]
++            and prev_entry.get("identity_status") == "BWIN_MANUAL_LINK_VERIFIED"
++            and slug_state != "CONFLICT"
++            and not (verified_auto and str(verified_auto["row"].get("bwin_event_id")) != str(eid))
++        ):
++            if not temp_ok:
++                prev_entry["operational_status"] = "OPERATIONAL_BLOCK_TEMPORAL"
++                prev_entry["operational_block"] = temp_block
++                links[fid_str] = prev_entry
++                temporal_blocked.append(prev_entry)
++                continue
++            prev_entry["operational_status"] = "CLEAR"
++            prev_entry["operational_block"] = None
++            links[fid_str] = prev_entry
++            # Ya verificada previamente de forma idéntica: conservar estado sin duplicar
++            registered.append(prev_entry)
++            continue
++
++        conflict_reasons: list[str] = []
++        warnings: list[str] = []
++        auto_reconciliation: dict[str, Any] | None = None
++
++        if verified_auto and str(verified_auto["row"].get("bwin_event_id")) != str(eid):
++            auto_eid = str(verified_auto["row"].get("bwin_event_id"))
++            conflict_reasons.append(f"AUTO_DISCOVERY_ALREADY_VERIFIED_DIFFERENT_EVENT:auto={auto_eid},manual={eid}")
++            auto_reconciliation = {
++                "status": "CONFLICT_WITH_ACCREDITED_AUTO",
++                "auto_event_id": auto_eid,
++                "manual_event_id": eid,
++                "auto_discovery_path": verified_auto["path"],
++                "resolution": "ACCREDITED_AUTO_DISCOVERY_PRESERVED_MANUAL_REJECTED",
++            }
++        elif any_auto and str(any_auto["row"].get("bwin_event_id")) != str(eid):
++            auto_eid = str(any_auto["row"].get("bwin_event_id"))
++            warnings.append(f"DISCREPANCY_WITH_UNVERIFIED_AUTO:auto={auto_eid},manual={eid}")
++            auto_reconciliation = {
++                "status": "DISCREPANCY_WITH_UNVERIFIED_AUTO",
++                "auto_event_id": auto_eid,
++                "manual_event_id": eid,
++                "auto_discovery_path": any_auto["path"],
++                "resolution": "REQUIRES_LIVE_VERIFICATION_OF_MANUAL_URL",
++            }
++
++        if slug_state == "CONFLICT" and slug_reason:
++            conflict_reasons.append(slug_reason)
++        elif slug_state == "UNVERIFIED" and slug_reason:
++            warnings.append(slug_reason)
++
++        identity_status = "BWIN_IDENTITY_CONFLICT" if conflict_reasons else "BWIN_MANUAL_LINK_PENDING_VALIDATION"
++        classification_pending = str(major_row.get("filter_status") or "").upper() == "REVIEW"
++
++        entry = {
++            "fixture_id": fid,
++            "url_provided": {
++                "bwin_url": parsed["bwin_url"],
++                "extracted_event_id": eid,
++                "provided_at_utc": now.isoformat(),
++                "source": "MANUAL_CLI",
++            },
++            "extracted_event_id": eid,
++            "bwin_url": parsed["bwin_url"],
++            "identity_status": identity_status,
++            "quote_capture_status": prev_entry.get("quote_capture_status") if prev_entry.get("extracted_event_id") == eid else "NOT_CAPTURED",
++            "classification_pending_warning": classification_pending,
++            "conflict_reasons": conflict_reasons,
++            "pending_reasons": warnings if identity_status == "BWIN_MANUAL_LINK_PENDING_VALIDATION" else [],
++            "warnings": warnings,
++            "auto_reconciliation": auto_reconciliation,
++            "fixture_identity": {
++                "fixture_id": fid,
++                "home": fixture.get("home"),
++                "away": fixture.get("away"),
++                "home_id": fixture.get("home_id"),
++                "away_id": fixture.get("away_id"),
++                "league": fixture.get("league"),
++                "league_id": fixture.get("league_id"),
++                "season": fixture.get("season"),
++                "gender": fixture.get("gender"),
++                "kickoff_madrid": fixture.get("kickoff_madrid"),
++                "competition_category": major_row.get("competition_category"),
++            },
++            "statistical_ranking_modified": False,
++            "prematch_gates_bypassed": False,
++            "operational_status": "CLEAR" if temp_ok else "OPERATIONAL_BLOCK_TEMPORAL",
++            "operational_block": None if temp_ok else temp_block,
++            "verification": prev_entry.get("verification") if prev_entry.get("extracted_event_id") == eid else None,
++        }
++        links[fid_str] = entry
++        if not temp_ok:
++            temporal_blocked.append(entry)
++            if identity_status == "BWIN_IDENTITY_CONFLICT":
++                conflicts.append(entry)
++        elif identity_status == "BWIN_IDENTITY_CONFLICT":
++            conflicts.append(entry)
++        else:
++            registered.append(entry)
++
++    out_doc = {
++        "schema_version": MANUAL_LINKS_SCHEMA,
++        "updated_at_utc": now.isoformat(),
++        "eval_dir": str(eval_dir.resolve()),
++        "statistical_ranking_modified": False,
++        "links": links,
++    }
++    _atomic_json(manual_links_path(eval_dir), out_doc)
++    return {
++        "status": (
++            "TEMPORAL_WINDOW_BLOCKED"
++            if temporal_blocked and not registered and not conflicts
++            else "CONFLICTS_DETECTED"
++            if conflicts and not registered
++            else "REGISTERED_PENDING_LIVE_VALIDATION"
++            if registered
++            else "NO_CHANGES"
++        ),
++        "manual_links_path": str(manual_links_path(eval_dir)),
++        "operation_min_lead_minutes": lead_floor,
++        "registered_count": len(registered),
++        "conflict_count": len(conflicts),
++        "temporal_blocked_count": len(temporal_blocked),
++        "registered": registered,
++        "conflicts": conflicts,
++        "temporal_blocked": temporal_blocked,
++    }
++
++
++def evaluate_observed_manual_identity(
++    fixture: dict[str, Any],
++    expected_event_id: str,
++    res: dict[str, Any],
++    obs: dict[str, Any],
++) -> tuple[str, list[str], list[str], dict[str, Any]]:
++    """Evalúa evidencia observada en vivo separando verificación positiva, insuficiencia y conflicto."""
++    conflicts: list[str] = []
++    pending: list[str] = []
++
++    obs_status = str(obs.get("status") or "").upper()
++    if obs_status != "OPENED":
++        pending.append(f"LIVE_INSPECTION_NOT_OPENED:{obs_status or 'MISSING'}")
++        return "BWIN_MANUAL_LINK_PENDING_VALIDATION", [], pending, {
++            "page_opened": False,
++            "event_id_verified": False,
++            "teams_verified": False,
++            "team_order_verified": False,
++            "kickoff_verified": False,
++            "competition_compatible": False,
++            "category_compatible": False,
++        }
++
++    # 1. Event ID observado (nunca fallback `or expected_event_id`)
++    observed_eid = obs.get("event_id_from_url")
++    eid_ok = False
++    if observed_eid is None or str(observed_eid).strip() == "":
++        pending.append("OBSERVED_EVENT_ID_ABSENT")
++    elif str(observed_eid).strip() != str(expected_event_id).strip():
++        conflicts.append(f"OBSERVED_EVENT_ID_MISMATCH:expected={expected_event_id},observed={observed_eid}")
++    else:
++        eid_ok = True
++
++    # 2. Equipos y orden local/visitante observados en el título de la página
++    page_title = str(obs.get("page_title") or "").strip()
++    nat = _effective_national_context(fixture)
++    home = str(fixture.get("home") or "")
++    away = str(fixture.get("away") or "")
++    title_norm = bd.norm(page_title)
++    title_hydrated = bool(title_norm and title_norm != "bwin")
++
++    title_teams_match = obs.get("title_teams_match")
++    teams_ok = False
++    if not title_hydrated and title_teams_match is None:
++        pending.append("PAGE_TITLE_UNAVAILABLE")
++    elif title_teams_match is False:
++        if not title_hydrated:
++            pending.append("PAGE_TITLE_NOT_HYDRATED")
++        else:
++            conflicts.append("TITLE_TEAMS_MISMATCH")
++    elif title_teams_match is True:
++        teams_ok = True
++    else:
++        # title_teams_match omitido pero título presente: verificar directamente
++        h_sim = bd.team_similarity(home, page_title, national_context=nat)
++        a_sim = bd.team_similarity(away, page_title, national_context=nat)
++        if h_sim >= 0.82 and a_sim >= 0.82:
++            teams_ok = True
++        else:
++            conflicts.append("TITLE_TEAMS_MISMATCH")
++
++    observed_order = "UNKNOWN"
++    order_ok = False
++    if title_hydrated:
++        observed_order = bd.team_order_status(home, away, page_title, national_context=nat)
++    elif obs.get("team_order_status"):
++        observed_order = str(obs.get("team_order_status"))
++
++    if observed_order.endswith("_CONFLICT"):
++        conflicts.append(f"TEAM_ORDER_REVERSED_CONFLICT:{observed_order}")
++    elif observed_order in {"HOME_AWAY", "HOME_AWAY_TOKEN", "HOME_AWAY_ALIAS"}:
++        order_ok = True
++    elif teams_ok:
++        pending.append(f"TEAM_ORDER_UNVERIFIED:{observed_order}")
++
++    # 3. Kickoff absoluto compatible (sin aceptar cuentas atrás ni ausencia como verificación positiva)
++    obs_id_status = str(obs.get("identity_status") or "")
++    obs_start = obs.get("event_start_machine_readable")
++    diff_min = obs.get("kickoff_difference_minutes")
++    kickoff_ok = False
++    if obs_id_status in {"KICKOFF_MISMATCH_REVIEW", "KICKOFF_COUNTDOWN_MISMATCH_REVIEW", "CONFLICTING_TIME_SOURCES_REVIEW"}:
++        conflicts.append(f"KICKOFF_CONFLICT:{obs_id_status}")
++    elif isinstance(diff_min, (int, float)) and not isinstance(diff_min, bool) and float(diff_min) > 15.0:
++        conflicts.append(f"KICKOFF_MISMATCH_MINUTES:{diff_min}")
++    elif not obs_start or diff_min is None or obs_id_status in {"NAME_MATCH_TIME_NOT_MACHINE_VERIFIED", "NAME_AND_RELATIVE_TIME_CORROBORATED"}:
++        pending.append("ABSOLUTE_KICKOFF_NOT_VERIFIED")
++    elif obs_id_status == "NAME_AND_ABSOLUTE_TIME_MATCH" or (
++        obs_start and isinstance(diff_min, (int, float)) and not isinstance(diff_min, bool) and float(diff_min) <= 15.0
++    ):
++        kickoff_ok = True
++    else:
++        pending.append(f"KICKOFF_STATUS_INSUFFICIENT:{obs_id_status or 'UNKNOWN'}")
++
++    # 4. Competición verificable
++    comp_score = obs.get("competition_match_score")
++    if comp_score is None:
++        comp_score = res.get("competition_similarity")
++    sup_checks = obs.get("supporting_identity_checks") or {}
++    comp_compat_flag = sup_checks.get("competition_compatible")
++    comp_ok = False
++    if fixture.get("league"):
++        if comp_compat_flag is False:
++            conflicts.append("COMPETITION_INCOMPATIBLE")
++        elif isinstance(comp_score, (int, float)) and not isinstance(comp_score, bool):
++            if float(comp_score) < 0.82:
++                conflicts.append(f"COMPETITION_INCOMPATIBLE:score={comp_score}")
++            else:
++                comp_ok = True
++        elif comp_compat_flag is True:
++            comp_ok = True
++        else:
++            pending.append("COMPETITION_UNVERIFIED")
++    else:
++        comp_ok = True
++
++    # 5. Categoría y género compatibles
++    page_cat = obs.get("page_category_compatibility")
++    cat_compat_flag = sup_checks.get("category_compatible")
++    cat_corr = res.get("category_corroboration_status")
++    cat_ok = False
++    if (
++        page_cat in {"GENDER_CONFLICT", "NON_ADULT_CONFLICT"}
++        or cat_compat_flag is False
++        or cat_corr == "CONFLICT"
++        or obs_id_status == "CATEGORY_CONFLICT"
++        or res.get("identity_status") == "CATEGORY_CONFLICT"
++    ):
++        conflicts.append(f"CATEGORY_OR_GENDER_CONFLICT:{page_cat or cat_corr or obs_id_status}")
++    elif str(fixture.get("gender") or "").upper() == "F" and page_cat == "FEMALE_NOT_VISIBLE":
++        pending.append("FEMALE_CATEGORY_NOT_CORROBORATED")
++    elif page_cat is not None or cat_compat_flag is True or cat_corr == "CORROBORATED":
++        cat_ok = True
++    else:
++        pending.append("CATEGORY_UNVERIFIED")
++
++    # Respetar también discrepancias de estado global devuelto por summarize
++    res_status = str(res.get("status") or "")
++    if not conflicts and not pending and res_status != "IDENTITY_VERIFIED_AUTOMATICALLY":
++        if res_status in {"EVENT_FOUND_NEEDS_TIME_CONFIRMATION", "EVENT_FOUND_TIME_CORROBORATED", "POSSIBLE_EVENT_FOUND", "LOW_CONFIDENCE_REVIEW", "AMBIGUOUS_MULTIPLE_EVENTS"}:
++            pending.append(f"DISCOVERY_STATUS_NOT_FINAL:{res_status}")
++        else:
++            conflicts.append(f"DISCOVERY_STATUS_REJECTED:{res_status or 'UNKNOWN'}")
++
++    checks = {
++        "page_opened": True,
++        "event_id_verified": eid_ok,
++        "teams_verified": teams_ok,
++        "team_order_verified": order_ok,
++        "observed_team_order": observed_order,
++        "kickoff_verified": kickoff_ok,
++        "competition_compatible": comp_ok,
++        "category_compatible": cat_ok,
++    }
++    if conflicts:
++        return "BWIN_IDENTITY_CONFLICT", conflicts, pending, checks
++    if pending:
++        return "BWIN_MANUAL_LINK_PENDING_VALIDATION", [], pending, checks
++    return "BWIN_MANUAL_LINK_VERIFIED", [], [], checks
++
++
++def verify_manual_bwin_links_online(
++    eval_dir: Path,
++    fixture_ids: list[int] | None = None,
++    *,
++    headless: bool = True,
++    timeout: int = 25000,
++    min_lead_minutes: int = MANUAL_BWIN_MIN_LEAD_MINUTES,
++    now_utc: datetime | None = None,
++) -> dict[str, Any]:
++    """Revalida en Bwin la identidad de URLs manuales pendientes con comprobación positiva completa."""
++    from playwright.sync_api import sync_playwright
++
++    lead_floor = int(min_lead_minutes)
++    if lead_floor < MANUAL_BWIN_MIN_LEAD_MINUTES:
++        raise ManualBwinLinkError(
++            f"MANUAL_BWIN_MIN_LEAD_BELOW_SAFETY_FLOOR:{lead_floor}<{MANUAL_BWIN_MIN_LEAD_MINUTES}"
++        )
++
++    eval_dir = Path(eval_dir)
++    store = load_manual_links(eval_dir)
++    links: dict[str, Any] = dict(store.get("links") or {})
++    by_id, _ = _load_eval_fixtures(eval_dir)
++    now_ref_utc = (now_utc.astimezone(timezone.utc) if now_utc else trial.now_madrid().astimezone(timezone.utc))
++    target_fids = [str(f) for f in fixture_ids] if fixture_ids else list(links.keys())
++
++    verified_results: list[dict[str, Any]] = []
++    pending_results: list[dict[str, Any]] = []
++    failed_results: list[dict[str, Any]] = []
++    temporal_blocked_results: list[dict[str, Any]] = []
++
++    to_check = [fid for fid in target_fids if fid in links and links[fid].get("identity_status") != "BWIN_IDENTITY_CONFLICT"]
++    if not to_check:
++        return {
++            "verified": [],
++            "pending": [],
++            "failed": [],
++            "temporal_blocked": [],
++            "operation_min_lead_minutes": lead_floor,
++            "manual_links_path": str(manual_links_path(eval_dir)),
++        }
++
++    eligible_to_check: list[str] = []
++    for fid_str in to_check:
++        entry = links[fid_str]
++        fid = int(fid_str)
++        fixture = by_id.get(fid)
++        temp_ok, temp_block = _evaluate_manual_temporal_window(
++            fixture,
++            now_ref_utc,
++            lead_floor,
++            operation="verify_manual_bwin",
++        )
++        if not temp_ok:
++            # Conservar identidad pendiente/verificada y registrar bloqueo operacional sin fabricar conflicto de identidad.
++            if entry.get("identity_status") not in CANONICAL_BWIN_STATES:
++                entry["identity_status"] = "BWIN_MANUAL_LINK_PENDING_VALIDATION"
++            entry["operational_status"] = (
++                "OPERATIONAL_BLOCK_POST_KICKOFF"
++                if temp_block and temp_block["block_type"] == "POST_KICKOFF_FORBIDDEN"
++                else "OPERATIONAL_BLOCK_TEMPORAL"
++            )
++            entry["operational_block"] = temp_block
++            temporal_blocked_results.append(entry)
++            continue
++        entry["operational_status"] = "CLEAR"
++        entry["operational_block"] = None
++        eligible_to_check.append(fid_str)
++
++    if eligible_to_check:
++        with sync_playwright() as p:
++            browser = p.chromium.launch(headless=headless, args=["--disable-blink-features=AutomationControlled"])
++            try:
++                for fid_str in eligible_to_check:
++                    entry = links[fid_str]
++                    fid = int(fid_str)
++                    fixture = by_id.get(fid)
++                    eid = entry["extracted_event_id"]
++                    url = entry["bwin_url"]
++                    slug_text = unquote(urlparse(url).path).rstrip("/").rsplit("/", 1)[-1].replace("-", " ").replace(":", " ")
++                    # No fabricar text ni team_order_status del fixture como prueba previa;
++                    # name_score=1.0 solo habilita abrir la URL directa para observar la página real.
++                    candidate = {
++                        "bwin_event_id": eid,
++                        "bwin_url": url,
++                        "text": slug_text,
++                        "text_source": "MANUAL_USER_URL_DIRECT_REINSPECTION",
++                        "text_observed_at_utc": now_ref_utc.isoformat(),
++                        "source_pages": [url],
++                        "name_score": 1.0,
++                        "home_similarity": None,
++                        "away_similarity": None,
++                        "team_order_status": None,
++                        "category_compatibility": "COMPATIBLE_OR_UNKNOWN",
++                        "competition_similarity": None,
++                    }
++                    res = bd.summarize(fixture, [candidate], browser, timeout, inspect=True, inspection_retries=1)
++                    obs = res.get("inspection") or {}
++                    new_status, conflicts, pending, checks = evaluate_observed_manual_identity(fixture, eid, res, obs)
++
++                    # Verificar también si existe descubrimiento automático acreditado contradictorio
++                    auto_rows = _stored_auto_discoveries(eval_dir, fid)
++                    verified_auto = next((a for a in auto_rows if a["row"].get("status") == "IDENTITY_VERIFIED_AUTOMATICALLY"), None)
++                    if verified_auto and str(verified_auto["row"].get("bwin_event_id")) != str(eid):
++                        auto_eid = str(verified_auto["row"].get("bwin_event_id"))
++                        conflicts.append(f"AUTO_DISCOVERY_ALREADY_VERIFIED_DIFFERENT_EVENT:auto={auto_eid},manual={eid}")
++                        new_status = "BWIN_IDENTITY_CONFLICT"
++                        entry["auto_reconciliation"] = {
++                            "status": "CONFLICT_WITH_ACCREDITED_AUTO",
++                            "auto_event_id": auto_eid,
++                            "manual_event_id": eid,
++                            "auto_discovery_path": verified_auto["path"],
++                            "resolution": "ACCREDITED_AUTO_DISCOVERY_PRESERVED_MANUAL_REJECTED",
++                        }
++
++                    stamp_str = now_ref_utc.strftime("%Y%m%dT%H%M%S%fZ")
++                    disc_dir = eval_dir / "prospective_trial/bwin" / f"manual_{fid}_{stamp_str}"
++                    disc_payload = {
++                        "schema_version": "0.5-bwin-discovery-v3",
++                        "generated_at_utc": now_ref_utc.isoformat(),
++                        "source_input": str(eval_dir / "fixtures.json"),
++                        "user_time_reference": "Europe/Madrid",
++                        "prematch_only": True,
++                        "methodology": "Manual Bwin URL direct page reinspection (observed event_id, teams+order, kickoff, competition, category)",
++                        "pages": [],
++                        "catalog_observed": [candidate],
++                        "matches": [res],
++                    }
++                    bd.write_reports(disc_dir, disc_payload)
++                    entry["verification"] = {
++                        "verified_at_utc": now_ref_utc.isoformat(),
++                        "discovery_json": str((disc_dir / "bwin_discovery.json").resolve()),
++                        "discovery_status": res.get("status"),
++                        "identity_status": res.get("identity_status"),
++                        "observed_event_id": obs.get("event_id_from_url"),
++                        "page_title": obs.get("page_title"),
++                        "title_teams_match": obs.get("title_teams_match"),
++                        "observed_team_order": checks.get("observed_team_order"),
++                        "event_start_machine_readable": obs.get("event_start_machine_readable"),
++                        "kickoff_difference_minutes": obs.get("kickoff_difference_minutes"),
++                        "competition_compatible": checks.get("competition_compatible"),
++                        "competition_match_score": obs.get("competition_match_score") if obs.get("competition_match_score") is not None else res.get("competition_similarity"),
++                        "category_compatibility": obs.get("page_category_compatibility"),
++                        "positive_checks": checks,
++                    }
++                    entry["identity_status"] = new_status
++                    entry["conflict_reasons"] = conflicts
++                    entry["pending_reasons"] = pending
++                    entry["operational_status"] = "CLEAR"
++                    entry["operational_block"] = None
++                    if new_status == "BWIN_MANUAL_LINK_VERIFIED":
++                        verified_results.append(entry)
++                    elif new_status == "BWIN_MANUAL_LINK_PENDING_VALIDATION":
++                        pending_results.append(entry)
++                    else:
++                        failed_results.append(entry)
++            finally:
++                browser.close()
++
++    store["updated_at_utc"] = now_ref_utc.isoformat()
++    store["links"] = links
++    _atomic_json(manual_links_path(eval_dir), store)
++    return {
++        "verified": verified_results,
++        "pending": pending_results,
++        "failed": failed_results,
++        "temporal_blocked": temporal_blocked_results,
++        "operation_min_lead_minutes": lead_floor,
++        "manual_links_path": str(manual_links_path(eval_dir)),
++    }
++
++
++def resolve_bwin_search_status(
++    *,
++    ledger_row: dict[str, Any] | None = None,
++    discovery_row: dict[str, Any] | None = None,
++    manual_link: dict[str, Any] | None = None,
++    preflight_match: dict[str, Any] | None = None,
++    scanner_row: dict[str, Any] | None = None,
++) -> str:
++    """Mapea el estado comercial/Bwin a la taxonomía canónica sin equiparar incompleto con ausencia."""
++    if manual_link:
++        m_status = manual_link.get("identity_status")
++        if m_status == "BWIN_IDENTITY_CONFLICT":
++            return "BWIN_IDENTITY_CONFLICT"
++        if m_status == "BWIN_MANUAL_LINK_VERIFIED":
++            return "BWIN_MANUAL_LINK_VERIFIED"
++        if m_status == "BWIN_MANUAL_LINK_PENDING_VALIDATION":
++            return "BWIN_MANUAL_LINK_PENDING_VALIDATION"
++
++    l_state = (ledger_row or {}).get("state") or ""
++    l_reason = str((ledger_row or {}).get("reason") or "")
++    if l_state == "IDENTIDAD_INCORRECTA" or (preflight_match or {}).get("status") == "BLOCKED":
++        if any(tok in str(preflight_match.get("reasons", []) if preflight_match else l_reason).upper()
++               for tok in ("IDENTITY", "MISMATCH", "CONFLICT", "TITLE", "EVENT_ID")):
++            return "BWIN_IDENTITY_CONFLICT"
++    if l_state in ("DIFERIDO_POR_PRESUPUESTO", "EXCLUIDO_POR_LIMITE_ANTERIOR"):
++        return "BWIN_NOT_SCANNED_BUDGET"
++    if (scanner_row or {}).get("status") == "VERIFIED" or (
++        (discovery_row or {}).get("status") == "IDENTITY_VERIFIED_AUTOMATICALLY" and (preflight_match or {}).get("snapshot")
++    ):
++        return "BWIN_VERIFIED"
++    if (discovery_row or {}).get("status") == "IDENTITY_VERIFIED_AUTOMATICALLY":
++        return "BWIN_VERIFIED"
++    d_status = (discovery_row or {}).get("status") or ""
++    if d_status == "NOT_FOUND_IN_SCANNED_PAGES" or "NOT_FOUND_IN_SCANNED_PAGES" in l_reason:
++        return "BWIN_NOT_FOUND_IN_SCANNED_PAGES"
++    if d_status in ("EVENT_FOUND_TIME_CORROBORATED", "EVENT_FOUND_NEEDS_TIME_CONFIRMATION", "POSSIBLE_EVENT_FOUND", "EVENT_REQUIRES_REVIEW") or l_state in ("SIN_BWIN", "SIN_CUOTAS"):
++        return "BWIN_SEARCH_INCOMPLETE"
++    return "NOT_EVALUATED"
+--- /dev/null	2026-11-18 18:16:31
++++ test/test_prematch_window_boundaries.py	2026-11-18 18:15:45
+@@ -0,0 +1,458 @@
++#!/usr/bin/env python3
++"""Pruebas focalizadas de separación de ventanas PREMATCH, Markdown URLs y límites T-46..post-kickoff."""
++from __future__ import annotations
++
++import contextlib
++import io
++import json
++import subprocess
++import sys
++import tempfile
++import unittest
++from datetime import datetime, timedelta, timezone
++from pathlib import Path
++from types import SimpleNamespace
++from unittest.mock import patch
++
++import bwin_discovery as bd
++import bwin_manual_links as bml
++import bwin_market_preflight as pf
++import prematch_daily as daily
++import prematch_multi as multi
++import prematch_prospective_trial as trial
++import prematch_single as single
++
++
++ROOT = Path(__file__).resolve().parent.parent
++
++
++class FakeBrowser:
++    def close(self) -> None:
++        pass
++
++
++class FakePlaywright:
++    def __init__(self, counter: dict[str, int] | None = None) -> None:
++        self.counter = counter
++
++    def __enter__(self):
++        if self.counter is not None:
++            self.counter["launches"] = self.counter.get("launches", 0) + 1
++        return type(
++            "P",
++            (),
++            {"chromium": type("C", (), {"launch": staticmethod(lambda **kw: FakeBrowser())})()},
++        )()
++
++    def __exit__(self, *args) -> None:
++        pass
++
++
++class PrematchWindowBoundaryTests(unittest.TestCase):
++    def _build_eval_fixture(self, td: str, kickoff_utc: datetime) -> dict:
++        root = Path(td)
++        eval_dir = root / "outputs/discovery/2026-11-20_1500_0300/evaluations/eval_1"
++        base = eval_dir / "prospective_trial"
++        ko_m = kickoff_utc.astimezone(trial.TZ).isoformat()
++        fixture = {
++            "fixture_id": 1628569,
++            "home": "Ranchers Bees",
++            "away": "Doma United",
++            "home_id": 101,
++            "away_id": 102,
++            "league": "NPFL",
++            "league_id": 399,
++            "season": 2026,
++            "country": "Nigeria",
++            "gender": "M",
++            "kickoff_madrid": ko_m,
++            "kickoff_utc": kickoff_utc.isoformat(),
++            "analysis_cutoff_utc": (kickoff_utc - timedelta(hours=3)).isoformat(),
++            "status": "NS",
++            "filter_status": "ELIGIBLE",
++            "competition_category": "SENIOR_MALE_TOP_TIER",
++            "details_checked": True,
++            "competition_evidence": {"goals": {"matches": 12}},
++            "home_evidence": {
++                "last_matches_count": 12,
++                "history": {
++                    "same_competition_total": 12,
++                    "same_competition_goals_for": {"n": 12, "mean": 1.6, "cv": 0.25},
++                    "same_competition_goals_against": {"n": 12, "mean": 1.1, "cv": 0.25},
++                },
++                "details": {},
++            },
++            "away_evidence": {
++                "last_matches_count": 12,
++                "history": {
++                    "same_competition_total": 12,
++                    "same_competition_goals_for": {"n": 12, "mean": 1.4, "cv": 0.25},
++                    "same_competition_goals_against": {"n": 12, "mean": 1.3, "cv": 0.25},
++                },
++                "details": {},
++            },
++        }
++        trial.dump(eval_dir / "fixtures.json", {"schema_version": "1.0-discovery", "fixtures": [fixture]})
++        trial.dump(
++            eval_dir / "fixtures_major.json",
++            {"schema_version": "1.0-major-leagues", "fixtures": [fixture], "review": [], "excluded": []},
++        )
++        pre_path = base / "enriched/preselection.json"
++        trial.dump(
++            pre_path,
++            {
++                "schema_version": "1.3-preselection",
++                "generated_at_utc": (kickoff_utc - timedelta(hours=3)).isoformat(),
++                "matches": [fixture],
++            },
++        )
++        url = "https://www.bwin.es/es/sports/eventos/ranchers-bees-doma-united-2:7990001"
++        return {
++            "root": root,
++            "eval_dir": eval_dir,
++            "base": base,
++            "pre_path": pre_path,
++            "fixture": fixture,
++            "eid": "7990001",
++            "fid": 1628569,
++            "url": url,
++            "ko_utc": kickoff_utc,
++            "ko_m": ko_m,
++        }
++
++    def _mock_summary_for(self, env: dict, now_utc: datetime) -> dict:
++        return {
++            "fixture_id": env["fid"],
++            "home": "Ranchers Bees",
++            "away": "Doma United",
++            "home_id": 101,
++            "away_id": 102,
++            "league": "NPFL",
++            "league_id": 399,
++            "season": 2026,
++            "gender": "M",
++            "kickoff_madrid": env["ko_m"],
++            "bwin_event_id": env["eid"],
++            "bwin_url": env["url"],
++            "status": "IDENTITY_VERIFIED_AUTOMATICALLY",
++            "identity_status": "NAME_AND_ABSOLUTE_TIME_MATCH",
++            "category_corroboration_status": "CORROBORATED",
++            "inspection": {
++                "status": "OPENED",
++                "page_title": "Ranchers Bees - Doma United | NPFL",
++                "title_teams_match": True,
++                "event_id_from_url": env["eid"],
++                "event_start_machine_readable": env["ko_m"],
++                "kickoff_difference_minutes": 0.0,
++                "observed_at_utc": now_utc.isoformat(),
++                "page_category_compatibility": "COMPATIBLE_OR_UNKNOWN",
++                "competition_match_score": 1.0,
++                "supporting_identity_checks": {
++                    "competition_compatible": True,
++                    "category_compatible": True,
++                },
++                "market_headings": {},
++            },
++        }
++
++    def test_markdown_and_invalid_urls_rejected_explicitly(self) -> None:
++        ko_utc = datetime(2026, 11, 20, 20, 0, tzinfo=timezone.utc)
++        now_utc = ko_utc - timedelta(minutes=25)
++        with tempfile.TemporaryDirectory() as td:
++            env = self._build_eval_fixture(td, ko_utc)
++            url = env["url"]
++            for bad_md in (
++                f"[{url}]({url})",
++                f"[Ranchers Bees - Doma United]({url})",
++                f"[{url}]",
++            ):
++                with self.assertRaisesRegex(bml.ManualBwinLinkError, "MANUAL_BWIN_URL_MARKDOWN_FORMAT_FORBIDDEN"):
++                    bml.parse_manual_bwin_url(bad_md)
++                with self.assertRaisesRegex(bml.ManualBwinLinkError, "MANUAL_BWIN_URL_MARKDOWN_FORMAT_FORBIDDEN"):
++                    bml.register_manual_bwin_urls(env["eval_dir"], [(env["fid"], bad_md)], now_utc=now_utc)
++
++            cli = subprocess.run(
++                [
++                    sys.executable,
++                    str(ROOT / "prematch_daily.py"),
++                    "--root",
++                    str(env["root"]),
++                    "--eval-dir",
++                    str(env["eval_dir"]),
++                    "--bind-bwin-url",
++                    "--manual-bwin-url",
++                    f"{env['fid']}=[{url}]({url})",
++                    "--now-utc",
++                    now_utc.isoformat(),
++                ],
++                cwd=ROOT,
++                capture_output=True,
++                text=True,
++            )
++            self.assertEqual(cli.returncode, 2)
++            self.assertIn("MANUAL_BWIN_URL_MARKDOWN_FORMAT_FORBIDDEN", cli.stderr)
++
++            for bad_scheme_or_host in (
++                url.replace("https://", "http://"),
++                "https://evil.example.com/es/sports/eventos/ranchers-bees-doma-united-2:7990001",
++                "https://user:pass@www.bwin.es/es/sports/eventos/ranchers-bees-doma-united-2:7990001",
++                f"{url} extra",
++            ):
++                with self.assertRaises(bml.ManualBwinLinkError):
++                    bml.parse_manual_bwin_url(bad_scheme_or_host)
++
++            parsed = bml.parse_manual_bwin_url(url)
++            self.assertEqual(parsed["bwin_event_id"], env["eid"])
++
++    def test_bind_verify_scrape_allowed_to_t5_independently_of_prepare_t45(self) -> None:
++        ko_utc = datetime(2026, 11, 20, 20, 0, tzinfo=timezone.utc)
++        for minutes_before in (46, 44, 31, 29, 15, 6):
++            now_utc = ko_utc - timedelta(minutes=minutes_before)
++            now_m = now_utc.astimezone(trial.TZ)
++            with self.subTest(minutes_before=minutes_before), tempfile.TemporaryDirectory() as td:
++                env = self._build_eval_fixture(td, ko_utc)
++                target_txt = env["root"] / "outputs/matches" / env["eid"] / "inputs" / f"cuotas_bwin_{env['eid']}.txt"
++
++                def fake_trial_run(root_arg, script_name, cmd_pre, logs_dir):
++                    self.assertEqual(script_name, "bwin_market_preflight.py")
++                    # Verifica que scrape manual NO hereda 45 de prepare sino 5 min
++                    idx_min = cmd_pre.index("--min-lead-minutes")
++                    self.assertEqual(cmd_pre[idx_min + 1], "5")
++                    target_txt.parent.mkdir(parents=True, exist_ok=True)
++                    target_txt.write_text(
++                        f"Event ID: {env['eid']}\n"
++                        f"URL: {env['url']}\n"
++                        f"Captura: {now_m.isoformat()}\n"
++                        "Acordeones: 1 | Selecciones: 2\n"
++                        "MERCADO: Total de goles | Tiempo reglamentario\n"
++                        "Más de 2,5 : 1.95\n"
++                        "Menos de 2,5 : 1.85\n",
++                        encoding="utf-8",
++                    )
++                    rewritten = [arg for arg in cmd_pre if arg != "--run-scraper"]
++                    rewritten.append("--reuse-existing")
++                    with contextlib.redirect_stdout(io.StringIO()):
++                        rc_pre = pf.main(rewritten)
++                    self.assertEqual(rc_pre, 0)
++
++                stdout_buf = io.StringIO()
++                launches = {"launches": 0}
++                with patch("playwright.sync_api.sync_playwright", side_effect=lambda: FakePlaywright(launches)), \
++                     patch("bwin_discovery.summarize", return_value=self._mock_summary_for(env, now_utc)), \
++                     patch.object(trial, "run", side_effect=fake_trial_run), \
++                     contextlib.redirect_stdout(stdout_buf):
++                    rc = daily.main([
++                        "--root", str(env["root"]),
++                        "--eval-dir", str(env["eval_dir"]),
++                        "--bind-bwin-url",
++                        "--verify-manual-bwin",
++                        "--scrape-manual-bwin",
++                        "--confirm-external",
++                        "--manual-bwin-url", f"{env['fid']}={env['url']}",
++                        "--now-utc", now_utc.isoformat(),
++                    ])
++                self.assertEqual(rc, 0, stdout_buf.getvalue())
++                payload = json.loads(stdout_buf.getvalue())
++                self.assertEqual(launches["launches"], 1)
++                self.assertEqual(payload["operation_windows"]["preparation_min_lead_minutes"], 45)
++                self.assertEqual(payload["operation_windows"]["manual_bwin_min_lead_minutes"], 5)
++                self.assertEqual(len(payload["live_verification"]["verified"]), 1)
++                self.assertEqual(payload["scrape_results"][0]["status"], "CAPTURED_VERIFIED")
++                stored = bml.load_manual_links(env["eval_dir"])["links"][str(env["fid"])]
++                self.assertEqual(stored["identity_status"], "BWIN_MANUAL_LINK_VERIFIED")
++                self.assertEqual(stored["operational_status"], "CLEAR")
++                self.assertIsNone(stored["operational_block"])
++
++    def test_temporal_rejections_at_t4_and_post_kickoff_preserve_pending_identity(self) -> None:
++        ko_utc = datetime(2026, 11, 20, 20, 0, tzinfo=timezone.utc)
++        with tempfile.TemporaryDirectory() as td:
++            env = self._build_eval_fixture(td, ko_utc)
++            # 1) Bloquear intento de bajar el suelo manual por debajo de T-5
++            t10 = ko_utc - timedelta(minutes=10)
++            err_buf = io.StringIO()
++            with contextlib.redirect_stderr(err_buf):
++                rc_floor = daily.main([
++                    "--root", str(env["root"]),
++                    "--eval-dir", str(env["eval_dir"]),
++                    "--bind-bwin-url",
++                    "--manual-bwin-url", f"{env['fid']}={env['url']}",
++                    "--manual-bwin-min-lead", "4",
++                    "--now-utc", t10.isoformat(),
++                ])
++            self.assertEqual(rc_floor, 2)
++            self.assertIn("MANUAL_BWIN_MINIMUM_5_MINUTES", err_buf.getvalue())
++
++            # 2) T-4 en CLI (--bind-bwin-url --verify-manual-bwin --scrape-manual-bwin):
++            # conserva identidad pendiente, bloquea operacionalmente y NO fabrica BWIN_IDENTITY_CONFLICT.
++            t4 = ko_utc - timedelta(minutes=4)
++            out_t4 = io.StringIO()
++            launches = {"launches": 0}
++            with patch("playwright.sync_api.sync_playwright", side_effect=lambda: FakePlaywright(launches)), \
++                 patch.object(trial, "run", side_effect=AssertionError("No debe invocar scraper en T-4")), \
++                 contextlib.redirect_stdout(out_t4):
++                rc_t4 = daily.main([
++                    "--root", str(env["root"]),
++                    "--eval-dir", str(env["eval_dir"]),
++                    "--bind-bwin-url",
++                    "--verify-manual-bwin",
++                    "--scrape-manual-bwin",
++                    "--confirm-external",
++                    "--manual-bwin-url", f"{env['fid']}={env['url']}",
++                    "--now-utc", t4.isoformat(),
++                ])
++            self.assertEqual(rc_t4, 2)
++            self.assertEqual(launches["launches"], 0)
++            payload_t4 = json.loads(out_t4.getvalue())
++            self.assertEqual(payload_t4["registration"]["temporal_blocked_count"], 1)
++            self.assertEqual(payload_t4["registration"]["conflict_count"], 0)
++            self.assertEqual(len(payload_t4["live_verification"]["temporal_blocked"]), 1)
++            self.assertEqual(payload_t4["live_verification"]["failed"], [])
++            self.assertEqual(payload_t4["scrape_results"][0]["status"], "OPERATIONAL_BLOCK_TEMPORAL")
++            stored_t4 = bml.load_manual_links(env["eval_dir"])["links"][str(env["fid"])]
++            self.assertEqual(stored_t4["identity_status"], "BWIN_MANUAL_LINK_PENDING_VALIDATION")
++            self.assertEqual(stored_t4["conflict_reasons"], [])
++            self.assertEqual(stored_t4["operational_status"], "OPERATIONAL_BLOCK_TEMPORAL")
++            self.assertEqual(stored_t4["operational_block"]["reason"], "PREMATCH_MANUAL_LEAD_WINDOW_EXPIRED")
++
++            # 3) Después del kickoff (T+1): prohibido registrar y verificación directa preserva identidad pendiente
++            t_after = ko_utc + timedelta(minutes=1)
++            with self.assertRaisesRegex(bml.ManualBwinLinkError, "MANUAL_BWIN_MATCH_ALREADY_STARTED"):
++                bml.register_manual_bwin_urls(env["eval_dir"], [(env["fid"], env["url"])], now_utc=t_after)
++
++            err_after = io.StringIO()
++            with contextlib.redirect_stderr(err_after):
++                rc_after = daily.main([
++                    "--root", str(env["root"]),
++                    "--eval-dir", str(env["eval_dir"]),
++                    "--bind-bwin-url",
++                    "--verify-manual-bwin",
++                    "--confirm-external",
++                    "--manual-bwin-url", f"{env['fid']}={env['url']}",
++                    "--now-utc", t_after.isoformat(),
++                ])
++            self.assertEqual(rc_after, 2)
++            self.assertIn("MANUAL_BWIN_MATCH_ALREADY_STARTED", err_after.getvalue())
++
++            with patch("playwright.sync_api.sync_playwright", side_effect=lambda: FakePlaywright(launches)):
++                ver_after = bml.verify_manual_bwin_links_online(env["eval_dir"], [env["fid"]], now_utc=t_after)
++            self.assertEqual(launches["launches"], 0)
++            self.assertEqual(len(ver_after["temporal_blocked"]), 1)
++            self.assertEqual(ver_after["failed"], [])
++            stored_after = bml.load_manual_links(env["eval_dir"])["links"][str(env["fid"])]
++            self.assertEqual(stored_after["identity_status"], "BWIN_MANUAL_LINK_PENDING_VALIDATION")
++            self.assertEqual(stored_after["conflict_reasons"], [])
++            self.assertEqual(stored_after["operational_status"], "OPERATIONAL_BLOCK_POST_KICKOFF")
++            self.assertEqual(stored_after["operational_block"]["reason"], "POST_KICKOFF_PREMATCH_FORBIDDEN")
++
++    def test_full_horizon_matrix_t46_to_post_kickoff_by_operation(self) -> None:
++        ko_utc = datetime(2026, 11, 20, 20, 0, tzinfo=timezone.utc)
++        ko_m = ko_utc.astimezone(trial.TZ)
++        horizons = [
++            ("T-46", -46, True, True, True, True),
++            ("T-44", -44, False, True, True, True),
++            ("T-31", -31, False, True, True, True),
++            ("T-29", -29, False, True, True, True),
++            ("T-15", -15, False, True, True, True),
++            ("T-6", -6, False, True, True, True),
++            ("T-4", -4, False, False, False, False),
++            ("T+1", +1, False, False, False, False),
++        ]
++
++        for label, offset_min, exp_prepare, exp_bind, exp_capture, exp_finish in horizons:
++            now_utc = ko_utc + timedelta(minutes=offset_min)
++            now_m = now_utc.astimezone(trial.TZ)
++            with self.subTest(horizon=label), tempfile.TemporaryDirectory() as td:
++                env = self._build_eval_fixture(td, ko_utc)
++                ctx = {
++                    "event_id": env["eid"],
++                    "fixture_id": env["fid"],
++                    "url": env["url"],
++                    "home": "Ranchers Bees",
++                    "away": "Doma United",
++                    "kickoff": ko_m,
++                    "selection_time": ko_m - timedelta(hours=3),
++                    "root": env["root"],
++                    "directory": env["root"] / "outputs/matches" / env["eid"],
++                }
++                identity_path = ctx["directory"] / "inputs/match_identity.json"
++                identity_path.parent.mkdir(parents=True, exist_ok=True)
++                identity_path.write_text(
++                    json.dumps(
++                        {
++                            "bwin_event_id": env["eid"],
++                            "api_fixture_id": env["fid"],
++                            "kickoff_utc": ko_utc.isoformat(),
++                        }
++                    ),
++                    encoding="utf-8",
++                )
++                state = {"event_id": env["eid"], "inputs": {}}
++
++                # 1) Preparación (T-45 se mantiene sin cambios)
++                with patch.object(single, "local_now", return_value=now_m):
++                    if exp_prepare:
++                        self.assertGreaterEqual(single.ensure_prematch(ctx, min_lead=single.PREPARE_MIN_LEAD_MINUTES), 45.0)
++                    else:
++                        with self.assertRaises(ValueError):
++                            single.ensure_prematch(ctx, min_lead=single.PREPARE_MIN_LEAD_MINUTES)
++
++                # 2) Vinculación manual (registro + verificación online hasta T-5)
++                if offset_min > 0:
++                    with self.assertRaises(bml.ManualBwinLinkError):
++                        bml.register_manual_bwin_urls(env["eval_dir"], [(env["fid"], env["url"])], now_utc=now_utc)
++                else:
++                    reg = bml.register_manual_bwin_urls(env["eval_dir"], [(env["fid"], env["url"])], now_utc=now_utc)
++                    launches = {"launches": 0}
++                    with patch("playwright.sync_api.sync_playwright", side_effect=lambda: FakePlaywright(launches)), \
++                         patch("bwin_discovery.summarize", return_value=self._mock_summary_for(env, now_utc)):
++                        ver = bml.verify_manual_bwin_links_online(env["eval_dir"], [env["fid"]], now_utc=now_utc)
++                    if exp_bind:
++                        self.assertEqual(reg["temporal_blocked_count"], 0)
++                        self.assertEqual(len(ver["verified"]), 1)
++                        self.assertEqual(launches["launches"], 1)
++                    else:
++                        self.assertEqual(reg["temporal_blocked_count"], 1)
++                        self.assertEqual(len(ver["temporal_blocked"]), 1)
++                        self.assertEqual(launches["launches"], 0)
++                        stored = bml.load_manual_links(env["eval_dir"])["links"][str(env["fid"])]
++                        self.assertEqual(stored["identity_status"], "BWIN_MANUAL_LINK_PENDING_VALIDATION")
++
++                # 3) Captura (bwin_market_preflight validate_match + refresh-odds T-5)
++                match_rec = {
++                    "fixture_id": env["fid"],
++                    "home": "Ranchers Bees",
++                    "away": "Doma United",
++                    "kickoff_madrid": ko_m.isoformat(),
++                    "bwin_event_id": env["eid"],
++                    "bwin_url": env["url"],
++                    "status": "IDENTITY_VERIFIED_AUTOMATICALLY",
++                    "identity_status": "NAME_AND_ABSOLUTE_TIME_MATCH",
++                    "inspection": self._mock_summary_for(env, now_utc)["inspection"],
++                }
++                checked = pf.validate_match(match_rec, [], now_m, bml.MANUAL_BWIN_MIN_LEAD_MINUTES, 180)
++                if exp_capture:
++                    self.assertEqual(checked["status"], "READY_FOR_SCRAPER")
++                else:
++                    self.assertEqual(checked["status"], "BLOCKED")
++                    self.assertIn("ALREADY_STARTED_OR_INSUFFICIENT_PREMATCH_MARGIN", checked["reasons"])
++
++                # 4) Finalización (finish T-5 y final_odds_check)
++                with patch.object(single, "local_now", return_value=now_m):
++                    if exp_finish:
++                        rem = single.ensure_prematch(ctx, min_lead=single.FINISH_MIN_LEAD_MINUTES)
++                        self.assertGreaterEqual(rem, 5.0)
++                        multi_rem = multi.ensure_event_operation_window(
++                            env["root"], env["eid"], state, min_lead=multi.FINISH_MIN_LEAD_MINUTES, operation="finish", now=now_m
++                        )
++                        self.assertGreaterEqual(multi_rem, 5.0)
++                    else:
++                        with self.assertRaises(ValueError):
++                            single.ensure_prematch(ctx, min_lead=single.FINISH_MIN_LEAD_MINUTES)
++                        with self.assertRaises(ValueError):
++                            multi.ensure_event_operation_window(
++                                env["root"], env["eid"], state, min_lead=multi.FINISH_MIN_LEAD_MINUTES, operation="finish", now=now_m
++                            )
++
++
++if __name__ == "__main__":
++    unittest.main()

@@ -27,6 +27,7 @@ from statistics import mean, pstdev
 from typing import Any
 from urllib.parse import urlencode
 import requests
+from prematch_cache_record import historical_available, acquisition_before
 
 VERSION = '1.3-preselection'
 UTC = timezone.utc
@@ -34,7 +35,14 @@ FT = {'FT','AET','PEN'}
 METRICS = {'corners':'Corner Kicks','shots':'Total Shots','on_target':'Shots on Goal',
            'fouls':'Fouls','offsides':'Offsides','yellow':'Yellow Cards','xg':'expected_goals'}
 
+# Additional observed fields; deliberately excluded from readiness weights.
+EXTRA_METRICS = {'shots_off_target':'Shots off Goal','blocked_shots':'Blocked Shots',
+    'possession_pct':'Ball Possession','red':'Red Cards','saves':'Goalkeeper Saves',
+    'passes':'Total passes','accurate_passes':'Passes accurate','pass_accuracy_pct':'Passes %',
+    'shots_inside_box':'Shots insidebox','shots_outside_box':'Shots outsidebox'}
+
 class PreselectionError(RuntimeError): pass
+class GlobalApiError(RuntimeError): pass
 
 
 def utc_datetime(value:Any) -> datetime:
@@ -71,12 +79,14 @@ def summarize(values:list[float]) -> dict[str,Any]:
 class ApiFootball:
     """Cache por consulta, límite simple 3 rps, errores explícitos, nunca almacena claves."""
     def __init__(self,api_key:str,base_url:str,root:Path,timeout:int=25,refresh:bool=False,
-                 request_budget:int=0,request_reserve:int=0):
+                 request_budget:int=0,request_reserve:int=0,asof:datetime|None=None):
+        self.asof=asof
         self.root=root;self.base_url=base_url.rstrip('/');self.timeout=timeout
         self.refresh=refresh;self.last_request=0.0;self.requests_sent=0;self.cache_hits=0
         if request_budget<0 or request_reserve<0 or request_budget and request_reserve>=request_budget:
             raise PreselectionError('Presupuesto API inválido: reserve debe ser menor que budget')
         self.request_budget=request_budget;self.request_reserve=request_reserve;self.request_ledger=[]
+        self.consecutive_failures=0
         self.session=requests.Session()
         self.session.headers.update({'x-apisports-key':api_key,'Accept':'application/json',
                                      'User-Agent':f'prematch-preselection/{VERSION}'})
@@ -89,15 +99,18 @@ class ApiFootball:
             try:
                 obj=json.loads(cache.read_text(encoding='utf-8'))
                 stamp=utc_datetime(obj['retrieved_at_utc'])
-                if datetime.now(UTC)-stamp < timedelta(hours=12) and isinstance(obj.get('response'),list):
+                age=(self.asof or datetime.now(UTC))-stamp
+                if timedelta(0)<=age<timedelta(hours=12) and isinstance(obj.get('response'),list) and obj.get('endpoint',route)==route and obj.get('parameters',dict(sorted(params.items())))==dict(sorted(params.items())):
                     self.cache_hits+=1
                     self.request_ledger.append({'request_id':key,'endpoint':route,'parameters':dict(sorted(params.items())),
                         'requested_at_utc':datetime.now(UTC).isoformat(),'status':'CACHE_HIT','attempts':0,
                         'cache_path':str(cache.resolve()),'cache_sha256':hashlib.sha256(cache.read_bytes()).hexdigest(),
                         'response_sha256':hashlib.sha256(json.dumps(obj['response'],sort_keys=True,separators=(',',':')).encode()).hexdigest(),
                         'first_observed_at_utc':obj['retrieved_at_utc']})
-                    return obj['response']
+                    return [dict(row, _acquired_at_utc=stamp.isoformat()) if isinstance(row,dict) else row for row in obj['response']]
             except (OSError,ValueError,TypeError,KeyError):pass
+        if self.asof is not None:
+            raise PreselectionError('FROZEN_ASOF_REQUIRES_VERIFIED_PRIOR_CACHE')
         if self.request_budget and self.requests_sent>=self.request_budget-self.request_reserve:
             self.request_ledger.append({'request_id':key,'endpoint':route,'parameters':dict(sorted(params.items())),
                 'requested_at_utc':datetime.now(UTC).isoformat(),'status':'BLOCKED_BY_REQUEST_RESERVE',
@@ -113,7 +126,7 @@ class ApiFootball:
                 self.last_request=time.monotonic()
                 resp=self.session.get(self.base_url+'/'+route.lstrip('/'),params=params,timeout=self.timeout)
                 self.requests_sent+=1
-                if resp.status_code in (401,403):raise PreselectionError(f'API error HTTP {resp.status_code}: credenciales/permisos')
+                if resp.status_code in (401,403):raise GlobalApiError(f'API error HTTP {resp.status_code}: credenciales/permisos')
                 if resp.status_code==429:
                     last_error='429 rate limit';time.sleep(min(60,float(resp.headers.get('Retry-After','8'))));continue
                 if 400<=resp.status_code<500:raise PreselectionError(f'API HTTP {resp.status_code}: {resp.text[:180]}')
@@ -130,6 +143,8 @@ class ApiFootball:
                 tmp.write_text(json.dumps({'retrieved_at_utc':datetime.now(UTC).isoformat(),
                                            'endpoint':route,'parameters':dict(sorted(params.items())),
                                            'response':rows},ensure_ascii=False),encoding='utf-8')
+                from prematch_cache_record import preserve_cache_version
+                preserve_cache_version(cache)
                 tmp.replace(cache)
                 self.request_ledger.append({'request_id':key,'endpoint':route,'parameters':dict(sorted(params.items())),
                     'requested_at_utc':datetime.now(UTC).isoformat(),'status':'NETWORK_OK','attempts':attempt+1,
@@ -137,12 +152,16 @@ class ApiFootball:
                     'cache_sha256':hashlib.sha256(cache.read_bytes()).hexdigest(),
                     'response_sha256':hashlib.sha256(json.dumps(rows,sort_keys=True,separators=(',',':')).encode()).hexdigest(),
                     'first_observed_at_utc':json.loads(cache.read_text(encoding='utf-8'))['retrieved_at_utc']})
-                return rows
+                self.consecutive_failures=0
+                acquired=self.request_ledger[-1]['first_observed_at_utc']
+                return [dict(row, _acquired_at_utc=acquired) if isinstance(row,dict) else row for row in rows]
             except (requests.RequestException,ValueError) as exc:
                 last_error=str(exc)
                 if attempt<2:time.sleep(attempt+1)
         self.request_ledger.append({'request_id':key,'endpoint':route,'parameters':dict(sorted(params.items())),
             'requested_at_utc':datetime.now(UTC).isoformat(),'status':'NETWORK_ERROR','attempts':3,'error':last_error})
+        self.consecutive_failures+=1
+        if self.consecutive_failures>=3:raise GlobalApiError('API_GENERAL_UNAVAILABILITY: '+last_error)
         raise PreselectionError(f'Falló /{route}?{query}: {last_error}')
 
 
@@ -157,12 +176,13 @@ def prepare_history(raw:list[dict[str,Any]],team_id:int,as_of:datetime,
         try:dt=utc_datetime(fix.get('date'))
         except ValueError:continue
         if dt>=as_of or dt<as_of-timedelta(days=600) or (fix.get('status') or {}).get('short') not in FT:continue
+        if not historical_available(r, as_of):continue
         home=(teams.get('home') or {}).get('id');away=(teams.get('away') or {}).get('id')
         if team_id not in (home,away) or home==away:continue
         gh=goals.get('home');ga=goals.get('away')
         if not isinstance(gh,int) or isinstance(gh,bool) or not isinstance(ga,int) or isinstance(ga,bool):continue
         ids.add(fid)
-        games.append({'id':fid,'date_utc':dt.isoformat(),'status':(fix.get('status') or {}).get('short'),'league_id':lg.get('id'),
+        games.append({**{key:r[key] for key in ('result_available_at_utc','completed_at_utc','fixture_completed_at_utc','_acquired_at_utc') if key in r},'id':fid,'date_utc':dt.isoformat(),'status':(fix.get('status') or {}).get('short'),'league_id':lg.get('id'),
                       'season':lg.get('season'),'home_id':home,'away_id':away,
                       'goals_home':gh,'goals_away':ga,
                       'team_goals':gh if team_id==home else ga,
@@ -193,7 +213,7 @@ def read_stat_block(detail:dict[str,Any],team_id:int) -> dict[str,float]:
     mapped={s.get('type'):numeric(s.get('value')) for s in stats if isinstance(s,dict)}
     # xG alternativo en algunas versiones de API
     if mapped.get('expected_goals') is None:mapped['expected_goals']=mapped.get('Expected Goals')
-    return {alias:mapped[k] for alias,k in METRICS.items() if mapped.get(k) is not None}
+    return {alias:mapped[k] for alias,k in {**METRICS, **EXTRA_METRICS}.items() if mapped.get(k) is not None}
 
 
 def team_detail(games:list[dict[str,Any]],team_id:int,details:dict[int,dict[str,Any]]) -> dict[str,Any]:
@@ -317,9 +337,97 @@ def metric_profile(key:str,hd:dict[str,Any],ad:dict[str,Any],
                          'PARCIAL' if min(counts)>=3 else 'ESCASA'}
 
 
+FAMILY_METRIC_MAP = {
+    'goals': 'goals',
+    'corners': 'corners',
+    'shots': 'shots',
+    'cards': 'yellow',
+    'fouls': 'fouls',
+    'offsides': 'offsides',
+}
+MINIMUM_FAMILY_SAMPLE = 4
+RICH_FAMILY_SAMPLE = 10
+
+
+def assess_family_evidence(
+    h: dict[str, Any],
+    a: dict[str, Any],
+    d1: dict[str, Any] | None,
+    d2: dict[str, Any] | None,
+    observed: dict[str, list[dict[str, Any]]] | None = None,
+) -> dict[str, Any]:
+    """Evalúa cobertura mínima por familia sin excluir partidos con una familia apta."""
+    family_tiers: dict[str, dict[str, Any]] = {}
+    h_completed = int(h.get('completed_total') or 0)
+    a_completed = int(a.get('completed_total') or 0)
+    basic_min_n = min(h_completed, a_completed)
+
+    for family, metric in FAMILY_METRIC_MAP.items():
+        if metric == 'goals':
+            if observed and (observed.get('home') or observed.get('away')):
+                h_own_n = sum(numeric((r.get('own') or {}).get('goals')) is not None for r in (observed.get('home') or []))
+                h_con_n = sum(numeric((r.get('conceded') or {}).get('goals')) is not None for r in (observed.get('home') or []))
+                a_own_n = sum(numeric((r.get('own') or {}).get('goals')) is not None for r in (observed.get('away') or []))
+                a_con_n = sum(numeric((r.get('conceded') or {}).get('goals')) is not None for r in (observed.get('away') or []))
+                counts = [h_own_n, h_con_n, a_own_n, a_con_n]
+            else:
+                counts = [h_completed, h_completed, a_completed, a_completed]
+        elif d1 and d2:
+            summaries = [d1['own'][metric], d1['conceded'][metric], d2['own'][metric], d2['conceded'][metric]]
+            counts = [int(x.get('n', 0)) for x in summaries]
+        elif observed and (observed.get('home') or observed.get('away')):
+            h_own_n = sum(numeric((r.get('own') or {}).get(metric)) is not None for r in (observed.get('home') or []))
+            h_con_n = sum(numeric((r.get('conceded') or {}).get(metric)) is not None for r in (observed.get('home') or []))
+            a_own_n = sum(numeric((r.get('own') or {}).get(metric)) is not None for r in (observed.get('away') or []))
+            a_con_n = sum(numeric((r.get('conceded') or {}).get(metric)) is not None for r in (observed.get('away') or []))
+            counts = [h_own_n, h_con_n, a_own_n, a_con_n]
+        else:
+            counts = [0, 0, 0, 0]
+
+        min_n = min(counts) if counts else 0
+        max_n = max(counts) if counts else 0
+        if max_n == 0:
+            tier = 'NO_STATISTICAL_DATA'
+        elif min_n < MINIMUM_FAMILY_SAMPLE:
+            tier = 'BELOW_MINIMUM_EVIDENCE'
+        elif min_n >= RICH_FAMILY_SAMPLE:
+            tier = 'RICH_EVIDENCE_AVAILABLE'
+        else:
+            tier = 'MINIMUM_EVIDENCE_MET'
+        family_tiers[family] = {
+            'metric': metric,
+            'min_series_n': min_n,
+            'max_series_n': max_n,
+            'tier': tier,
+            'eligible': tier in ('MINIMUM_EVIDENCE_MET', 'RICH_EVIDENCE_AVAILABLE'),
+        }
+
+    eligible_families = [fam for fam, info in family_tiers.items() if info['eligible']]
+    any_data = any(info['max_series_n'] > 0 for info in family_tiers.values()) or max(h_completed, a_completed) > 0
+    if not any_data:
+        overall_tier = 'NO_STATISTICAL_DATA'
+    elif not eligible_families or basic_min_n < 4:
+        overall_tier = 'BELOW_MINIMUM_EVIDENCE'
+    else:
+        detailed_eligible = [fam for fam in eligible_families if fam != 'goals' and family_tiers[fam]['min_series_n'] >= 6]
+        if (len(detailed_eligible) >= 2) or (
+            family_tiers['goals']['min_series_n'] >= RICH_FAMILY_SAMPLE and len(detailed_eligible) >= 1
+        ):
+            overall_tier = 'RICH_EVIDENCE_AVAILABLE'
+        else:
+            overall_tier = 'MINIMUM_EVIDENCE_MET'
+
+    return {
+        'evidence_tier': overall_tier,
+        'family_evidence_tiers': family_tiers,
+        'eligible_market_families': eligible_families,
+        'rank_eligible': overall_tier in ('MINIMUM_EVIDENCE_MET', 'RICH_EVIDENCE_AVAILABLE'),
+    }
+
+
 def score_readiness(h:dict[str,Any],a:dict[str,Any],s1:dict[str,Any],
                     s2:dict[str,Any],d1:dict[str,Any],d2:dict[str,Any],
-                    detail_limit:int=8) -> tuple[int,str,list[str],dict[str,Any],int|None,int|None]:
+                    detail_limit:int=8,observed:dict[str,list[dict[str,Any]]]|None=None) -> tuple[int,str,list[str],dict[str,Any],int|None,int|None]:
     """Separación: cobertura factual, estabilidad descriptiva e investigación.
 
     Puntuar varios mercados evita que corners+tiros saturen 100 puntos.
@@ -358,7 +466,13 @@ def score_readiness(h:dict[str,Any],a:dict[str,Any],s1:dict[str,Any],
         if stability_pairs else None)
     # Prioridad de investigación: no confundir con score de datos ni rentabilidad.
     priority=round(.7*coverage+.3*st) if st is not None else None
-    status='DATOS_APROVECHABLES' if coverage>=72 else 'REVISION' if coverage>=45 else 'COBERTURA_LIMITADA'
+    ev_info = assess_family_evidence(h, a, d1, d2, observed)
+    if coverage >= 72:
+        status = 'DATOS_APROVECHABLES'
+    elif coverage >= 45 or ev_info['rank_eligible']:
+        status = 'REVISION'
+    else:
+        status = 'COBERTURA_LIMITADA'
     return coverage,status,notes,market_profiles,st,priority
 
 
@@ -378,9 +492,17 @@ def evaluate_fixture(f:dict[str,Any],histories:dict[int,list[dict[str,Any]]],
     standings_rows=standings.get((lid,season),[])
     hs=standing_for(standings_rows,hid);ass=standing_for(standings_rows,aid)
     prelim=preliminary_score(hb,ab,hs,ass)
+    from prematch_tactical_history import observations_from_games
+    requested=detail_requested_ids or set()
+    # Always preserve FT goal histories for every eligible fixture, even when
+    # adaptive acquisition did not request detailed match statistics.  The
+    # observation adapter labels all unrequested metrics NOT_REQUESTED, never 0.
+    observed={'home':observations_from_games(h,hid,details,requested),
+              'away':observations_from_games(a,aid,details,requested)}
+    ev_info = assess_family_evidence(hb, ab, hd, ad, observed)
     if details_selected:
         grade,status,notes,profiles,stability,priority=score_readiness(
-            hb,ab,hs,ass,hd,ad,detail_limit)
+            hb,ab,hs,ass,hd,ad,detail_limit,observed=observed)
     else:
         grade=None;status='PENDIENTE_DETALLE';notes=['Estadísticas detalladas no consultadas: barrido preliminar']
         profiles={};stability=None;priority=None
@@ -390,18 +512,30 @@ def evaluate_fixture(f:dict[str,Any],histories:dict[int,list[dict[str,Any]]],
             notes.append(f'{label}: error consultando histórico')
     if f'{lid}:{season}' in errors:
         notes.append('Tabla no consultada por error de API')
-    from prematch_tactical_history import observations_from_games
-    requested=detail_requested_ids or set()
-    # Always preserve FT goal histories for every eligible fixture, even when
-    # adaptive acquisition did not request detailed match statistics.  The
-    # observation adapter labels all unrequested metrics NOT_REQUESTED, never 0.
-    observed={'home':observations_from_games(h,hid,details,requested),
-              'away':observations_from_games(a,aid,details,requested)}
     return {'fixture_id':f['fixture_id'],'kickoff_madrid':f['kickoff_madrid'],
       'home_id':hid,'away_id':aid,'statistical_observations':observed,
       'detail_selection':{'home':hselection,'away':aselection},
       'home':f['home'],'away':f['away'],'country':f['country'],'league':f['league'],
       'league_id':lid,'season':season,'gender':f['gender'],'region':f['region'],
+      'competition_category':f.get('competition_category'),
+      'evidence_tier':ev_info['evidence_tier'],
+      'family_evidence_tiers':ev_info['family_evidence_tiers'],
+      'eligible_market_families':ev_info['eligible_market_families'],
+      'rank_eligible':ev_info['rank_eligible'],
+      'category_status':f.get('category_status'),
+      'category_evidence_status':f.get('category_evidence_status'),
+      'category_level':f.get('category_level'),
+      'category_provenance':f.get('category_provenance'),
+      'competition_identity_status':f.get('competition_identity_status'),
+      'competition_eligibility':f.get('competition_eligibility'),
+      'competition_eligibility_reason':f.get('competition_eligibility_reason'),
+      'participant_eligibility':f.get('participant_eligibility'),
+      'participant_eligibility_reason':f.get('participant_eligibility_reason'),
+      'national_team_evidence':f.get('national_team_evidence'),
+      'cup_eligibility_evidence':f.get('cup_eligibility_evidence'),
+      'competition_uncertainties':(['ROTATION','COMPETITIVE_INTENSITY','SQUAD_CALLUPS',
+          'COACH_REGIME','SUBSTITUTIONS'] if lid==10 else []),
+      'coverage_exception_reason':f.get('coverage_exception_reason'),
       'region_priority':f['region_priority'],'analysis_cutoff_utc':cutoff.isoformat(),
       'preliminary_coverage_score':prelim,'initial_data_gate':initial_data_gate(hb,ab,prelim),
       'data_readiness_score':grade,
@@ -415,6 +549,96 @@ def evaluate_fixture(f:dict[str,Any],histories:dict[int,list[dict[str,Any]]],
       'competitive_motivation':{'status':'NOT_INFERRED','note':'Posición no equivale a obligación táctica de ganar'},
       'bwin_market_availability':'NOT_CHECKED',
       'note':'Puntajes heurísticos de cobertura/variabilidad, NO probabilidad de apuesta ni EV'}
+
+
+COVERAGE_RULES = {'enabled': True, 'advanced_bonus': 5.0,
+                  'additional_capability_weight': 0.5, 'minimum_sample': 4,
+                  'skip_declared_false_details': True}
+
+
+def validate_coverage_rules(rules=None):
+    supplied = rules or {}
+    if not isinstance(supplied,dict) or set(supplied)-set(COVERAGE_RULES):
+        raise PreselectionError('INVALID_COVERAGE_RULES')
+    config={**COVERAGE_RULES,**supplied}
+    for key in ('enabled','skip_declared_false_details'):
+        if not isinstance(config[key],bool):raise PreselectionError('INVALID_COVERAGE_RULES_'+key)
+    for key in ('advanced_bonus','additional_capability_weight','minimum_sample'):
+        value=numeric(config[key])
+        if value is None or value<0 or key=='minimum_sample' and (value<1 or value!=int(value)):
+            raise PreselectionError('INVALID_COVERAGE_RULES_'+key)
+        config[key]=int(value) if key=='minimum_sample' else value
+    return config
+
+
+def competition_coverage(rows, league_id, season):
+    """Identity-bound tri-state contract. No remote booleans inferred from names."""
+    matches = [r for r in rows if isinstance(r, dict) and
+               (r.get('league') or {}).get('id') == league_id and
+               any(x.get('year') == season for x in r.get('seasons', []))]
+    contract = {'league_id': league_id, 'season': season, 'status': 'UNKNOWN',
+                'competition_type': None, 'capabilities': {k:'UNKNOWN' for k in
+                ('statistics_fixtures','standings','events','lineups','statistics_players','players')}}
+    if len(matches) != 1:return contract
+    seasons = [x for x in matches[0].get('seasons', []) if x.get('year') == season]
+    if len(seasons) != 1:return contract
+    cov = seasons[0].get('coverage') or {}; fixture = cov.get('fixtures') or {}
+    contract['competition_type'] = (matches[0].get('league') or {}).get('type')
+    for key in contract['capabilities']:
+        value = fixture.get(key) if key in ('statistics_fixtures','events','lineups','statistics_players') else cov.get(key)
+        contract['capabilities'][key] = 'TRUE' if value is True else 'FALSE' if value is False else 'UNKNOWN'
+    contract['status'] = 'DECLARED'
+    return contract
+
+
+def apply_coverage_priority(match, rules=None):
+    rules = validate_coverage_rules(rules)
+    contract = match.get('competition_coverage') or competition_coverage([],match.get('league_id'),match.get('season'))
+    match['competition_coverage'] = contract
+    match['coverage_rules'] = rules
+    caps = contract['capabilities']; observations = match.get('statistical_observations') or {}
+    families = {}
+    for family,metric in [('goals','goals'),('corners','corners'),('cards','yellow'),('shots','shots')]:
+        series = {side+'_'+block:sum(numeric((r.get(block) or {}).get(metric)) is not None for r in {r.get('fixture_id'):r for r in rows if r.get('fixture_id') is not None}.values()
+                  if (not r.get('acquired_at_utc') or acquisition_before(r['acquired_at_utc'],utc_datetime(match['analysis_cutoff_utc']))) and r.get('status')=='FT' and r.get('league_id') == match.get('league_id') and r.get('season') == match.get('season') and
+                  historical_available(r,utc_datetime(match['analysis_cutoff_utc'])))
+                  for side,rows in observations.items() for block in ('own','conceded')}
+        n = min(series.values()) if len(series) == 4 else 0
+        families[family] = {'metric':metric, 'series_n':series, 'minimum_series_n':n,
+                            'status':'OBSERVED_SUFFICIENT_SAMPLE' if n>=rules['minimum_sample'] else 'LIMITED_OR_ABSENT',
+                            'missing_is_zero':False}
+    families['players'] = {'declared':caps['statistics_players'], 'status':'EXPOSURE_NOT_VERIFIED',
+                           'minimum_series_n':None}
+    is_national_friendly = (
+        match.get('competition_eligibility_reason') == 'NATIONAL_FRIENDLY'
+        or match.get('league_id') == 10
+    )
+    exception = (
+        contract.get('competition_type') == 'Cup'
+        or bool(match.get('coverage_exception_reason'))
+        or (is_national_friendly and caps['standings'] == 'FALSE')
+    )
+    # Exemptions are explicit sporting metadata, never inferred from a missing table.
+    declared = caps['statistics_fixtures']=='TRUE' and (caps['standings']=='TRUE' or exception)
+    observed = any(families[k]['minimum_series_n']>=rules['minimum_sample'] for k in ('corners','cards','shots'))
+    advanced = declared and observed
+    reasons = ['DECLARED_COLLECTIVE_AND_STANDINGS' if declared and caps['standings']=='TRUE' else
+               'DOCUMENTED_NO_TABLE_EXCEPTION' if declared else 'DECLARED_COVERAGE_LIMITED_OR_UNKNOWN',
+               'OBSERVED_SAMPLE_SUFFICIENT' if observed else 'OBSERVED_SAMPLE_LIMITED']
+    bonus = (rules['advanced_bonus'] + rules['additional_capability_weight'] *
+             sum(caps[k]=='TRUE' for k in ('events','lineups','statistics_players','players'))) if advanced else 0
+    legacy = match.get('legacy_research_priority_score', match.get('research_priority_score'))
+    match['legacy_research_priority_score'] = legacy
+    exception_reason = match.get('coverage_exception_reason') or (
+        'NATIONAL_FRIENDLY_NO_STANDINGS_FORMAT'
+        if is_national_friendly and caps['standings'] != 'TRUE'
+        else ('PROVIDER_CUP_FORMAT' if exception else None)
+    )
+    match['statistical_priority'] = {'category':'ADVANCED' if advanced else 'SECONDARY',
+        'reasons':reasons, 'exception_reason':exception_reason,
+        'families':families, 'bonus':bonus if rules['enabled'] else 0, 'rules':rules,
+        'interpretation':'DATA_PRIORITY_ONLY_NOT_PROBABILITY'}
+    match['research_priority_score'] = round(legacy + (bonus if rules['enabled'] else 0),3) if legacy is not None else None
 
 
 def assign_ranks(matches:list[dict[str,Any]]) -> None:
@@ -431,7 +655,7 @@ def assign_ranks(matches:list[dict[str,Any]]) -> None:
 
 
 def choose_detail_fixtures(fixtures:list[dict[str,Any]],histories:dict[int,list],
-   standings:dict[tuple[int,int],list],now:datetime,top:int) -> set[int]:
+   standings:dict[tuple[int,int],list],now:datetime,top:int,coverage_contracts=None,coverage_rules=None) -> set[int]:
     """Planificación equilibrada (no una muestra arbitraria de una liga por vez).
 
     La señal es una HEURÍSTICA para decidir QUÉ consultar, no para sugerir picks.
@@ -461,16 +685,28 @@ def choose_detail_fixtures(fixtures:list[dict[str,Any]],histories:dict[int,list]
               'home_evidence':{'history':h,'standings':hs},
               'away_evidence':{'history':a,'standings':ass},
               'h2h':{'count':0}}
+        item['competition_coverage']=(coverage_contracts or {}).get((f['league_id'],f['season']))
+        item['coverage_rules']=coverage_rules
+        item['coverage_exception_reason']=f.get('coverage_exception_reason')
         item['_planning_score'],item['_planning_reasons']=basic_signal(item)
         items.append(item)
     chosen=choose_expansion(items,top,max_per_league=2)
     return {x['fixture_id'] for x in chosen}
 
 
+def validate_temporal_sources(report):
+    cutoff=utc_datetime(report['generated_at_utc'])
+    for record in report.get('api_request_ledger',[]):
+        value=record.get('first_observed_at_utc') or record.get('fetched_at_utc')
+        if value and not acquisition_before(value,cutoff):
+            raise PreselectionError('SOURCE_ACQUISITION_UNVERIFIED_OR_AFTER_CUTOFF')
+
+
 def rescore_existing(report:dict[str,Any],detail_limit:int|None=None) -> dict[str,Any]:
     """Recalcula un preselection V1.1/1.2 sin llamar a la API. No amplía muestra."""
     if report.get('schema_version') not in ('1.1-preselection','1.2-preselection','1.3-preselection'):
         raise PreselectionError('--rescore-json requiere un preselection.json V1.1 o V1.2')
+    validate_temporal_sources(report)
     limit=detail_limit or (report.get('methodology') or {}).get('sample_details_cap') or 8
     for m in report.get('matches',[]):
         h=m['home_evidence'];a=m['away_evidence']
@@ -483,15 +719,24 @@ def rescore_existing(report:dict[str,Any],detail_limit:int|None=None) -> dict[st
                       'data_readiness_status':old_status if old_status=='EVALUACION_INCOMPLETA' else 'PENDIENTE_DETALLE'})
             continue
         old_status=m.get('data_readiness_status')
+        obs = m.get('statistical_observations')
+        ev_info = assess_family_evidence(h['history'], a['history'], h['details'], a['details'], obs)
         grade,status,warnings,profiles,stability,priority=score_readiness(
-            h['history'],a['history'],h['standings'],a['standings'],h['details'],a['details'],limit)
+            h['history'],a['history'],h['standings'],a['standings'],h['details'],a['details'],limit,observed=obs)
         if old_status in ('EVALUACION_INCOMPLETA','REVISION_PARCIAL_API'):
             warnings=list(dict.fromkeys((m.get('warnings') or [])+warnings))
             status=old_status
             if old_status=='EVALUACION_INCOMPLETA':grade=None;priority=None
         m.update({'data_readiness_score':grade,'data_readiness_status':status,
                   'research_priority_score':priority,'stability_score':stability,
-                  'market_profiles':profiles,'details_checked':True,'warnings':warnings})
+                  'market_profiles':profiles,'details_checked':True,'warnings':warnings,
+                  'evidence_tier':ev_info['evidence_tier'],
+                  'family_evidence_tiers':ev_info['family_evidence_tiers'],
+                  'eligible_market_families':ev_info['eligible_market_families'],
+                  'rank_eligible':ev_info['rank_eligible']})
+    for match in report['matches']:
+        match.pop('legacy_research_priority_score',None)
+        apply_coverage_priority(match,(report.get('methodology') or {}).get('coverage_rules'))
     assign_ranks(report['matches'])
     report['schema_version']=VERSION
     report.setdefault('methodology',{}).update({
@@ -529,7 +774,7 @@ def history_seasons_for_team(fixture_seasons:set[int], cutoff:datetime,
 def run_evaluator(doc:dict[str,Any],client:Any,now:datetime,history_limit:int=20,
                   detail_limit:int=8,max_matches:int=0,fixture_id:int|None=None,
                   history_seasons:int=3,mode:str='full',detail_top:int=30,
-                  fixture_ids:set[int]|None=None) -> dict[str,Any]:
+                  fixture_ids:set[int]|None=None, coverage_rules:dict|None=None) -> dict[str,Any]:
     if doc.get('schema_version')!='1.0-major-leagues':
         raise PreselectionError('Entrada no es fixtures_major.json V1.0')
     if not 1 <= history_seasons <= 3:
@@ -555,6 +800,16 @@ def run_evaluator(doc:dict[str,Any],client:Any,now:datetime,history_limit:int=20
     if max_matches>0:fixtures=fixtures[:max_matches]
     if not fixtures:
         raise PreselectionError('No quedan fixtures futuros elegibles para esta ejecución PREMATCH')
+    coverage_rules = validate_coverage_rules(coverage_rules)
+    coverage_contracts = {}
+    for lid, season in sorted({(f['league_id'], f['season']) for f in fixtures}):
+        try:
+            coverage_contracts[(lid,season)] = competition_coverage(client.get('leagues', {'id':lid,'season':season}), lid, season)
+        except PreselectionError as exc:
+            coverage_contracts[(lid,season)] = competition_coverage([],lid,season)
+            coverage_contracts[(lid,season)]['query_error'] = str(exc)
+        records=[r for r in getattr(client,'request_ledger',[]) if r.get('endpoint')=='leagues' and r.get('parameters')=={'id':lid,'season':season}]
+        coverage_contracts[(lid,season)]['source']=records[-1] if records else {'status':'PROVENANCE_NOT_RECORDED'}
     cutoff_by_team={}
     seasons_by_team=defaultdict(set)
     for f in fixtures:
@@ -601,8 +856,12 @@ def run_evaluator(doc:dict[str,Any],client:Any,now:datetime,history_limit:int=20
 
     # En la primera pasada se consultan historiales y tablas, nunca detalles.
     table_keys=sorted({(f['league_id'],f['season']) for f in fixtures})
-    standings={}
+    standings={};standings_queries=0
     for i,(lid,season) in enumerate(table_keys,1):
+        if coverage_contracts[(lid,season)]['capabilities']['standings']=='FALSE' and not any(f.get('coverage_probe_reason') for f in fixtures if (f['league_id'],f['season'])==(lid,season)):
+            standings[(lid,season)]=[]
+            continue
+        standings_queries+=1
         try:standings[(lid,season)]=client.get('standings',{'league':lid,'season':season})
         except PreselectionError as exc:errors[f'{lid}:{season}']=str(exc);standings[(lid,season)]=[]
         if i==len(table_keys) or i%20==0:
@@ -610,13 +869,17 @@ def run_evaluator(doc:dict[str,Any],client:Any,now:datetime,history_limit:int=20
 
     if mode=='full':detail_selected={f['fixture_id'] for f in fixtures}
     elif mode=='quick':detail_selected=set()
-    else:detail_selected=choose_detail_fixtures(fixtures,histories,standings,now,min(detail_top,len(fixtures)))
+    else:detail_selected=choose_detail_fixtures(fixtures,histories,standings,now,min(detail_top,len(fixtures)),coverage_contracts,coverage_rules)
     chosen=[f for f in fixtures if f['fixture_id'] in detail_selected]
     detail_ids=set()
     for f in chosen:
         for tid in (f['home_id'],f['away_id']):
             cutoff=min(now,utc_datetime(f['kickoff_utc']))
             subset=[g for g in histories.get(tid,[]) if utc_datetime(g['date_utc'])<cutoff]
+            contract=coverage_contracts[(f['league_id'],f['season'])]
+            if (coverage_rules['skip_declared_false_details'] and contract['capabilities']['statistics_fixtures']=='FALSE'
+                    and not f.get('coverage_probe_reason')):
+                continue
             selected,_=select_detail_games(subset,f['league_id'],f['season'],cutoff,detail_limit)
             detail_ids.update(g['id'] for g in selected)
     details={};detail_list=sorted(detail_ids)
@@ -657,6 +920,24 @@ def run_evaluator(doc:dict[str,Any],client:Any,now:datetime,history_limit:int=20
                 match['research_priority_score']=None
                 match['data_readiness_status']='EVALUACION_INCOMPLETA'
     assign_ranks(result)
+    for match in result:
+        match['legacy_data_readiness_rank'] = match['data_readiness_rank']
+        original=next(f for f in fixtures if f['fixture_id']==match['fixture_id'])
+        match['coverage_rules']=coverage_rules
+        match['competition_coverage']=coverage_contracts[(match['league_id'],match['season'])]
+        match['coverage_exception_reason']=original.get('coverage_exception_reason')
+        match['detail_acquisition_reason']=('DECLARED_FALSE_SKIPPED' if coverage_rules['skip_declared_false_details'] and match['competition_coverage']['capabilities']['statistics_fixtures']=='FALSE' and not original.get('coverage_probe_reason') else original.get('coverage_probe_reason') or 'NORMAL_DETAIL_PLAN')
+        apply_coverage_priority(match,coverage_rules)
+    assign_ranks(result)
+    if isinstance(client,ApiFootball) and client.asof is None:
+        now=datetime.now(UTC)
+        for match in result:
+            if now>=utc_datetime(match['kickoff_madrid']):
+                match['data_readiness_score']=None;match['research_priority_score']=None
+                match['data_readiness_status']='EVALUACION_INCOMPLETA'
+                errors[str(match['fixture_id'])]='ACQUISITION_CROSSED_KICKOFF'
+            else:match['analysis_cutoff_utc']=now.isoformat()
+        assign_ranks(result)
     evaluated_ids={m['fixture_id'] for m in result};stale_ids={f['fixture_id'] for f in stale}
     fixture_ledger=[]
     for f in input_fixtures:
@@ -668,14 +949,15 @@ def run_evaluator(doc:dict[str,Any],client:Any,now:datetime,history_limit:int=20
         else:status='NOT_EVALUATED_UNKNOWN'
         fixture_ledger.append({'fixture_id':fid,'home':f.get('home'),'away':f.get('away'),
                                'kickoff_madrid':f.get('kickoff_madrid'),'status':status})
+    skipped_targets=sum(m.get('detail_acquisition_reason')=='DECLARED_FALSE_SKIPPED' for m in result if m['fixture_id'] in detail_selected)
     return {'schema_version':VERSION,'generated_at_utc':now.isoformat(),
       'source_filter_sha256':None,'source_filter_generated_at_utc':doc.get('generated_at_utc'),
       'counts':{'input_filter':len(doc['fixtures']),'evaluated':len(result),
                 'stale_skipped':len(stale),'histories_requested':len(cutoff_by_team),
                 'history_season_requests':history_queries,
-                'detail_fixture_ids':len(detail_list),'standings_requested':len(table_keys),
+                'detail_fixture_ids':len(detail_list),'standings_requested':standings_queries,'coverage_contracts_requested':len(coverage_contracts),
                 'api_errors':len(errors),
-                'details_requested':len(detail_selected),
+                'details_requested':len(detail_selected)-skipped_targets,'detail_targets_skipped_declared_false':skipped_targets,
                 'fully_evaluated':sum(m['data_readiness_score'] is not None for m in result),
                 'pending_detail':len(fixtures)-len(detail_selected)},
       'api_errors':errors,'api_usage':{'requests_sent':getattr(client,'requests_sent',None),
@@ -686,7 +968,7 @@ def run_evaluator(doc:dict[str,Any],client:Any,now:datetime,history_limit:int=20
       'fixture_evaluation_ledger':fixture_ledger,
       'history_seasons_used':history_seasons_used,
       'methodology':{'ranking':'COVERAGE_AND_STABILITY_HEURISTICS_NOT_BET_VALUE',
-        'stage':mode,'detail_top':detail_top,
+        'coverage_rules':coverage_rules, 'stage':mode,'detail_top':detail_top,
         'sample_history_cap':history_limit,'sample_details_cap':detail_limit,
         'sample_history_seasons_cap':history_seasons,
         'time_reference':'Min(fecha de evaluación, kickoff del partido); solo FT/AET/PEN anteriores',
@@ -771,7 +1053,8 @@ def save_report(report:dict[str,Any],folder:Path):
     json_tmp.write_text(json.dumps(report,indent=2,ensure_ascii=False)+'\n',encoding='utf-8')
     json_tmp.replace(json_target)
     fields=['data_readiness_rank','fixture_id','kickoff_madrid','country','league','home','away',
-            'gender','region','initial_data_gate','preliminary_coverage_score','data_readiness_score',
+            'competition_coverage','statistical_priority','legacy_data_readiness_rank','legacy_research_priority_score',
+            'gender','category_status','region','initial_data_gate','preliminary_coverage_score','data_readiness_score',
             'stability_score','research_priority_score','data_readiness_status',
             'details_checked','home_history_n','away_history_n','home_corners_n',
             'away_corners_n','home_corners_avg','away_corners_avg',
@@ -811,6 +1094,9 @@ def save_report(report:dict[str,Any],folder:Path):
     for m in report['matches']:
         def shown(x):return 'N/D' if x is None else str(x)
         lines.append(f"| {shown(m.get('data_readiness_rank'))} | `{m['fixture_id']}` | {m['home']}–{m['away']} | {shown(m.get('preliminary_coverage_score'))} | {shown(m.get('data_readiness_score'))} | {shown(m.get('stability_score'))} | {shown(m.get('research_priority_score'))} | {m['data_readiness_status']} |")
+    for m in report['matches']:
+        if m.get('statistical_priority'):
+            lines.extend(['',f"### Cobertura declarada y prioridad — {m['fixture_id']}",json.dumps({'contract':m.get('competition_coverage'),'priority':m['statistical_priority'],'legacy_rank':m.get('legacy_data_readiness_rank')},ensure_ascii=False)])
     lines+=['','## Cobertura por familia estadística de los partidos detallados','']
     for m in report['matches']:
         if not m.get('market_profiles'):continue
@@ -829,6 +1115,7 @@ def main(argv=None):
     p.add_argument('--output-dir',type=Path)
     p.add_argument('--root',type=Path,default=Path(__file__).resolve().parent)
     p.add_argument('--max-matches',type=int,default=0,help='0=todos; prueba inicial 5')
+    p.add_argument('--include-review',action='store_true',help='Investigar también clasificación pendiente, sin cambiar sus metadatos')
     p.add_argument('--fixture-id',type=int,help='Evalúa solo el partido elegido')
     p.add_argument('--fixture-ids-file',type=Path,
                    help='Archivo de IDs (uno por línea): evalúa exactamente esta tanda')
@@ -847,6 +1134,8 @@ def main(argv=None):
     p.add_argument('--rescore-json',type=Path,
                    help='Recalcular un preselection V1.1/V1.2 sin consumir API')
     p.add_argument('--confirm-external',action='store_true')
+    p.add_argument('--coverage-rules',type=Path,help='JSON de reglas de prioridad declarada; enabled=false conserva ranking anterior')
+    p.add_argument('--asof', help='Instante único ISO8601 con offset para el corte PREMATCH de esta evaluación')
     args=p.parse_args(argv)
     if not args.rescore_json:
         from prematch_execution_control import require_external_confirmation
@@ -861,6 +1150,8 @@ def main(argv=None):
     try:
         if args.rescore_json:
             old=json.loads(args.rescore_json.read_text(encoding='utf-8'))
+            if args.coverage_rules:
+                old.setdefault('methodology',{})['coverage_rules']=validate_coverage_rules(json.loads(args.coverage_rules.read_text()))
             report=rescore_existing(old)
             folder=args.output_dir or args.rescore_json.parent/'v12_rescore'
             save_report(report,folder)
@@ -871,14 +1162,22 @@ def main(argv=None):
         from config.constants import API_KEY,FOOTBALL_BASE_URL,REQUEST_TIMEOUT
         if not API_KEY:raise PreselectionError('No se encontró API_KEY en config.constants')
         raw=args.input.read_bytes();doc=json.loads(raw)
+        if args.include_review:
+            doc=dict(doc,fixtures=doc.get('fixtures',[])+doc.get('review',[]))
+            ids=[f['fixture_id'] for f in doc['fixtures']]
+            if len(ids)!=len(set(ids)):raise PreselectionError('Fixture IDs duplicados entre elegibles y pendientes')
         chosen_ids=read_fixture_ids_file(args.fixture_ids_file) if args.fixture_ids_file else None
         client=ApiFootball(API_KEY,FOOTBALL_BASE_URL,args.root,REQUEST_TIMEOUT,args.refresh,
                            args.request_budget,args.request_reserve)
-        try:report=run_evaluator(doc,client,datetime.now(UTC),args.history_limit,
+        evaluation_now = utc_datetime(args.asof) if args.asof else datetime.now(UTC)
+        client.asof=utc_datetime(args.asof) if args.asof else None
+        try:report=run_evaluator(doc,client,evaluation_now,args.history_limit,
                          args.detail_limit,args.max_matches,args.fixture_id,args.history_seasons,
-                         args.mode,args.detail_top,chosen_ids)
+                         args.mode,args.detail_top,chosen_ids,
+                         json.loads(args.coverage_rules.read_text()) if args.coverage_rules else None)
         finally:client.close()
         report['source_filter_sha256']=hashlib.sha256(raw).hexdigest()
+        report['run_status']='INCOMPLETE' if report['api_errors'] else 'COMPLETED'
         if args.merge_report:
             if args.mode!='full':
                 raise PreselectionError('--merge-report requiere --mode full')
@@ -888,8 +1187,10 @@ def main(argv=None):
         save_report(report,folder)
         print(f"Evaluados: {report['counts']['evaluated']} | Detalle: {report['counts']['fully_evaluated']} | Consultas API: {report['api_usage']['requests_sent']} | Caché: {report['api_usage']['cache_hits']} | Errores API: {report['counts']['api_errors']}")
         print(f'Resultados: {folder/"preselection.json"} | {folder/"preselection.csv"} | {folder/"preselection.md"}')
-        return 0 if report['counts']['api_errors']==0 else 3
-    except (OSError,ValueError,KeyError,ImportError,PreselectionError) as e:
+        # Per-fixture acquisition failures remain visible in the report and
+        # must not prevent the next independent, offline phase.
+        return 0
+    except (OSError,ValueError,KeyError,ImportError,PreselectionError,GlobalApiError) as e:
         print(f'ERROR: {e}',file=sys.stderr);return 2
 
 from prematch_execution_control import confirmed_cli

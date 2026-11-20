@@ -5,7 +5,8 @@
 PREPARE: API fixtures -> primeras divisiones -> preselección -> patrones -> discovery Bwin.
 SCAN: captura nuevas cuotas por evento -> preflight -> Opportunity Scanner (no calibrado).
 
-Nunca ejecuta un partido pasado, no acepta --asof y NO habilita Grok/Gemini/Codex.
+Nunca ejecuta un partido pasado, no permite un --asof retrospectivo del usuario
+y NO habilita Grok/Gemini/Codex. Internamente congela un único corte por ejecución.
 Perfiles persistentes definidos en config/prematch_windows.json.
 """
 from __future__ import annotations
@@ -148,13 +149,169 @@ def sha(path:Path):
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
+def execution_reference(args):
+    """One immutable eligibility clock per command invocation."""
+    value = getattr(args, 'execution_reference', None)
+    if value is None:
+        value = now_madrid()
+        args.execution_reference = value
+    if not isinstance(value, datetime) or value.utcoffset() is None:
+        raise TrialError('EXECUTION_REFERENCE_REQUIRES_TIMEZONE')
+    return value.astimezone(TZ)
+
+
+def _normalized_team_filter(args) -> list[str]:
+    raw = getattr(args, 'team', None)
+    if raw is None:
+        return []
+    if isinstance(raw, str):
+        return [raw] if raw.strip() else []
+    return sorted(str(x) for x in raw if x is not None and str(x).strip())
+
+
+def _intact_pre_enrichment_snapshot(folder: Path, base: Path) -> bool:
+    raw_path = Path(folder) / 'fixtures.json'
+    major_path = Path(folder) / 'fixtures_major.json'
+    trial_input = Path(base) / 'fixtures_major_test.json'
+    if not (raw_path.is_file() and major_path.is_file() and trial_input.is_file() and (Path(base) / 'candidate_ledger.json').is_file()):
+        return False
+    try:
+        from filter_major_leagues import FILTER_IMPLEMENTATION
+        major = read(major_path)
+        subset = read(trial_input)
+        return (
+            major.get('filter_implementation') == FILTER_IMPLEMENTATION
+            and major.get('source_sha256') == sha(raw_path)
+            and subset.get('trial_subset', {}).get('source_sha256') == sha(major_path)
+        )
+    except (OSError, ValueError, json.JSONDecodeError, KeyError):
+        return False
+
+
+def _evaluation_request(day, args):
+    from filter_major_leagues import FILTER_IMPLEMENTATION
+    begin, finish = local_window(day, args.start, args.end)
+    return {
+        'day': day.isoformat(), 'window_start_madrid': begin.isoformat(),
+        'window_end_madrid': finish.isoformat(),
+        'horizon_hours': float(getattr(args, 'horizon_hours', 0) or 0),
+        'evaluation_budget': int(getattr(args, 'evaluation_budget', 0) or 0),
+        'discovery_budget': int(getattr(args, 'discovery_budget', 0) or 0),
+        'max_matches_batch_size': int(args.max_matches),
+        'bwin_top_batch_size': int(args.bwin_top),
+        'history_limit': int(args.history), 'detail_limit': int(args.details),
+        'min_lead_minutes': int(args.min_lead),
+        'competition_scope': str(getattr(args, 'competition_scope', None) or 'adult-open'),
+        'filter_implementation': FILTER_IMPLEMENTATION,
+        'coverage_rules_sha256': sha(Path(args.coverage_rules)) if getattr(args,'coverage_rules',None) else None,
+        'team_filter': _normalized_team_filter(args),
+    }
+
+
+def _canonical_hash(obj):
+    return hashlib.sha256(json.dumps(obj, ensure_ascii=False, sort_keys=True,
+                                     separators=(',', ':')).encode('utf-8')).hexdigest()
+
+
+def evaluation_manifest(folder):
+    path = Path(folder) / 'evaluation_manifest.json'
+    document = read(path)
+    request = document.get('request')
+    if (document.get('schema_version') != '1.0-daily-evaluation' or
+            not isinstance(request, dict) or
+            document.get('request_sha256') != _canonical_hash(request) or
+            Path(document.get('evaluation_path', '')).resolve() != Path(folder).resolve()):
+        raise TrialError(f'EVALUATION_MANIFEST_IDENTITY_MISMATCH:{path}')
+    return document
+
+
+def resolve_evaluation(window_folder, day, args, reference=None):
+    """Choose an isolated evaluation before any frozen input is written.
+
+    Only an unfinished, content-addressed snapshot with enrichment checkpoints
+    is resumable. Completed/terminal or merely partial attempts remain untouched
+    and a new evaluation directory is allocated automatically.
+    """
+    window_folder = Path(window_folder)
+    reference = (reference or execution_reference(args)).astimezone(TZ)
+    request = _evaluation_request(day, args)
+    request_hash = _canonical_hash(request)
+    evaluations = window_folder / 'evaluations'
+    if evaluations.is_dir():
+        candidates = []
+        for manifest_path in evaluations.glob('*/evaluation_manifest.json'):
+            try:
+                document = evaluation_manifest(manifest_path.parent)
+            except (TrialError, OSError, ValueError, json.JSONDecodeError):
+                continue
+            base = manifest_path.parent / 'prospective_trial'
+            handoff_path = base / 'handoff_prematch.json'
+            handoff = read(handoff_path) if handoff_path.is_file() else None
+            resumable_handoff = (handoff is None or
+                (handoff.get('status') == 'TECHNICAL_FAILURE' and
+                 handoff.get('discard_reasons') and
+                 all(row.get('phase') == 'prepare' for row in handoff['discard_reasons'])))
+            if (document.get('request_sha256') == request_hash and
+                    not (base / 'prospective_test_summary.json').exists() and
+                    resumable_handoff and
+                    (base / 'fixtures_major_test.json').is_file() and
+                    (base / 'enrichment_batches').is_dir()):
+                # Validate the complete frozen source chain before selecting it.
+                subset = read(base / 'fixtures_major_test.json')
+                major = manifest_path.parent / 'fixtures_major.json'
+                raw = manifest_path.parent / 'fixtures.json'
+                if not major.is_file() or not raw.is_file():
+                    raise TrialError('RESUME_FROZEN_SOURCE_MISSING')
+                if (read(major).get('source_sha256') != sha(raw) or
+                        subset.get('trial_subset', {}).get('source_sha256') != sha(major)):
+                    raise TrialError('RESUME_FROZEN_SOURCE_IDENTITY_MISMATCH')
+                candidates.append((document.get('reference_madrid', ''), manifest_path.parent))
+        if candidates:
+            return sorted(candidates)[-1][1], 'RESUME_FROZEN_EVALUATION'
+    evaluations.mkdir(parents=True, exist_ok=True)
+    prefix = reference.astimezone(timezone.utc).strftime('%Y%m%dT%H%M%S%fZ')
+    stem = f'{prefix}_{request_hash[:12]}'
+    target = evaluations / stem
+    suffix = 1
+    while target.exists():
+        suffix += 1
+        target = evaluations / f'{stem}_{suffix}'
+    target.mkdir()
+    manifest = {
+        'schema_version': '1.0-daily-evaluation', 'evaluation_id': target.name,
+        'evaluation_path': str(target.resolve()), 'window_path': str(window_folder.resolve()),
+        'reference_madrid': reference.isoformat(),
+        'reference_utc': reference.astimezone(timezone.utc).isoformat(),
+        'request': request, 'request_sha256': request_hash,
+        'storage_policy': 'ISOLATED_WRITE_ONCE_INPUTS',
+        'legacy_read_compatibility': True,
+    }
+    atomic_dump(target / 'evaluation_manifest.json', manifest)
+    return target, 'NEW_ISOLATED_EVALUATION'
+
+
+def latest_evaluation(window_folder):
+    """Read helper: newest isolated evaluation, otherwise the legacy layout."""
+    window_folder = Path(window_folder)
+    manifests = sorted((window_folder / 'evaluations').glob('*/evaluation_manifest.json'))
+    valid = []
+    for path in manifests:
+        try:
+            document = evaluation_manifest(path.parent)
+            valid.append((document.get('reference_madrid', ''), path.parent))
+        except (TrialError, OSError, ValueError, json.JSONDecodeError):
+            continue
+    return sorted(valid)[-1][1] if valid else window_folder
+
+
 def _batch_configuration(args):
     return {'max_matches_batch_size': int(args.max_matches),
             'history_limit': int(args.history), 'detail_limit': int(args.details),
-            'team_filter': sorted(str(x) for x in getattr(args, 'team', [])),
-            'evaluation_budget': int(getattr(args, 'evaluation_budget', 0)),
-            'horizon_hours': float(getattr(args, 'horizon_hours', 0)),
-            'min_lead_minutes': int(args.min_lead)}
+            'team_filter': _normalized_team_filter(args),
+            'evaluation_budget': int(getattr(args, 'evaluation_budget', 0) or 0),
+            'horizon_hours': float(getattr(args, 'horizon_hours', 0) or 0),
+            'min_lead_minutes': int(args.min_lead),
+            'coverage_rules_sha256': sha(Path(args.coverage_rules)) if getattr(args,'coverage_rules',None) else None}
 
 
 def _validate_batch_result(path, input_path, fixture_ids, config):
@@ -178,6 +335,10 @@ def _validate_batch_result(path, input_path, fixture_ids, config):
         raise TrialError(f'BATCH_PARAMETERS_MISMATCH:{path.parent.name}')
     if dt(doc.get('generated_at_utc')) is None:
         raise TrialError(f'BATCH_RESULT_UNDATED:{path.parent.name}')
+    for record in doc.get('api_request_ledger',[]):
+        acquired=dt(record.get('first_observed_at_utc') or record.get('fetched_at_utc'))
+        if acquired and acquired>dt(doc['generated_at_utc']):
+            raise TrialError('BATCH_ACQUISITION_AFTER_CUTOFF:'+path.parent.name)
     return doc
 
 
@@ -302,7 +463,10 @@ def merge_enrichment_batches(batch_docs, batch_sources, trial_input: Path):
         raise TrialError('DUPLICATE_BATCH_FIXTURE')
     if set(ids) != set(expected_ids):
         raise TrialError('INCOMPLETE_ENRICHMENT_BATCHES')
-    pre['generated_at_utc'] = now_madrid().astimezone(timezone.utc).isoformat()
+    batch_cutoffs=[dt(doc.get('generated_at_utc')) for doc in batch_docs]
+    if any(cut is None for cut in batch_cutoffs):raise TrialError('BATCH_RESULT_UNDATED')
+    pre['generated_at_utc'] = max(batch_cutoffs).astimezone(timezone.utc).isoformat()
+    pre['api_request_ledger']=[entry for doc in batch_docs for entry in doc.get('api_request_ledger',[])]
     pre['source_filter_sha256'] = sha(trial_input)
     pre['source_batches'] = batch_sources
     for field in ('counts', 'api_usage'):
@@ -391,6 +555,7 @@ def prepare(root,folder,day,args):
     from preselect_matches import save_report
     check_files(root,['discover_fixtures.py','filter_major_leagues.py','preselect_matches.py',
                       'prematch_pattern_engine.py','prematch_pattern_discovery.py','bwin_discovery.py'])
+    reference = execution_reference(args)
     if ((folder/'prospective_trial/enriched/preselection.json').exists() and
             (folder/'prospective_trial/prospective_test_summary.json').exists()):
         archive=root/'outputs/discovery/archives'/f'{folder.name}_{now_madrid():%Y%m%dT%H%M%S%f}'
@@ -398,7 +563,7 @@ def prepare(root,folder,day,args):
     base=folder/'prospective_trial'; logs=base/'logs'
     trial_input=base/'fixtures_major_test.json'
     resume_existing = (not (base/'prospective_test_summary.json').exists() and trial_input.is_file()
-                       and (base/'enrichment_batches').is_dir())
+                       and ((base/'enrichment_batches').is_dir() or _intact_pre_enrichment_snapshot(folder, base)))
     from prematch_tactical_signal_engine import diversified_order,run_engine
     if resume_existing:
         subset=read(trial_input)
@@ -416,7 +581,8 @@ def prepare(root,folder,day,args):
         print(f'Reanudación detectada: snapshot congelado {sha(trial_input)[:12]}, {len(selection)} fixtures.',flush=True)
     else:
         run(root,'discover_fixtures.py',['--date',day.isoformat(),'--start',args.start.strftime('%H:%M'),
-                                       '--end',args.end.strftime('%H:%M'),'--show','12'],logs)
+                                       '--end',args.end.strftime('%H:%M'),'--show','12',
+                                       '--output-dir',str(folder),'--asof',reference.astimezone(timezone.utc).isoformat()],logs)
         discovered=read(folder/'fixtures.json')
         ledger=CandidateLedger(base/'candidate_ledger.json', {
             'horizon_hours':getattr(args,'horizon_hours',3),'min_lead_minutes':args.min_lead,
@@ -429,14 +595,15 @@ def prepare(root,folder,day,args):
             if str(f['fixture_id']) not in ledger.rows:
                 ledger.record(f,'DESCUBIERTO','discovery','API_PREMATCH',str(folder/'fixtures.json'))
         ledger.write()
-        run(root,'filter_major_leagues.py',['--input',str(folder/'fixtures.json')],logs)
+        run(root,'filter_major_leagues.py',['--input',str(folder/'fixtures.json'),
+                                            '--output-dir',str(folder)],logs)
         major=read(folder/'fixtures_major.json')
         for f in major.get('excluded',[])+major.get('review',[]):
             ledger.record(f,'FILTRADO_POR_LIGA','league_filter',f.get('filter_reason'))
         for f in major['fixtures']:
-            reason=scope_reason(f,now_madrid(),args.min_lead,getattr(args,'horizon_hours',3))
+            reason=scope_reason(f,reference,args.min_lead,getattr(args,'horizon_hours',3))
             if reason:ledger.record(f,'EXCLUIDO_POR_HORARIO','scope',reason)
-        selection=select_fixtures(major,args.team,0,now_madrid(),args.min_lead,getattr(args,'horizon_hours',3))
+        selection=select_fixtures(major,_normalized_team_filter(args),0,reference,args.min_lead,getattr(args,'horizon_hours',3) or 0)
         if getattr(args,'evaluation_budget',0):selection=diversified_order(selection)
         all_selection=list(selection);budget=getattr(args,'evaluation_budget',0)
         if budget:
@@ -444,7 +611,7 @@ def prepare(root,folder,day,args):
             for f in all_selection[budget:]:ledger.record(f,'DIFERIDO_POR_PRESUPUESTO','preselection','EVALUATION_BUDGET_NOT_ANALYZED')
         all_ids={str(x['fixture_id']) for x in all_selection}
         for f in major['fixtures']:
-            if str(f['fixture_id']) not in all_ids and not scope_reason(f,now_madrid(),args.min_lead,getattr(args,'horizon_hours',3)):
+            if str(f['fixture_id']) not in all_ids and not scope_reason(f,reference,args.min_lead,getattr(args,'horizon_hours',3)):
                 ledger.record(f,'EXCLUIDO_POR_FILTRO_MANUAL','scope','TEAM_FILTER')
         ledger.write()
         if not selection:
@@ -452,6 +619,7 @@ def prepare(root,folder,day,args):
         subset=dict(major,fixtures=selection)
         subset['counts']=dict(major.get('counts',{}),eligible=len(selection))
         subset['trial_subset']={'source_sha256':sha(folder/'fixtures_major.json'),'count':len(selection),
+                                'reference_madrid':reference.isoformat(),
                                 'purpose':'ALL_ELIGIBLE_IN_SCOPE_NO_CHRONOLOGICAL_TRUNCATION'}
         if trial_input.exists():
             if read(trial_input) != subset:
@@ -464,12 +632,28 @@ def prepare(root,folder,day,args):
         print(f"Lotes enriquecidos reutilizados: {plan['checkpoint']['counts']['completed_batches']} "
               f"({plan['checkpoint']['counts']['completed_fixtures']} fixtures).",flush=True)
     for pending in plan['pending']:
-        run(root,'preselect_matches.py',['--input',str(pending['input']),'--output-dir',str(pending['dest']),
-            '--max-matches',str(len(pending['fixtures'])),'--history-limit',str(args.history),'--detail-limit',str(args.details)],logs)
+        cmd_pre = [
+            '--input', str(pending['input']), '--output-dir', str(pending['dest']),
+            '--max-matches', str(len(pending['fixtures'])), '--history-limit', str(args.history),
+            '--detail-limit', str(args.details),
+        ]
+        if getattr(args, 'coverage_rules', None):
+            cmd_pre += ['--coverage-rules', str(args.coverage_rules)]
+        if getattr(args, 'confirm_external', False):
+            cmd_pre.append('--confirm-external')
+        run(root, 'preselect_matches.py', cmd_pre, logs)
         plan=enrichment_resume_plan(base,subset,args)
     if plan['checkpoint']['counts']['pending_batches']:
         raise TrialError('ENRICHMENT_RESUME_INCOMPLETE')
     pre=merge_enrichment_batches(plan['completed_docs'],plan['completed_sources'],trial_input)
+    # Selection's frozen start remains immutable. Acquisition has its own
+    # effective cutoff: never backdate newly acquired evidence to the start.
+    selection_reference = reference
+    batch_cuts=[dt(doc.get('generated_at_utc')) for doc in plan['completed_docs']]
+    reference=max([reference]+[cut for cut in batch_cuts if cut is not None])
+    pre['selection_reference_utc']=selection_reference.astimezone(timezone.utc).isoformat()
+    pre['generated_at_utc']=reference.astimezone(timezone.utc).isoformat()
+    pre['temporal_policy']='ACQUISITION_COMPLETED_BEFORE_ANALYSIS_CUTOFF'
     if {str(f['fixture_id']) for f in pre['matches']}!=selected_ids:raise TrialError('INCOMPLETE_ENRICHMENT_BATCHES')
     outpre=base/'enriched';prepath=outpre/'preselection.json'
     if prepath.exists():
@@ -494,16 +678,17 @@ def prepare(root,folder,day,args):
         staging.replace(outpre)
     # Sidecar deportivo V2: determinista, offline y anterior a cualquier dato Bwin.
     run(root,'prematch_pattern_discovery.py',['--preselection',str(prepath),
-        '--output-dir',str(base/'patterns_v2')],logs)
+        '--output-dir',str(base/'patterns_v2'),'--asof',reference.isoformat()],logs)
     for f in pre['matches']:
         ready=f.get('data_readiness_score') is not None and f.get('details_checked')
         ledger.record(f,'PENDIENTE_BWIN' if ready else 'SIN_COBERTURA','preselection',f.get('data_readiness_status'))
     patternfolder=base/'patterns'
     run(root,'prematch_pattern_engine.py',['--preselection',str(prepath),'--top',str(len(selection)),
-        '--min-lead-minutes',str(args.min_lead),'--output-dir',str(patternfolder)],logs)
+        '--min-lead-minutes',str(args.min_lead),'--output-dir',str(patternfolder),
+        '--asof',reference.isoformat()],logs)
     # Tactical evidence is computed locally before spending the Bwin budget.
     tactical=run_engine(prepath,patternfolder/'pattern_engine.json',base/'tactical',root,
-        profiles=root/'config/tactical_profiles/profiles.json')
+        profiles=root/'config/tactical_profiles/profiles.json',asof=reference)
     tactical_scores={fid:x['priority_score'] for fid,x in tactical['fixtures'].items()}
     ordered=diversified_order(pre['matches'],tactical_scores)
     atomic_dump(base/'budget_assignment.json',{'strategy':'ROUND_ROBIN_TWO_HOUR_SLOTS_TACTICAL_QUALITY_WITHIN_SLOT',
@@ -516,18 +701,44 @@ def prepare(root,folder,day,args):
         discovery_deferred=ordered[budget:];ordered=ordered[:budget]
         for f in discovery_deferred:ledger.record(f,'DIFERIDO_POR_PRESUPUESTO','bwin_discovery','DISCOVERY_BUDGET_NOT_ANALYZED')
     ledger.write()
-    docs=[];bwinfolder=base/'bwin'
-    for i in range(0,len(ordered),args.bwin_top):
-        dest=bwinfolder/'batches'/str(i//args.bwin_top+1)
-        cmd=['--input',str(prepath),'--headless','--output-dir',str(dest)]
-        for f in ordered[i:i+args.bwin_top]:cmd+=['--fixture-id',str(f['fixture_id'])]
-        run(root,'bwin_discovery.py',cmd,logs);docs.append(read(dest/'bwin_discovery.json'))
-    bwin={'schema_version':'2.0-batched-discovery','generated_at_utc':now_madrid().astimezone(timezone.utc).isoformat(),
+    # One shared acquisition per evaluation.  The previous implementation ran
+    # the same 5-8 catalog pages once per fixture batch and later once per
+    # missing fixture.  Candidate matching is local, so batching browser
+    # navigation is both slower and weaker (different fixtures saw different
+    # catalog instants). ``bwin_top`` remains in the frozen request for legacy
+    # read compatibility but is no longer a browser batch size.
+    bwinfolder=base/'bwin';dest=bwinfolder/'shared'
+    cmd=['--input',str(prepath),'--headless','--output-dir',str(dest)]
+    if getattr(args, 'confirm_external', False):
+        cmd.append('--confirm-external')
+    for f in ordered:cmd+=['--fixture-id',str(f['fixture_id'])]
+    run(root,'bwin_discovery.py',cmd,logs)
+    shared=read(dest/'bwin_discovery.json')
+    from bwin_identity_audit import catalog_identity_fields
+    by_event={str(row['bwin_event_id']):{**row,**catalog_identity_fields(row)} for row in shared.get('catalog_observed',[])
+              if str(row.get('bwin_event_id') or '').isdigit()}
+    bwin={**shared,'schema_version':'3.0-shared-catalog-discovery',
           'source_input':str(prepath),'source_input_sha256':sha(prepath),'prematch_only':True,
-          'matches':[m for d in docs for m in d['matches']],
-          'catalog_observed':[m for d in docs for m in d.get('catalog_observed',[])],
-          'source_batches':[str(bwinfolder/'batches'/str(i+1)/'bwin_discovery.json') for i in range(len(docs))]}
+          'catalog_observed':list(by_event.values()),
+          'source_batches':[str(dest/'bwin_discovery.json')],
+          'acquisition_strategy':'ONE_SHARED_CATALOG_LOCAL_MATCHING',
+          'catalog_snapshot':{'source_path':str((dest/'bwin_discovery.json').resolve()),
+                              'source_sha256':sha(dest/'bwin_discovery.json'),
+                              'captured_at_utc':shared.get('generated_at_utc'),
+                              'scope':'DAILY_OPERATIONAL_WINDOW_PLUS_BOUNDED_COUNTRY_COMPLEMENT'},
+          'legacy_bwin_top_ignored_for_navigation':args.bwin_top}
     atomic_dump(bwinfolder/'bwin_discovery.json',bwin)
+    # Publish a bidirectional, all-fixture audit without additional network.
+    from bwin_identity_audit import (audit as identity_audit,write_reports as write_identity_reports,
+                                     merge_catalog,catalog_scope_complete)
+    canonical_path=bwinfolder/'bwin_discovery.json'
+    audit_catalog,audit_pages,_=merge_catalog([canonical_path])
+    catalog_complete=catalog_scope_complete(audit_pages)
+    identity_doc=identity_audit(pre['matches'],audit_catalog,audit_pages,
+        [{'path':str((bwinfolder/'bwin_discovery.json').resolve()),'sha256':sha(bwinfolder/'bwin_discovery.json'),
+          'generated_at_utc':bwin.get('generated_at_utc'),'rows':len(audit_catalog)}],
+        catalog_complete=catalog_complete)
+    write_identity_reports(bwinfolder/'identity_audit',identity_doc)
     for f in bwin['matches']:
         status=f.get('status','')
         if not f.get('bwin_event_id'):ledger.record(f,'SIN_BWIN','bwin_discovery',status)
@@ -535,7 +746,8 @@ def prepare(root,folder,day,args):
         else:ledger.record(f,'PENDIENTE_CUOTAS','bwin_discovery',status)
     ledger.write();begin,finish=local_window(day,args.start,args.end)
     summary={'schema_version':'2.0-prospective-trial','stage':'PREPARED','day':day.isoformat(),
-        'generated_madrid':now_madrid().isoformat(),'window_start_madrid':begin.isoformat(),
+        'generated_madrid':now_madrid().isoformat(),'execution_reference_madrid':reference.isoformat(),
+        'window_start_madrid':begin.isoformat(),
         'window_end_madrid':finish.isoformat(),'fixtures_considered':len(selection),
         'candidate_fixtures':all_selection,'scope':ledger.scope,
         'evaluation_deferred_ids':[f['fixture_id'] for f in all_selection if str(f['fixture_id']) not in selected_ids],
@@ -580,8 +792,10 @@ def main(argv=None):
     p.add_argument('--discovery-retries',type=int,default=2)
     p.add_argument('--max-odds-age',type=int,default=120)
     p.add_argument('--history',type=int,default=20)
+    p.add_argument('--coverage-rules',type=Path)
     p.add_argument('--details',type=int,default=8)
     p.add_argument('--min-lead',type=int,default=60)
+    p.add_argument('--confirm-external',action='store_true')
     args=p.parse_args(argv)
     if args.evaluation_budget<0 or args.discovery_budget<0 or not __import__("math").isfinite(args.horizon_hours) or args.horizon_hours<0 or args.discovery_retries<0 or args.max_odds_age<1 or args.max_matches<1 or args.bwin_top<1 or args.max_scrapes<0 or not 4<=args.history<=50 or args.details<1 or args.details>args.history or args.min_lead<45:
         p.error('Límites inválidos: max-matches/bwin-top >0, max-scrapes >=0, history 4..50, 1<=details<=history y min-lead>=45')
@@ -596,16 +810,26 @@ def main(argv=None):
     try:
         cfg, from_file, cfg_path=load_window_config(root,args.config)
         window_name, args.start, args.end=resolve_window(cfg,args.window,args.start,args.end)
-        day = day or automatic_day(now_madrid(),args.start,args.end)
+        reference = now_madrid()
+        args.execution_reference = reference
+        day = day or automatic_day(reference,args.start,args.end)
         begin,finish=local_window(day,args.start,args.end)
-        folder=window_path(root,day,args.start,args.end)
+        window_folder=window_path(root,day,args.start,args.end)
         print(f'CONFIG: {cfg_path} ({"JSON" if from_file else "integrada; instala el JSON para editarla"})',flush=True)
         print(f'PERFIL: {window_name} | VENTANA: {begin.isoformat()} -> {finish.isoformat()}',flush=True)
-        print(f'SALIDA: {folder}',flush=True)
+        print(f'VENTANA RAÍZ: {window_folder}',flush=True)
         print(f'HORIZONTE: {args.horizon_hours} h (0=toda la ventana)',flush=True)
         if args.show_config:
             return 0
-        allowed_window(day,now_madrid(),args.start,args.end)
+        allowed_window(day,reference,args.start,args.end)
+        if args.stage in ('prepare','all'):
+            folder, mode = resolve_evaluation(window_folder,day,args,reference)
+            if mode == 'RESUME_FROZEN_EVALUATION':
+                args.execution_reference = dt(evaluation_manifest(folder).get('reference_madrid'))
+            print(f'EVALUACIÓN {mode}: {folder}',flush=True)
+        else:
+            folder = latest_evaluation(window_folder)
+            print(f'EVALUACIÓN DE LECTURA: {folder}',flush=True)
         if args.stage in ('prepare','all'):
             prepare(root,folder,day,args)
         if args.stage in ('scan','all'):

@@ -1,0 +1,117 @@
+{
+  "schema_version": "2.2C.1-elo-sos-evidence",
+  "fixture_reference": "7905487 (Gales vs Portugal, kickoff sintético futuro para prueba CLI)",
+  "before_2_2c_bug": {
+    "M0": {
+      "lh": 1.3036,
+      "la": 1.565,
+      "p_home": 0.313423,
+      "elo_ok": false,
+      "sos_cov": 0.0
+    },
+    "M0_plus_Elo": {
+      "lh": 1.3175,
+      "la": 1.5928,
+      "p_home": 0.311904,
+      "elo_ok": false,
+      "sos_cov": 0.0
+    },
+    "M4": {
+      "lh": 1.4677,
+      "la": 1.5924,
+      "p_home": 0.348561,
+      "elo_ok": false,
+      "sos_cov": 0.0
+    },
+    "M4_plus_Elo": {
+      "lh": 1.4677,
+      "la": 1.5924,
+      "p_home": 0.348561,
+      "elo_ok": false,
+      "sos_cov": 0.0
+    }
+  },
+  "after_2_2c_1_cli_record": {
+    "elo_builder_meta": {
+      "corpus_loaded": true,
+      "corpus_fixtures_raw": 23063,
+      "total_elo_fixtures_asof": 23063,
+      "teams_in_history_n": 1589,
+      "excluded_post_cutoff_n": 0,
+      "elo_provenance_counts": {
+        "ESTIMATED_CONSERVATIVE_FT_125M": 23063
+      },
+      "elo_excluded_non_finished": 0
+    },
+    "model_comparison_integrity": {
+      "full_four_model_comparison_valid": true,
+      "degradation_reasons": [],
+      "elo_effective": {
+        "m0_plus_elo_ok": true,
+        "m4_plus_elo_ok": true,
+        "elo_home": 1453.15,
+        "elo_away": 1546.73,
+        "elo_home_n": 10,
+        "elo_away_n": 14
+      },
+      "sos_effective": {
+        "m4_sos_coverage_rate": 1.0,
+        "m4_plus_elo_sos_coverage_rate": 1.0
+      }
+    },
+    "models": {
+      "M0": {
+        "lambda_home": 1.3036,
+        "lambda_away": 1.565,
+        "outcomes_1x2": {
+          "home_win": 0.313423,
+          "draw": 0.256211,
+          "away_win": 0.430366
+        },
+        "elo_home": null,
+        "elo_away": null,
+        "elo_coverage_ok": false,
+        "sos_coverage_rate": 0.0
+      },
+      "M0_plus_Elo": {
+        "lambda_home": 1.2426,
+        "lambda_away": 1.6887,
+        "outcomes_1x2": {
+          "home_win": 0.277391,
+          "draw": 0.248522,
+          "away_win": 0.474087
+        },
+        "elo_home": 1453.15,
+        "elo_away": 1546.73,
+        "elo_coverage_ok": true,
+        "sos_coverage_rate": 0.0
+      },
+      "M4": {
+        "lambda_home": 1.416,
+        "lambda_away": 1.5997,
+        "outcomes_1x2": {
+          "home_win": 0.33473,
+          "draw": 0.250064,
+          "away_win": 0.415206
+        },
+        "elo_home": null,
+        "elo_away": null,
+        "elo_coverage_ok": false,
+        "sos_coverage_rate": 1.0
+      },
+      "M4_plus_Elo": {
+        "lambda_home": 1.3356,
+        "lambda_away": 1.696,
+        "outcomes_1x2": {
+          "home_win": 0.298441,
+          "draw": 0.246117,
+          "away_win": 0.455441
+        },
+        "elo_home": 1453.15,
+        "elo_away": 1546.73,
+        "elo_coverage_ok": true,
+        "sos_coverage_rate": 1.0
+      }
+    }
+  }
+}

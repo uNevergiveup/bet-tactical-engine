@@ -144,18 +144,7 @@ def probability_over(probs, threshold):
     return sum(p for k, p in enumerate(probs) if k > threshold)
 
 
-def result_available_at(row):
-    """Fecha en que el resultado podía usarse, sin inventar hora oficial.
-
-    Se prioriza evidencia fechada del proveedor. Si el snapshot no la incluye,
-    se aplica kickoff + 3 horas: regla conservadora, explícita y auditable.
-    """
-    for key in ('result_available_at_utc', 'completed_at_utc', 'fixture_completed_at_utc'):
-        value = dt(row.get(key))
-        if value:
-            return value, f'EXPLICIT_{key.upper()}'
-    kickoff = dt(row.get('kickoff_utc'))
-    return ((kickoff + CONSERVATIVE_RESULT_AVAILABILITY), 'CONSERVATIVE_KICKOFF_PLUS_3H') if kickoff else (None, 'UNAVAILABLE')
+from prematch_cache_record import result_available_at
 
 
 def observed_values(rows, block, metric, venue=None, include_availability=False):
@@ -267,6 +256,9 @@ def validate_source(pre, asof):
     generated = dt(pre.get('generated_at_utc'))
     if not generated or generated > asof:
         raise PredictiveError('PRESELECTION_UNDATED_OR_AFTER_ASOF')
+    from preselect_matches import validate_temporal_sources, PreselectionError
+    try:validate_temporal_sources(pre)
+    except PreselectionError as exc:raise PredictiveError(str(exc)) from exc
     seen = set()
     for fixture in pre.get('matches', []):
         fid = fixture.get('fixture_id')

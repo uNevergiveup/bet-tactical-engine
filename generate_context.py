@@ -61,9 +61,12 @@ from config.constants import (
     GET_DEEP_HISTORY,
     MICRO_HISTORY_LIMIT,
     DEEP_HISTORY_LIMIT,
+    DEEP_HISTORY_DETAIL_LIMIT,
     MICRO_RECENT_WINDOW,
     MICRO_CONTEXT_WINDOW,
     MICRO_HISTORY_WINDOWS,
+    resolve_deep_history_limit,
+    resolve_deep_history_detail_limit,
     FIXTURE_IDS_BATCH_SIZE,
     COMPLETED_STATUSES,
     FUTURE_STATUSES,
@@ -843,7 +846,14 @@ class JSONCache:
             return CACHE_TTL_FIXTURE_IDS
         return CACHE_TTL_DEFAULT
 
-    def get(self, endpoint: str, params: dict[str, Any]) -> Optional[dict[str, Any]]:
+    def get(
+        self,
+        endpoint: str,
+        params: dict[str, Any],
+        asof: Optional[datetime] = None,
+        *,
+        include_acquired: bool = False,
+    ) -> Optional[dict[str, Any]]:
         path = self._path(endpoint, params)
         if not path.exists():
             return None
@@ -851,14 +861,18 @@ class JSONCache:
             from prematch_cache_record import unpack_record
             with path.open("r", encoding="utf-8") as file:
                 data, acquired = unpack_record(json.load(file))
-            age = (datetime.now(timezone.utc) - acquired).total_seconds()
+            age = ((asof or datetime.now(timezone.utc)) - acquired).total_seconds()
         except Exception:
             return None
 
         ttl = self.ttl_for(endpoint, params)
         if isinstance(data, dict) and data.get("response") == []:
             ttl = min(ttl, CACHE_TTL_EMPTY)  # las respuestas vacías caducan rápido
-        return data if 0 <= age <= ttl else None
+        if not (0 <= age <= ttl):
+            return None
+        if asof is not None or include_acquired:
+            return dict(data, _acquired_at_utc=acquired.isoformat())
+        return data
 
     def set(self, endpoint: str, params: dict[str, Any], data: dict[str, Any]) -> None:
         path = self._path(endpoint, params)
@@ -867,6 +881,8 @@ class JSONCache:
         self.directory.mkdir(parents=True, exist_ok=True)
         with tmp_path.open("w", encoding="utf-8") as file:
             json.dump(acquisition_record(data), file, ensure_ascii=False, indent=2)
+        from prematch_cache_record import preserve_cache_version
+        preserve_cache_version(path)
         tmp_path.replace(path)
 
 
@@ -976,7 +992,8 @@ API_RATE_LIMITER = SharedAPIRateLimiter()
 
 
 class APIFootballClient:
-    def __init__(self, api_key: str, cache_enabled: bool = True) -> None:
+    def __init__(self, api_key: str, cache_enabled: bool = True, asof: Optional[datetime] = None) -> None:
+        self.asof = asof
         if not api_key:
             raise RuntimeError("No se encontró FOOTBALL_API_KEY.")
         self.api_key = api_key
@@ -1025,19 +1042,23 @@ class APIFootballClient:
             endpoint: str,
             params: Optional[dict[str, Any]] = None,
             use_cache: Optional[bool] = None,
+            asof: Optional[datetime] = None,
     ) -> dict[str, Any]:
         params = params or {}
+        asof = asof or self.asof
         if use_cache is None:
             use_cache = self.cache_enabled
 
         if use_cache:
-            cached = CACHE.get(endpoint, params)
+            cached = CACHE.get(endpoint, params, asof=asof, include_acquired=True)
             if cached is not None:
                 with self._lock:
                     self.cache_hits += 1
                 LOG.debug(f"CACHE HIT /{endpoint} {params}")
                 return cached
 
+        if asof is not None:
+            raise ValueError('FROZEN_ASOF_REQUIRES_VERIFIED_PRIOR_CACHE')
         url = f"{FOOTBALL_BASE_URL.rstrip('/')}/{endpoint.lstrip('/')}"
         last_error: Optional[str] = None
         for attempt in range(1, MAX_RETRIES + 1):
@@ -1088,7 +1109,7 @@ class APIFootballClient:
                     from prematch_cache_record import store_acquisition
                     acquired_path = store_acquisition(CACHE_DIR / 'acquisitions' / 'fixtures_lineups', data)
                     LOG.info(f'XI acquisition record: {acquired_path}')
-                return data
+                return dict(data, _acquired_at_utc=datetime.now(timezone.utc).isoformat())
 
             except requests.RequestException as exc:
                 last_error = str(exc)
@@ -1189,11 +1210,13 @@ class BwinParser:
             home_gender = away_gender = 'female'
 
         event_date_utc = bwin_event_datetime_utc(html, event_id)
-        visible = browser_event_datetime_utc(browser_catalog or [], event_id)
-        if visible is not None:
+        visible_info = resolve_browser_event_kickoff(browser_catalog or [], event_id)
+        visible = visible_info['kickoff_utc'] if visible_info else None
+        if visible_info is not None:
             if len(_structured_bwin_event_datetimes(html or '', event_id)) > 1:
                 raise ValueError('BWIN_KICKOFF_CONFLICT: ambiguous structured event times')
-            if event_date_utc is not None and event_date_utc != visible:
+            tol_sec = float(visible_info.get('tolerance_minutes') or 3) * 60.0
+            if event_date_utc is not None and abs((event_date_utc - visible).total_seconds()) > tol_sec:
                 raise ValueError('BWIN_KICKOFF_CONFLICT: structured and visible event times disagree')
             event_date_utc = visible
         if event_date_utc is not None:
@@ -1226,12 +1249,26 @@ class BwinParser:
             # parse_date() la normaliza a UTC antes de cualquier comparación.
             event_date=(event_date_utc.astimezone(MADRID_TZ).isoformat()
                          if event_date_utc else None),
-            temporal_identity_evidence=({'schema_version':'1.0-browser-event-time',
-                'source':'SINGLE_EVENT_TILE', 'timezone':'Europe/Madrid',
-                'kickoff_utc':visible.isoformat(),
-                'catalog_observations':[r for r in browser_catalog or []
-                                        if str(r.get('bwin_event_id'))==str(event_id)]}
-                if visible is not None else None),
+            temporal_identity_evidence=({
+                'schema_version': '1.1-browser-event-time',
+                'source': 'SINGLE_EVENT_TILE',
+                'method': visible_info['method'],
+                'timezone': 'Europe/Madrid',
+                'bwin_event_id': str(event_id),
+                'bwin_url': url,
+                'observed_at_utc': visible_info['observed_at_utc'],
+                'raw_text': visible_info['raw_text'],
+                'countdown_minutes': visible_info['countdown_minutes'],
+                'tolerance_minutes': visible_info['tolerance_minutes'],
+                'kickoff_utc': visible.isoformat(),
+                'metadata_json_path': visible_info.get('metadata_json_path'),
+                'metadata_json_sha256': visible_info.get('metadata_json_sha256'),
+                'metadata_html_sha256': visible_info.get('metadata_html_sha256'),
+                'catalog_observations': [
+                    r for r in (browser_catalog or [])
+                    if str(r.get('bwin_event_id')) == str(event_id)
+                ],
+            } if visible_info is not None else None),
         )
 
     def _extract_teams_from_html(self, html: Optional[str], slug: str) -> tuple[str, str]:
@@ -1280,36 +1317,131 @@ class BwinParser:
         return slug.replace("-", " "), "Rival"
 
 
-def browser_event_datetime_utc(catalog, event_id):
-    """Use only timestamped, single-event tiles from a Madrid browser context."""
-    from bwin_market_preflight import CATALOG_TIME_RE, LIVE_RE, published_event_id
-    found = set()
-    for row in catalog:
+COUNTDOWN_RE = re.compile(
+    r"\b(?:comienza|empieza)\s+en\s+(?:(?P<h>\d{1,2})\s*h(?:oras?)?\s*)?(?P<m>\d{1,3})\s*min(?:utos?)?\b",
+    re.I,
+)
+
+
+def resolve_browser_event_kickoff(
+    catalog,
+    event_id,
+    *,
+    max_countdown_minutes: int = 180,
+    countdown_tolerance_minutes: int = 4,
+):
+    """Resolve event kickoff from timestamped SINGLE_EVENT_TILE rows in Europe/Madrid.
+
+    Supports Hoy/Mañana clocks, dated clocks (DD/MM/YY HH:MM), and relative
+    countdowns ("Comienza en N min") with strict provenance and conflict checks.
+    Never invents Bwin kickoff from API-Football.
+    """
+    from bwin_market_preflight import CATALOG_ABS_RE, CATALOG_TIME_RE, LIVE_RE, published_event_id
+
+    candidates = []
+    for row in catalog or []:
         if (str(row.get('bwin_event_id')) != str(event_id)
                 or published_event_id(row.get('bwin_url')) != str(event_id)
                 or row.get('text_source') != 'SINGLE_EVENT_TILE'
                 or row.get('browser_timezone') != 'Europe/Madrid'):
             continue
-        text = row.get('text', '')
+        text = str(row.get('text') or '')
         observed = parse_date(row.get('text_observed_at_utc'))
+        if LIVE_RE.search(text) or not observed or observed.tzinfo is None:
+            continue
+
         times = list(CATALOG_TIME_RE.finditer(text))
-        if LIVE_RE.search(text) or not observed or len(times) != 1:
+        abs_hits = list(CATALOG_ABS_RE.finditer(text))
+        cd_hits = list(COUNTDOWN_RE.finditer(text))
+
+        # Reject ambiguous tiles mixing multiple distinct temporal expressions
+        total_patterns = int(bool(times)) + int(bool(abs_hits)) + int(bool(cd_hits))
+        if total_patterns != 1:
             continue
-        # The capture timestamp, never the API kickoff, anchors Hoy/Mañana.
+
         local = observed.astimezone(MADRID_TZ)
-        hit = times[0]
-        day = local.date() + timedelta(days=int(hit[1].lower().startswith('ma')))
-        try:
-            value = datetime(day.year, day.month, day.day, int(hit[2]), int(hit[3]), tzinfo=MADRID_TZ)
-        except ValueError:
+        value = None
+        method = None
+        countdown_mins = None
+        tolerance_mins = 3
+
+        if len(times) == 1:
+            hit = times[0]
+            day = local.date() + timedelta(days=int(hit[1].lower().startswith('ma')))
+            try:
+                value = datetime(day.year, day.month, day.day, int(hit[2]), int(hit[3]), tzinfo=MADRID_TZ)
+            except ValueError:
+                continue
+            if value.replace(fold=0).utcoffset() != value.replace(fold=1).utcoffset():
+                continue
+            method = 'BWIN_VISIBLE_HOY_MANANA_TIME'
+        elif len(abs_hits) == 1:
+            day_i, mon_i, year_i, h_i, m_i = map(int, abs_hits[0].groups())
+            if year_i < 100:
+                year_i += 2000
+            try:
+                value = datetime(year_i, mon_i, day_i, h_i, m_i, tzinfo=MADRID_TZ)
+            except ValueError:
+                continue
+            if value.replace(fold=0).utcoffset() != value.replace(fold=1).utcoffset():
+                continue
+            method = 'BWIN_VISIBLE_DATED_TIME'
+        elif len(cd_hits) == 1:
+            hit = cd_hits[0]
+            hours = int(hit.group('h') or 0)
+            mins = int(hit.group('m'))
+            countdown_mins = hours * 60 + mins
+            if countdown_mins <= 0 or countdown_mins > max_countdown_minutes:
+                continue
+            value = observed.astimezone(timezone.utc) + timedelta(minutes=countdown_mins)
+            method = 'BWIN_EVENT_COUNTDOWN_MINUTES'
+            tolerance_mins = countdown_tolerance_minutes
+        else:
             continue
-        found.add(value.astimezone(timezone.utc))
-        LOG.info(f'BWIN_KICKOFF_CANDIDATE source=SINGLE_EVENT_TILE event_id={event_id} raw={text!r} observed={observed.isoformat()} timezone=Europe/Madrid utc={value.astimezone(timezone.utc).isoformat()}')
-    if len(found) != 1:
-        if len(found) > 1:
-            raise ValueError('BWIN_KICKOFF_CONFLICT: multiple visible times for one Event ID')
+
+        utc_val = value.astimezone(timezone.utc)
+        candidates.append({
+            'kickoff_utc': utc_val,
+            'method': method,
+            'observed_at_utc': observed.astimezone(timezone.utc).isoformat(),
+            'raw_text': text[:240],
+            'countdown_minutes': countdown_mins,
+            'tolerance_minutes': tolerance_mins,
+            'metadata_json_path': row.get('metadata_json_path'),
+            'metadata_json_sha256': row.get('metadata_json_sha256'),
+            'metadata_html_sha256': row.get('metadata_html_sha256'),
+        })
+        LOG.info(
+            f'BWIN_KICKOFF_CANDIDATE source=SINGLE_EVENT_TILE method={method} '
+            f'event_id={event_id} raw={text!r} observed={observed.isoformat()} '
+            f'timezone=Europe/Madrid utc={utc_val.isoformat()}'
+        )
+
+    if not candidates:
         return None
-    return next(iter(found))
+
+    # Contradiction detection across multiple observations of the same event_id
+    for i in range(len(candidates)):
+        for j in range(i + 1, len(candidates)):
+            a, b = candidates[i], candidates[j]
+            diff_sec = abs((a['kickoff_utc'] - b['kickoff_utc']).total_seconds())
+            if a['countdown_minutes'] is None and b['countdown_minutes'] is None:
+                if diff_sec > 0:
+                    raise ValueError('BWIN_KICKOFF_CONFLICT: multiple visible times for one Event ID')
+            else:
+                tol = max(a['tolerance_minutes'], b['tolerance_minutes']) * 60.0
+                if diff_sec > tol:
+                    raise ValueError('BWIN_KICKOFF_CONFLICT: multiple visible times for one Event ID')
+
+    # Prefer exact calendar clock if corroborated, otherwise latest countdown observation
+    candidates.sort(key=lambda c: (c['countdown_minutes'] is not None, c['observed_at_utc']))
+    return candidates[0]
+
+
+def browser_event_datetime_utc(catalog, event_id):
+    """Use only timestamped, single-event tiles from a Madrid browser context."""
+    info = resolve_browser_event_kickoff(catalog, event_id)
+    return info['kickoff_utc'] if info else None
 
 
 def fetch_bwin_html(url: str, *, catalog_out=None) -> str:
@@ -1330,8 +1462,17 @@ def fetch_bwin_html(url: str, *, catalog_out=None) -> str:
                 output = context_output_dir()
                 output.mkdir(parents=True, exist_ok=True)
                 stamp = datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%S%fZ')
-                (output / f'bwin_metadata_{stamp}.html').write_text(html, encoding='utf-8')
-                (output / f'bwin_metadata_{stamp}.json').write_text(json.dumps(catalog_out, ensure_ascii=False, indent=2), encoding='utf-8')
+                html_path = output / f'bwin_metadata_{stamp}.html'
+                json_path = output / f'bwin_metadata_{stamp}.json'
+                html_path.write_text(html, encoding='utf-8')
+                json_path.write_text(json.dumps(catalog_out, ensure_ascii=False, indent=2), encoding='utf-8')
+                html_sha = hashlib.sha256(html_path.read_bytes()).hexdigest()
+                json_sha = hashlib.sha256(json_path.read_bytes()).hexdigest()
+                for row in catalog_out:
+                    if isinstance(row, dict):
+                        row['metadata_json_path'] = str(json_path.resolve())
+                        row['metadata_json_sha256'] = json_sha
+                        row['metadata_html_sha256'] = html_sha
             browser.close()
             # No modificar HTML globalmente: las colas de competición se
             # recortan solo del nombre extraído en clean_team_name().
@@ -2125,45 +2266,116 @@ class DeepHistoryCollector:
     def __init__(self, api: APIFootballClient) -> None:
         self.api = api
 
-    def collect_team_history(self, team: APITeam, limit: int) -> dict[str, Any]:
-        LOG.info(f"Construyendo historial profundo de {team.name}...")
+    def collect_team_history(
+        self,
+        team: APITeam,
+        limit: int,
+        asof: Optional[datetime] = None,
+        *,
+        detail_limit: Optional[int] = None,
+    ) -> dict[str, Any]:
+        asof = asof or getattr(self.api, "asof", None)
+        eff_limit = max(1, min(20, int(limit)))
+        eff_detail = eff_limit if detail_limit is None else max(0, min(eff_limit, int(detail_limit)))
+        LOG.info(f"Construyendo historial profundo de {team.name} (limit={eff_limit}, detail_limit={eff_detail})...")
 
-        basic_data = self.api.get("fixtures", {"team": team.id, "last": limit})
+        basic_data = (
+            self.api.get("fixtures", {"team": team.id, "last": eff_limit}, asof=asof)
+            if asof is not None
+            else self.api.get("fixtures", {"team": team.id, "last": eff_limit})
+        )
+        cutoff = asof or datetime.now(timezone.utc)
+        from prematch_cache_record import historical_available, acquisition_before
+
+        if asof is not None and not acquisition_before(basic_data.get("_acquired_at_utc"), cutoff):
+            raise ValueError("HISTORY_ACQUISITION_UNVERIFIED_OR_AFTER_CUTOFF")
         basic_fixtures = basic_data.get("response", []) or []
 
         def fid(item: dict[str, Any]) -> Any:
             return (item.get("fixture", {}) or {}).get("id")
 
         historical = [
-            it for it in basic_fixtures
-            if fid(it) and (it["fixture"].get("status", {}) or {}).get("short") in COMPLETED_STATUSES
+            it
+            for it in basic_fixtures
+            if fid(it)
+            and historical_available(it, cutoff)
+            and (it["fixture"].get("status", {}) or {}).get("short") in COMPLETED_STATUSES
         ]
-        if not historical:
-            historical = [it for it in basic_fixtures if fid(it)]
+        historical.sort(key=lambda it: (it.get("fixture", {}) or {}).get("date") or "", reverse=True)
 
-        fixture_ids = list(dict.fromkeys(int(fid(it)) for it in historical))
-        LOG.ok(f"{team.name}: {len(fixture_ids)} IDs históricos seleccionados.")
+        dedup_basic: dict[int, dict[str, Any]] = {}
+        fixture_ids: list[int] = []
+        for it in historical:
+            f_val = int(fid(it))
+            if f_val not in dedup_basic:
+                dedup_basic[f_val] = it
+                fixture_ids.append(f_val)
+            if len(fixture_ids) >= eff_limit:
+                break
 
-        detailed: list[dict[str, Any]] = []
-        batches = chunked(fixture_ids, FIXTURE_IDS_BATCH_SIZE)
+        detail_target_ids = fixture_ids[:eff_detail]
+        LOG.ok(
+            f"{team.name}: {len(fixture_ids)} IDs históricos seleccionados "
+            f"({len(detail_target_ids)} con detalle completo solicitado)."
+        )
+
+        detailed_by_id: dict[int, dict[str, Any]] = {}
+        batches = chunked(detail_target_ids, FIXTURE_IDS_BATCH_SIZE)
 
         for index, batch in enumerate(batches, start=1):
             LOG.debug(f"{team.name}: detalle histórico batch {index}/{len(batches)} ({len(batch)} fixtures)")
-            data = self.api.get("fixtures", {"ids": "-".join(str(v) for v in batch)})
-            response = data.get("response", []) or []
-            detailed.extend(response)
+            params = {"ids": "-".join(str(v) for v in batch)}
+            data = self.api.get("fixtures", params, asof=asof) if asof is not None else self.api.get("fixtures", params)
+            if asof is not None and not acquisition_before(data.get("_acquired_at_utc"), cutoff):
+                raise ValueError("HISTORY_DETAIL_AFTER_CUTOFF")
+            response = [
+                r
+                for r in data.get("response", []) or []
+                if fid(r) in batch
+                and historical_available(r, cutoff)
+                and (r.get("fixture", {}).get("status") or {}).get("short") in COMPLETED_STATUSES
+            ]
+            for r in response:
+                rfid = int(fid(r))
+                if rfid not in detailed_by_id:
+                    detailed_by_id[rfid] = r
             LOG.debug(f"{team.name}: batch {index} -> {len(response)} fixtures detallados.")
 
-        detailed.sort(key=lambda it: (it.get("fixture", {}) or {}).get("date") or "", reverse=True)
+        # Conservar fixtures básicos restantes (solo marcador/competición/fecha) cuando detail_limit < limit
+        # o cuando un batch devuelva parcial, diferenciando estadísticas completas vs parciales sin inventar partidos.
+        combined_fixtures: list[dict[str, Any]] = []
+        complete_stats_count = 0
+        partial_or_score_only_count = 0
+        for f_val in fixture_ids:
+            row = detailed_by_id.get(f_val)
+            if row is None:
+                row = dict(dedup_basic[f_val])
+                row["_history_detail_tier"] = "SCORE_ONLY_NO_STATS"
+                partial_or_score_only_count += 1
+            else:
+                has_stats = bool(row.get("statistics"))
+                row_copy = dict(row)
+                row_copy["_history_detail_tier"] = "COMPLETE_DETAILED" if has_stats else "SCORE_ONLY_NO_STATS"
+                row = row_copy
+                if has_stats:
+                    complete_stats_count += 1
+                else:
+                    partial_or_score_only_count += 1
+            combined_fixtures.append(row)
+
+        combined_fixtures.sort(key=lambda it: (it.get("fixture", {}) or {}).get("date") or "", reverse=True)
 
         return {
             "team": asdict(team),
-            "requested_limit": limit,
+            "requested_limit": eff_limit,
+            "requested_detail_limit": eff_detail,
             "basic_fixtures_count": len(basic_fixtures),
-            "completed_fixtures_count": len(historical),
+            "completed_fixtures_count": len(fixture_ids),
+            "complete_stats_count": complete_stats_count,
+            "partial_or_score_only_count": partial_or_score_only_count,
             "fixture_ids": fixture_ids,
             "batches": len(batches),
-            "detailed_fixtures": detailed,
+            "detailed_fixtures": combined_fixtures,
         }
 
 
@@ -2492,10 +2704,20 @@ class RefereeHistoryCollector:
 
 class ContextCollector:
 
-    def __init__(self, api: APIFootballClient) -> None:
+    def __init__(
+        self,
+        api: APIFootballClient,
+        *,
+        history_limit: Optional[int] = None,
+        detail_limit: Optional[int] = None,
+    ) -> None:
         self.api = api
         self.history = DeepHistoryCollector(api)
         self.referee_history = RefereeHistoryCollector(api)
+        self.history_limit = resolve_deep_history_limit(history_limit)
+        self.detail_limit = resolve_deep_history_detail_limit(
+            detail_limit, history_limit=self.history_limit
+        )
 
     def _safe_get(self, label: str, endpoint: str, params: dict[str, Any]) -> dict[str, Any]:
         try:
@@ -2517,9 +2739,25 @@ class ContextCollector:
             futures = {key: pool.submit(self._guard, key, fn) for key, fn in tasks.items()}
             return {key: future.result() for key, future in futures.items()}  # orden estable
 
-    def collect(self, fixture: ResolvedFixture, home_team: APITeam, away_team: APITeam) -> dict[str, Any]:
+    def collect(
+        self,
+        fixture: ResolvedFixture,
+        home_team: APITeam,
+        away_team: APITeam,
+        *,
+        history_limit: Optional[int] = None,
+        detail_limit: Optional[int] = None,
+    ) -> dict[str, Any]:
         fixture_id = fixture.fixture_id
-        LOG.info(f"Recolectando contexto profundo del fixture {fixture_id}...")
+        eff_history_limit = resolve_deep_history_limit(
+            history_limit if history_limit is not None else self.history_limit
+        )
+        eff_detail_limit = (
+            resolve_deep_history_detail_limit(detail_limit, history_limit=eff_history_limit)
+            if detail_limit is not None
+            else (min(eff_history_limit, self.detail_limit) if self.detail_limit is not None else None)
+        )
+        LOG.info(f"Recolectando contexto profundo del fixture {fixture_id} (history_limit={eff_history_limit})...")
 
         sides = (("home", home_team), ("away", away_team))
         get = self._safe_get
@@ -2532,7 +2770,11 @@ class ContextCollector:
             if GET_DEEP_HISTORY:
                 for side, team in sides:
                     tasks[f"{side}_history_deep"] = partial(
-                        self.history.collect_team_history, team, DEEP_HISTORY_LIMIT)
+                        self.history.collect_team_history,
+                        team,
+                        eff_history_limit,
+                        detail_limit=eff_detail_limit,
+                    )
             else:
                 for side, team in sides:
                     tasks[f"{side}_last_10"] = partial(
@@ -2597,9 +2839,14 @@ class ContextCollector:
         context: dict[str, Any] = {
             "meta": {
                 "generator_version": VERSION,
+                "context_depth_schema": "2.1A",
                 "generated_at": datetime.now(timezone.utc).isoformat(),
                 "deep_history_enabled": GET_DEEP_HISTORY,
-                "history_limit": DEEP_HISTORY_LIMIT,
+                "deep_history_limit": DEEP_HISTORY_LIMIT,
+                "deep_history_detail_limit": DEEP_HISTORY_DETAIL_LIMIT,
+                "history_limit": eff_history_limit,
+                "detail_limit": eff_detail_limit if eff_detail_limit is not None else eff_history_limit,
+                "legacy_txt_limit": MICRO_HISTORY_LIMIT,
                 "fixture_ids_batch_size": FIXTURE_IDS_BATCH_SIZE,
             },
             "fixture": asdict(fixture),
@@ -2955,6 +3202,7 @@ class MicroHistoryFormatter:
                              }
         ]
         fixtures.sort(key=lambda x: x.get("fixture", {}).get("date") or "", reverse=True)
+        all_count = len(fixtures)
         fixtures = fixtures[:MICRO_HISTORY_LIMIT]
         records = [cls._match_record(item, team, i) for i, item in enumerate(fixtures, 1)]
 
@@ -2964,6 +3212,11 @@ class MicroHistoryFormatter:
             f"MICROCONTEXTO HISTÓRICO — {team.name}",
             "#" * 100,
             f"Partidos utilizados: {len(records)}",
+            *(
+                [f"Partidos adicionales en JSON histórico: {all_count - len(records)} (total={all_count})"]
+                if all_count > len(records)
+                else []
+            ),
             "Regla: P-1 = último partido; P-2/P-3 = contexto reciente; P-4..P-6 = contexto evolutivo.",
             "Todos los jugadores disponibles en la API se conservan por fixture.",
             "",
@@ -4681,6 +4934,177 @@ def verify_initial_pair_fixture(match: BwinMatch, home: APITeam, away: APITeam,
 # =============================================================================
 
 
+def _load_persisted_category_evidence(selected: dict, fid: int) -> tuple[Optional[dict], Optional[str]]:
+    """Recupera evidencia de categoría sénior corroborada previamente (selección o preselección)."""
+    def _extract_from_doc(doc: dict, origin: str) -> tuple[Optional[dict], Optional[str]]:
+        if not isinstance(doc, dict):
+            return None, None
+        nte = doc.get('national_team_evidence')
+        if isinstance(nte, dict) and nte.get('source') and nte.get('level') == 'SENIOR' and nte.get('gender') in ('M', 'F'):
+            return dict(nte), origin
+        prov = doc.get('category_provenance')
+        if (
+            isinstance(prov, dict)
+            and doc.get('category_evidence_status') == 'CORROBORATED'
+            and doc.get('category_level') == 'SENIOR'
+        ):
+            fev = prov.get('fixture_evidence')
+            if isinstance(fev, dict) and fev.get('source') and fev.get('level') == 'SENIOR' and fev.get('gender') in ('M', 'F'):
+                return dict(fev), origin
+        return None, None
+
+    ev, origin = _extract_from_doc(selected, 'selected_match')
+    if ev is not None:
+        return ev, origin
+
+    handoff_raw = selected.get('source_handoff')
+    if not handoff_raw:
+        return None, None
+    handoff_path = Path(str(handoff_raw))
+    if not handoff_path.is_file():
+        return None, None
+    try:
+        handoff_doc = json.loads(handoff_path.read_text(encoding='utf-8-sig'))
+    except (OSError, json.JSONDecodeError):
+        return None, None
+    pre_raw = handoff_doc.get('preselection_path') or ((handoff_doc.get('preselection') or {}).get('path') if isinstance(handoff_doc.get('preselection'), dict) else None)
+    if not pre_raw:
+        return None, None
+    pre_path = Path(str(pre_raw))
+    if not pre_path.is_file():
+        return None, None
+    try:
+        pre_doc = json.loads(pre_path.read_text(encoding='utf-8-sig'))
+    except (OSError, json.JSONDecodeError):
+        return None, None
+    for row in pre_doc.get('matches') or []:
+        if not isinstance(row, dict):
+            continue
+        try:
+            row_fid = int(row.get('fixture_id') or 0)
+        except (TypeError, ValueError):
+            continue
+        if row_fid != fid:
+            continue
+        if (
+            row.get('home_id') != selected.get('home_api_id')
+            or row.get('away_id') != selected.get('away_api_id')
+            or str(row.get('league_id')) != str(selected.get('league_id'))
+            or str(row.get('season')) != str(selected.get('season'))
+        ):
+            continue
+        ev, origin = _extract_from_doc(row, 'preselection')
+        if ev is not None:
+            return ev, origin
+    return None, None
+
+
+def resolve_selected_fixture(match, api, ctx, fixture_id=None):
+    """Resolve by pinned IDs, never by a second nominal team search.
+
+    The caller validates the selected temporal/source contract first. A provider
+    conflict is terminal; falling back to fuzzy search would change the event.
+    """
+    selected = ctx['selection']
+    fid = int(fixture_id or ctx['fixture_id'])
+    if fid != ctx['fixture_id']:
+        raise ValueError('EXPLICIT_FIXTURE_SELECTION_CONFLICT')
+    required = ('home_api_id', 'away_api_id', 'league_id', 'season')
+    if any(selected.get(k) is None for k in required):
+        raise ValueError('PINNED_FIXTURE_METADATA_MISSING')
+    payload = api.get('fixtures', {'id': fid}, use_cache=False)
+    rows = payload.get('response') or []
+    if payload.get('errors') or len(rows) != 1:
+        raise ValueError('PINNED_FIXTURE_RESPONSE_NOT_UNIQUE')
+    row = rows[0]; teams = row.get('teams') or {}; league = row.get('league') or {}
+    if (row.get('fixture') or {}).get('id') != fid:
+        raise ValueError('PINNED_FIXTURE_ID_CONFLICT')
+    for side in ('home', 'away'):
+        if (teams.get(side) or {}).get('id') != selected[side + '_api_id']:
+            raise ValueError('PINNED_FIXTURE_TEAM_ORDER_CONFLICT: ' + side)
+    for field in ('league_id', 'season'):
+        if str(league.get('id' if field == 'league_id' else field)) != str(selected[field]):
+            raise ValueError('PINNED_FIXTURE_COMPETITION_CONFLICT: ' + field)
+    from competition_registry import _NON_SENIOR_ROUND_RE, _norm_team_base, category, lookup
+    from filter_major_leagues import RESERVE_TEAM_PATTERN, YOUTH_PATTERN
+
+    home_api_name = (teams.get('home') or {}).get('name') or ''
+    away_api_name = (teams.get('away') or {}).get('name') or ''
+    round_name = str(league.get('round') or '')
+    for side_name in (home_api_name, away_api_name):
+        if YOUTH_PATTERN.search(side_name) or RESERVE_TEAM_PATTERN.search(side_name):
+            raise ValueError('PINNED_FIXTURE_NON_SENIOR_TEAM_CONFLICT')
+    if round_name and _NON_SENIOR_ROUND_RE.search(round_name):
+        raise ValueError('PINNED_FIXTURE_CATEGORY_UNCORROBORATED: NON_SENIOR_ROUND')
+
+    category_row = {
+        'league_id': league.get('id'),
+        'league': league.get('name'),
+        'country': league.get('country'),
+        'season': league.get('season'),
+        'round': round_name,
+        'home': home_api_name,
+        'away': away_api_name,
+    }
+    classification = category(category_row)
+    persisted_ev, persisted_origin = _load_persisted_category_evidence(selected, fid)
+
+    if classification and persisted_ev:
+        if persisted_ev.get('level') != classification.get('category_level') or persisted_ev.get('gender') != classification.get('gender'):
+            raise ValueError('PINNED_FIXTURE_CATEGORY_CONFLICT: PERSISTED_EVIDENCE_MISMATCH')
+        if persisted_ev.get('home_canonical') and persisted_ev['home_canonical'] != _norm_team_base(home_api_name):
+            raise ValueError('PINNED_FIXTURE_CATEGORY_CONFLICT: PERSISTED_HOME_MISMATCH')
+        if persisted_ev.get('away_canonical') and persisted_ev['away_canonical'] != _norm_team_base(away_api_name):
+            raise ValueError('PINNED_FIXTURE_CATEGORY_CONFLICT: PERSISTED_AWAY_MISMATCH')
+    elif not classification and persisted_ev:
+        if persisted_ev.get('home_canonical') and persisted_ev['home_canonical'] != _norm_team_base(home_api_name):
+            raise ValueError('PINNED_FIXTURE_CATEGORY_CONFLICT: PERSISTED_HOME_MISMATCH')
+        if persisted_ev.get('away_canonical') and persisted_ev['away_canonical'] != _norm_team_base(away_api_name):
+            raise ValueError('PINNED_FIXTURE_CATEGORY_CONFLICT: PERSISTED_AWAY_MISMATCH')
+        classification = category({**category_row, 'national_team_evidence': persisted_ev})
+
+    gender = classification.get('gender')
+    if gender not in ('M', 'F') or classification.get('category_level') != 'SENIOR':
+        reg_entry = lookup(category_row)
+        if not reg_entry:
+            diag = 'UNKNOWN_COMPETITION'
+        elif reg_entry.get('type') == 'NATIONAL_FRIENDLY':
+            diag = 'NATIONAL_FRIENDLY_TEAMS_UNCORROBORATED'
+        else:
+            diag = 'COMPETITION_CATEGORY_NOT_SENIOR'
+        raise ValueError(f'PINNED_FIXTURE_CATEGORY_UNCORROBORATED: {diag}')
+    if selected.get('gender') not in (None, 'UNKNOWN', gender):
+        raise ValueError('PINNED_FIXTURE_CATEGORY_CONFLICT')
+    for side in ('home', 'away'):
+        name = teams[side].get('name') or ''
+        if detect_gender(name) == 'female' and gender != 'F':
+            raise ValueError('PINNED_FIXTURE_CATEGORY_CONFLICT')
+    prov = classification.get('category_provenance') or {}
+    prov_source = (prov.get('fixture_evidence') or {}).get('source') or prov.get('method') or 'COMPETITION_REGISTRY'
+    if persisted_origin:
+        prov_source = f'{prov_source}+{persisted_origin}'
+    LOG.info(f"PINNED_CATEGORY_CORROBORATED fixture={fid} gender={gender} level={classification.get('category_level')} source={prov_source}")
+    when = parse_date((row.get('fixture') or {}).get('date'))
+    if when is None or abs((when - ctx['kickoff']).total_seconds()) > 180:
+        raise ValueError('PINNED_FIXTURE_KICKOFF_CONFLICT')
+    ok, status, reason, _ = fixture_temporal_eligibility(match, row)
+    if not ok:
+        raise ValueError('PINNED_FIXTURE_TEMPORAL_BLOCK: ' + reason)
+    match.verified_fixture_id = fid; match.identity_status = status
+    result = []
+    for side in ('home', 'away'):
+        team = parse_api_team({'team': teams[side]}, gender=gender)
+        if team is None:
+            raise ValueError('PINNED_FIXTURE_TEAM_DATA_MISSING')
+        setattr(match, side + '_name_raw', team.name)
+        setattr(match, side + '_name', team.name)
+        setattr(match, side + '_gender', gender)
+        result.append(team)
+    LOG.ok(f'IDENTITY_ORIGIN=VERIFIED_SELECTION_API_FIXTURE fixture={fid} '
+           f'home={result[0].id} away={result[1].id}')
+    return tuple(result)
+
+
 def main() -> int:
     from prematch_execution_control import require_external_confirmation
     try:require_external_confirmation('--confirm-external' in sys.argv[1:])
@@ -4702,6 +5126,36 @@ def main() -> int:
         LOG.warn("Modo --force detectado: se ignorará el caché y se consultará la API en vivo.")
         sys.argv.remove("--force")
 
+    def _pop_cli_int_flag(flag: str) -> Optional[int]:
+        raw_val: Optional[str] = None
+        cleaned = [sys.argv[0]]
+        skip_next = False
+        for idx, tok in enumerate(sys.argv[1:], 1):
+            if skip_next:
+                skip_next = False
+                continue
+            if tok == flag:
+                if idx + 1 >= len(sys.argv):
+                    raise ValueError(f"MISSING_FLAG_VALUE:{flag}")
+                raw_val = sys.argv[idx + 1]
+                skip_next = True
+                continue
+            if tok.startswith(f"{flag}="):
+                raw_val = tok.split("=", 1)[1]
+                continue
+            cleaned.append(tok)
+        sys.argv[:] = cleaned
+        return int(raw_val) if raw_val is not None else None
+
+    try:
+        req_history_limit = _pop_cli_int_flag("--history-limit")
+        req_detail_limit = _pop_cli_int_flag("--history-detail-limit")
+        history_limit = resolve_deep_history_limit(req_history_limit)
+        detail_limit = resolve_deep_history_detail_limit(req_detail_limit, history_limit=history_limit)
+    except ValueError as exc:
+        LOG.error(f"Parámetro histórico inválido: {exc}")
+        return 2
+
     if len(sys.argv) > 1:
         bwin_url = sys.argv[1].strip()
         LOG.info("URL recibida por argumento de consola.")
@@ -4716,24 +5170,47 @@ def main() -> int:
     contextual_resolver = ContextualTeamResolver(api)
     competition_discovery = CompetitionDiscovery(api)
     fixture_resolver = FixtureResolver(api)
-    context_collector = ContextCollector(api)
+    context_collector = ContextCollector(
+        api,
+        history_limit=history_limit,
+        detail_limit=detail_limit,
+    )
 
     # ---------------------------------------------------------------- Bwin
     html: Optional[str] = None
     browser_catalog = []
     try:
-        html = fetch_bwin_html(bwin_url, catalog_out=browser_catalog)
+        if not os.environ.get('PREMATCH_TEMPORAL_IDENTITY_SELECTED', '').strip():
+            html = fetch_bwin_html(bwin_url, catalog_out=browser_catalog)
     except Exception as exc:
         # Parche: el HTML solo aporta metadatos; los equipos salen de la URL.
         LOG.warn(f"No se pudo descargar el HTML de Bwin ({exc}). Se continúa solo con la URL.")
 
     try:
-        match = parser.parse(bwin_url, html, browser_catalog=browser_catalog)
+        pinned = os.environ.get('PREMATCH_TEMPORAL_IDENTITY_SELECTED', '').strip()
+        if pinned:
+            from prematch_single import load_context
+            from types import SimpleNamespace
+            pinned_ctx = load_context(SimpleNamespace(root=Path.cwd(), selected=Path(pinned), decision=None))
+            if bwin_url != pinned_ctx['url']: raise ValueError('PINNED_URL_CONFLICT')
+            match = BwinMatch(url=bwin_url, event_id=int(pinned_ctx['event_id']),
+                home_name_raw=pinned_ctx['home'], away_name_raw=pinned_ctx['away'],
+                home_name=pinned_ctx['home'], away_name=pinned_ctx['away'],
+                home_gender='UNKNOWN', away_gender='UNKNOWN')
+        else:
+            match = parser.parse(bwin_url, html, browser_catalog=browser_catalog)
     except Exception as exc:
         LOG.error(f"Error parseando Bwin: {exc}")
         return 1
 
     selected_contract=os.environ.get('PREMATCH_TEMPORAL_IDENTITY_SELECTED','').strip()
+    explicit_fixture = None
+    if '--fixture-id' in sys.argv:
+        try: explicit_fixture = int(sys.argv[sys.argv.index('--fixture-id') + 1])
+        except (IndexError, ValueError):
+            LOG.error('INVALID_EXPLICIT_FIXTURE_ID'); return 1
+        if not selected_contract:
+            LOG.error('EXPLICIT_FIXTURE_REQUIRES_VERIFIED_SELECTION'); return 1
     if selected_contract:
         try:
             from prematch_single import load_context, validate_temporal_identity_evidence
@@ -4767,7 +5244,12 @@ def main() -> int:
                           and not female_pair_from_slug(slug_match.group(1)))
     home_team: Optional[APITeam] = None
     away_team: Optional[APITeam] = None
-    if ambiguous_slug:
+    if selected_contract:
+        try:
+            home_team, away_team = resolve_selected_fixture(match, api, selected_ctx, explicit_fixture)
+        except Exception as exc:
+            LOG.error(f'PINNED_IDENTITY_REJECTED: {exc}'); return 1
+    elif ambiguous_slug:
         resolved = resolve_compound_slug(match, html, api)
         if resolved:
             home_team, away_team, true_home, true_away = resolved
@@ -4783,8 +5265,9 @@ def main() -> int:
 
     # Verificar SIEMPRE la pareja, incluso cuando /teams?search= devolvió dos
     # identidades nominalmente fuertes. Ese era el punto ciego de 5.7.8.
-    initial_pair_verified = bool(home_team is not None and away_team is not None
-                                 and verify_initial_pair_fixture(match, home_team, away_team, api))
+    initial_pair_verified = bool((selected_contract and match.verified_fixture_id) or
+                                (home_team is not None and away_team is not None
+                                 and verify_initial_pair_fixture(match, home_team, away_team, api)))
     if not initial_pair_verified:
         LOG.warn('La pareja inicial no quedó verificada: búsqueda por fixture y competición.')
         home_team, away_team = resolve_full_pair_from_competition_fixture(
@@ -4848,6 +5331,8 @@ def main() -> int:
     try:
         fixture = fixture_resolver.resolve(
             match, home_team, away_team, home_competitions, away_competitions)
+        if selected_contract and fixture.fixture_id != selected_ctx['fixture_id']:
+            raise ValueError('PINNED_FIXTURE_CHANGED_DURING_RESOLUTION')
     except Exception as exc:
         LOG.error(f"No se pudo resolver el fixture: {exc}")
         return 1
@@ -4880,6 +5365,20 @@ def main() -> int:
     if expected_dt.tzinfo is None:
         expected_dt = expected_dt.replace(tzinfo=timezone.utc)
     gap = (fixture_dt - expected_dt).total_seconds()
+    if match.event_date and isinstance(match.temporal_identity_evidence, dict):
+        tol_min = float(match.temporal_identity_evidence.get('tolerance_minutes') or 4)
+        diff_min = round(abs(gap) / 60.0, 2)
+        match.temporal_identity_evidence['api_kickoff_utc'] = fixture_dt.astimezone(timezone.utc).isoformat()
+        match.temporal_identity_evidence['difference_minutes'] = diff_min
+        if (match.temporal_identity_evidence.get('method') == 'BWIN_EVENT_COUNTDOWN_MINUTES'
+                and abs(gap) > tol_min * 60.0):
+            match.temporal_identity_evidence['corroborated'] = False
+            LOG.error(
+                f'BWIN_API_KICKOFF_CONFLICT: countdown Bwin difiere {diff_min:.2f} min '
+                f'del fixture API (tolerancia {tol_min:.0f} min).'
+            )
+            return 1
+        match.temporal_identity_evidence['corroborated'] = abs(gap) <= tol_min * 60.0
     if match.event_date and abs(gap) > 36 * 3600:
         LOG.error(f'FIXTURE_FECHA_INCORRECTA: diferencia {gap/3600:.1f} horas respecto a Bwin.')
         return 1

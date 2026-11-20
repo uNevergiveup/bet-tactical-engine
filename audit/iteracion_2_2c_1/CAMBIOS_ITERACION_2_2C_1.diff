@@ -1,0 +1,1471 @@
+# === ITERACION 2.2C.1 — ARCHIVOS MODIFICADOS / CREADOS (SHA-256) ===
+0701287568209ea1341f41193286ff93f66086f14b5a610e9d508fc55572cdbb  bet_engine/modeling/prospective_registry.py (46456 bytes)
+b451d130e947b427f675eb9f76e230303f20b1cc706ce7d6318a67762872e25f  tools/prospective_tracker.py (6352 bytes)
+17ba669f7dca3cc5900ce538e24e8ba1c3bbfb6fa52f17c356a3453048dd2f08  audit/iteracion_2_2b/MANIFEST_MODELOS_CONGELADOS.json (5081 bytes)
+0638a1e3b96a11892e96b24d4eb8853ff34157dd66b7715ba20de278fd25cd60  test/test_iteracion_2_2b_prospective_and_elo.py (9890 bytes)
+485ba4c8e4a5289444970288fe057172b0bb4a4e872408163cf575928ee8c6ef  test/test_iteracion_2_2c_registry_and_elo.py (16886 bytes)
+6008bdce222d088146b94e6feb0f41716ffa79b5fd01c07f6d7d363971b0f94a  test/test_iteracion_2_2c_1_fixes.py (17022 bytes)
+
+# === DIFFS RESPECTO A 2.2C / NUEVOS ARCHIVOS ===
+
+--- a/bet_engine/modeling/prospective_registry.py
++++ b/bet_engine/modeling/prospective_registry.py
+@@ -1,18 +1,18 @@
+-"""Registro prospectivo PREMATCH inmutable y evaluador pareado (Iteración 2.2B -> 2.2C).
++"""Registro prospectivo PREMATCH inmutable y evaluador pareado (Iteración 2.2B -> 2.2C.1).
+ 
+ Totalmente independiente de las decisiones accionables de Shadow en producción.
+ Garantiza:
+-1. Congelación de predicciones M0, M0_plus_Elo, M4 y M4_plus_Elo estrictamente antes del kickoff
+-   usando hora real de ejecución (now_utc < kickoff_utc), sin sustituirla por el corte del corpus.
+-2. Prohibición explícita de registros retrospectivos (now_utc >= kickoff_utc, cutoff_utc >= kickoff_utc,
+-   partidos ya iniciados/finalizados, o kickoffs <= fecha de corte del corpus de desarrollo).
+-3. Inmutabilidad estricta del archivo de registro pre_kickoff:
+-   - Ningún registro existente puede sobrescribirse silenciosamente.
+-   - `settle` escribe resultados y métricas en un archivo separado (`settlements/*.settlement.json`)
+-     sin modificar el archivo original del registro pre_kickoff.
+-4. Verificación de resultados contra fuente autorizada (`VERIFIED_AUTHORITATIVE`); los resultados
+-   manuales sin fuente autorizada se marcan `UNVERIFIED_RESULT` y los de test `SIMULATED_TEST_ONLY`,
+-   excluyéndose ambos de métricas acreditables.
++1. Conexión real as-of de AsOfEloTracker y team_ordered_by_id (SoS) para que M0, M0_plus_Elo,
++   M4 y M4_plus_Elo representen cuatro variantes funcionalmente distintas.
++2. Verificación estricta de identidad del fixture (IDs, equipos, competición, kickoff, status=NS)
++   y hora real de ejecución (now_utc < kickoff_utc).
++3. Creación exclusiva atómica (`xb`) para evitar sobrescritura por concurrencia, y liquidación
++   en archivo separado (`settlements/*.settlement.json`) sin alterar el registro original.
++4. Separación entre coincidencia de campos, procedencia verificada del proveedor y resultado
++   acreditable (`VERIFIED_AUTHORITATIVE` vs `UNVERIFIED_SOURCE_PROVENANCE` vs `UNVERIFIED_RESULT`
++   vs `SIMULATED_TEST_ONLY`).
++5. Validación de `odds_captured_utc` (`NO_ODDS`, `ODDS_UNVERIFIED`, `ODDS_VERIFIED`) para separar
++   evaluación deportiva de métricas económicas.
+ """
+ 
+ from __future__ import annotations
+@@ -21,13 +21,14 @@
+ import hashlib
+ import json
+ import math
++import re
+ import statistics
+ from datetime import datetime, timezone
+ from pathlib import Path
+ from typing import Any
+ from zoneinfo import ZoneInfo
+ 
+-from bet_engine.context.observation_store import MatchObservationBundle, ObservationStore
++from bet_engine.context.observation_store import HistoricalTeamMatch, MatchObservationBundle, ObservationStore
+ from bet_engine.modeling.calibration import brier_score, log_loss, parse_utc_timestamp
+ from bet_engine.modeling.distributions import _gamma_rate_bounds, dixon_coles_joint_grid
+ from bet_engine.modeling.experimental_v2_1b import (
+@@ -43,12 +44,13 @@
+ PROSPECTIVE_MIN_SAMPLE = {"CLUB": 200, "NATIONAL_TEAM": 50}
+ FROZEN_MODEL_NAMES = ("M0", "M0_plus_Elo", "M4", "M4_plus_Elo")
+ LIVE_OR_FINISHED_STATUSES = frozenset({"1H", "HT", "2H", "ET", "BT", "P", "LIVE", "INT", "FT", "AET", "PEN"})
+-REGISTRY_SCHEMA_VERSION = "2.2C-prospective-record"
+-SETTLEMENT_SCHEMA_VERSION = "2.2C-prospective-settlement"
++ALLOWED_PREMATCH_STATUSES = frozenset({"NS"})
++REGISTRY_SCHEMA_VERSION = "2.2C.1-prospective-record"
++SETTLEMENT_SCHEMA_VERSION = "2.2C.1-prospective-settlement"
+ 
+ 
+ class ProspectiveRegistryError(ValueError):
+-    """Error de integridad temporal, retrospectiva, verificación o inmutabilidad en registro prospectivo."""
++    """Error de integridad temporal, identidad, retrospectiva, procedencia o inmutabilidad."""
+ 
+ 
+ def _canonical_sha256(obj: Any) -> str:
+@@ -56,8 +58,37 @@
+     return hashlib.sha256(payload).hexdigest()
+ 
+ 
+-def load_frozen_configs(manifest_path: Path) -> tuple[dict[str, ExperimentalConfig], str]:
++def verify_manifest_code_hashes(manifest_path: Path, raw_manifest: dict[str, Any]) -> dict[str, str]:
++    """Verifica hashes SHA-256 de código activo declarados en el manifiesto."""
++    code_hashes = dict(raw_manifest.get("code_hashes") or {})
++    if not code_hashes:
++        return {}
++    # Buscar raíz del proyecto (subiendo desde manifest_path o cwd)
++    repo_root = Path.cwd()
++    for cand in (manifest_path.resolve().parent.parent.parent, manifest_path.resolve().parent.parent, Path.cwd()):
++        if (cand / "bet_engine").is_dir():
++            repo_root = cand
++            break
++    verified: dict[str, str] = {}
++    for rel, expected_sha in code_hashes.items():
++        target = repo_root / rel
++        if not target.is_file():
++            raise ProspectiveRegistryError(f"MANIFEST_CODE_FILE_MISSING:{rel}")
++        actual_sha = hashlib.sha256(target.read_bytes()).hexdigest()
++        if actual_sha != expected_sha:
++            raise ProspectiveRegistryError(f"MANIFEST_CODE_HASH_MISMATCH:{rel}:{actual_sha}!={expected_sha}")
++        verified[rel] = actual_sha
++    return verified
++
++
++def load_frozen_configs(
++    manifest_path: Path,
++    *,
++    verify_code_hashes: bool = True,
++) -> tuple[dict[str, ExperimentalConfig], str]:
+     raw = json.loads(manifest_path.read_text(encoding="utf-8"))
++    if verify_code_hashes:
++        verify_manifest_code_hashes(manifest_path, raw)
+     version = str(raw.get("schema_version") or "2.2A-frozen-models")
+     base_rates = {
+         str(k): (float(v[0]), float(v[1]))
+@@ -80,8 +111,246 @@
+             base_rates_by_stratum=base_rates or None,
+         )
+     return cfgs, version
++
++
++def extract_bwin_capture_utc(bwin_txt_path: Path) -> str | None:
++    """Extrae y valida el timestamp UTC con zona horaria desde la cabecera de Bwin TXT."""
++    if not bwin_txt_path.is_file():
++        return None
++    txt_head = bwin_txt_path.read_text(encoding="utf-8-sig", errors="replace")[:1500]
++    cap = re.search(r"(?:Fecha captura|Captura)[^:]*:\s*(\S+)", txt_head)
++    if not cap:
++        return None
++    cap_raw = cap.group(1).strip()
++    iso_str = cap_raw[:-1] + "+00:00" if cap_raw.endswith("Z") else cap_raw
++    try:
++        dt_parsed = datetime.fromisoformat(iso_str)
++    except ValueError:
++        return None
++    if dt_parsed.tzinfo is None:
++        return None
++    return dt_parsed.astimezone(timezone.utc).isoformat()
++
++
++def _classify_odds_status(
++    bwin_odds: dict[str, Any] | None,
++    odds_captured_utc: str | None,
++    odds_sha256: str | None,
++    now_dt: datetime,
++    ko_dt: datetime,
++) -> tuple[str, str | None]:
++    if not bwin_odds:
++        return "NO_ODDS", None
++    if not odds_captured_utc or not odds_sha256:
++        return "ODDS_UNVERIFIED", None
++    try:
++        iso_str = odds_captured_utc[:-1] + "+00:00" if odds_captured_utc.endswith("Z") else odds_captured_utc
++        dt_parsed = datetime.fromisoformat(iso_str)
++        if dt_parsed.tzinfo is None:
++            return "ODDS_UNVERIFIED", None
++        cap_dt = dt_parsed.astimezone(timezone.utc)
++    except ValueError:
++        return "ODDS_UNVERIFIED", None
++    if cap_dt > now_dt or cap_dt >= ko_dt:
++        return "ODDS_UNVERIFIED", cap_dt.isoformat()
++    return "ODDS_VERIFIED", cap_dt.isoformat()
++
++
++def _hm_to_elo_fixture(m: HistoricalTeamMatch) -> dict[str, Any] | None:
++    hg_raw = m.own_metrics.get("goals")
++    ag_raw = m.conceded_metrics.get("goals")
++    if hg_raw is None or ag_raw is None:
++        return None
++    if m.venue == "HOME":
++        hid, aid, hg, ag = int(m.team_id), int(m.opponent_id), float(hg_raw), float(ag_raw)
++    else:
++        hid, aid, hg, ag = int(m.opponent_id), int(m.team_id), float(ag_raw), float(hg_raw)
++    return {
++        "fixture_id": int(m.fixture_id),
++        "home_id": hid,
++        "away_id": aid,
++        "hg": hg,
++        "ag": ag,
++        "stratum": m.competition_stratum,
++        "kickoff_utc": m.kickoff_utc,
++        "avail_dt": m.available_at_utc,
++        "status": str(m.status or "FT").upper(),
++    }
++
++
++def build_asof_elo_and_team_history(
++    *,
++    bundle: MatchObservationBundle,
++    cutoff_dt: datetime,
++    corpus_root: Path | None = None,
++    extra_fixtures: list[dict[str, Any]] | None = None,
++    extra_team_series: dict[int, list[HistoricalTeamMatch]] | None = None,
++) -> tuple[AsOfEloTracker, dict[int, list[HistoricalTeamMatch]], dict[str, Any]]:
++    """Construye AsOfEloTracker y team_ordered_by_id estrictamente as-of (<= cutoff_dt)."""
++    chron_by_fid: dict[int, dict[str, Any]] = {}
++    team_map: dict[int, dict[int, HistoricalTeamMatch]] = {}
++    corpus_loaded = False
++    corpus_fixtures_raw = 0
++    excluded_post_cutoff = 0
++
++    def _add_hm(m: HistoricalTeamMatch) -> None:
++        nonlocal excluded_post_cutoff
++        ko = parse_utc_timestamp(m.kickoff_utc)
++        av = parse_utc_timestamp(m.available_at_utc)
++        if ko >= cutoff_dt or av > cutoff_dt:
++            excluded_post_cutoff += 1
++            return
++        if str(m.status or "").strip().upper() not in FINISHED_ELO_STATUSES:
++            return
++        team_map.setdefault(int(m.team_id), {})[int(m.fixture_id)] = m
++        fx = _hm_to_elo_fixture(m)
++        if fx is not None and int(m.fixture_id) not in chron_by_fid:
++            chron_by_fid[int(m.fixture_id)] = fx
++
++    if corpus_root is not None:
++        try:
++            from tools.reproduce_baseline_backtest import _load_corpus
++
++            _, c_team_series, c_all_fixtures, _ = _load_corpus(corpus_root)
++            corpus_loaded = True
++            corpus_fixtures_raw = len(c_all_fixtures)
++            for tid, fmap in c_team_series.items():
++                for m in fmap.values():
++                    _add_hm(m)
++            for fid, info in c_all_fixtures.items():
++                ko_str = info.get("kickoff_utc")
++                st = str(info.get("status") or "FT").strip().upper()
++                if not ko_str or st not in FINISHED_ELO_STATUSES:
++                    continue
++                ko_dt = parse_utc_timestamp(str(ko_str))
++                av_dt, _ = resolve_elo_available_dt({"ko_dt": ko_dt, "status": st, "avail_dt": info.get("available_at_utc")})
++                if av_dt is None or ko_dt >= cutoff_dt or av_dt > cutoff_dt:
++                    excluded_post_cutoff += 1
++                    continue
++                if info.get("home_goals") is None or info.get("away_goals") is None:
++                    continue
++                chron_by_fid[int(fid)] = {
++                    "fixture_id": int(fid),
++                    "home_id": int(info["home_id"]),
++                    "away_id": int(info["away_id"]),
++                    "hg": float(info["home_goals"]),
++                    "ag": float(info["away_goals"]),
++                    "stratum": info.get("stratum") or "CLUB",
++                    "ko_dt": ko_dt,
++                    "avail_dt": av_dt,
++                    "status": st,
++                }
++        except FileNotFoundError:
++            corpus_loaded = False
++
++    for m in tuple(bundle.home_matches) + tuple(bundle.away_matches):
++        _add_hm(m)
++
++    if extra_team_series:
++        for ms in extra_team_series.values():
++            for m in ms:
++                _add_hm(m)
++
++    if extra_fixtures:
++        for fx in extra_fixtures:
++            fid = int(fx.get("fixture_id") or 0)
++            st = str(fx.get("status") or "FT").strip().upper()
++            if st not in FINISHED_ELO_STATUSES:
++                continue
++            av_dt, _ = resolve_elo_available_dt(fx)
++            ko_dt = fx.get("ko_dt") or (parse_utc_timestamp(str(fx["kickoff_utc"])) if fx.get("kickoff_utc") else None)
++            if av_dt is None or ko_dt is None or ko_dt >= cutoff_dt or av_dt > cutoff_dt:
++                excluded_post_cutoff += 1
++                continue
++            row = dict(fx)
++            row["ko_dt"] = ko_dt
++            row["avail_dt"] = av_dt
++            row["status"] = st
++            if fid:
++                chron_by_fid[fid] = row
++
++    ordered_chron = list(chron_by_fid.values())
++    elo_tracker = AsOfEloTracker.build_from_fixtures(ordered_chron, k_factor=20.0, hfa=55.0)
++    team_ordered_by_id = {
++        tid: sorted(fmap.values(), key=lambda x: (parse_utc_timestamp(x.kickoff_utc), x.fixture_id))
++        for tid, fmap in team_map.items()
++    }
++    meta = {
++        "corpus_loaded": corpus_loaded,
++        "corpus_fixtures_raw": corpus_fixtures_raw,
++        "total_elo_fixtures_asof": len(ordered_chron),
++        "teams_in_history_n": len(team_ordered_by_id),
++        "excluded_post_cutoff_n": excluded_post_cutoff,
++        "elo_provenance_counts": dict(elo_tracker.provenance_counts),
++        "elo_excluded_non_finished": int(elo_tracker.excluded_non_finished),
++    }
++    return elo_tracker, team_ordered_by_id, meta
++
++
++def _verify_target_fixture_identity(
++    match_engine_payload: dict[str, Any],
++    bundle: MatchObservationBundle,
++    ko_dt: datetime,
++) -> dict[str, Any]:
++    """Verifica identidad completa del fixture entre match_engine y target_fixture_full."""
++    fx = match_engine_payload.get("fixture") or {}
++    ctx = match_engine_payload.get("context") or {}
++    target_resp = ((ctx.get("target_fixture_full") or {}).get("response") or [])
++    if not target_resp:
++        raise ProspectiveRegistryError("FIXTURE_IDENTITY_UNVERIFIED:MISSING_TARGET_FIXTURE_FULL")
+ 
++    t0 = target_resp[0]
++    t_fx = t0.get("fixture") or {}
++    t_lg = t0.get("league") or {}
++    t_tm = t0.get("teams") or {}
++    t_goals = t0.get("goals") or {}
+ 
++    t_status = str((t_fx.get("status") or {}).get("short") or "").strip().upper()
++    if t_status in LIVE_OR_FINISHED_STATUSES:
++        raise ProspectiveRegistryError(f"RETROSPECTIVE_RECORD_FORBIDDEN:status={t_status}")
++    if t_status not in ALLOWED_PREMATCH_STATUSES:
++        raise ProspectiveRegistryError(f"UNKNOWN_OR_NON_PREMATCH_STATUS:{t_status or 'EMPTY'}")
++
++    if t_goals.get("home") is not None or t_goals.get("away") is not None:
++        raise ProspectiveRegistryError("RETROSPECTIVE_RECORD_FORBIDDEN:TARGET_GOALS_ALREADY_PRESENT")
++
++    t_fid = t_fx.get("id")
++    if t_fid is None or int(t_fid) != int(bundle.fixture_id):
++        raise ProspectiveRegistryError(f"FIXTURE_IDENTITY_ID_MISMATCH:{t_fid}!={bundle.fixture_id}")
++
++    t_hid = (t_tm.get("home") or {}).get("id")
++    t_aid = (t_tm.get("away") or {}).get("id")
++    if t_hid is None or int(t_hid) != int(bundle.home_id) or t_aid is None or int(t_aid) != int(bundle.away_id):
++        raise ProspectiveRegistryError(
++            f"FIXTURE_IDENTITY_TEAMS_MISMATCH:({t_hid},{t_aid})!=({bundle.home_id},{bundle.away_id})"
++        )
++
++    t_lid = t_lg.get("id")
++    if t_lid is not None and bundle.league_id and int(t_lid) != int(bundle.league_id):
++        raise ProspectiveRegistryError(f"FIXTURE_IDENTITY_LEAGUE_MISMATCH:{t_lid}!={bundle.league_id}")
++    t_season = t_lg.get("season")
++    if t_season is not None and bundle.season and int(t_season) != int(bundle.season):
++        raise ProspectiveRegistryError(f"FIXTURE_IDENTITY_SEASON_MISMATCH:{t_season}!={bundle.season}")
++
++    t_date = t_fx.get("date")
++    if not t_date:
++        raise ProspectiveRegistryError("FIXTURE_IDENTITY_MISSING_TARGET_DATE")
++    t_ko_dt = parse_utc_timestamp(str(t_date))
++    if abs((t_ko_dt - ko_dt).total_seconds()) > 60.0:
++        raise ProspectiveRegistryError(f"FIXTURE_IDENTITY_KICKOFF_MISMATCH:{t_ko_dt.isoformat()}!={ko_dt.isoformat()}")
++
++    return {
++        "fixture_identity_verified": True,
++        "verified_fixture_id": int(bundle.fixture_id),
++        "verified_home_id": int(bundle.home_id),
++        "verified_away_id": int(bundle.away_id),
++        "verified_league_id": int(bundle.league_id),
++        "verified_season": int(bundle.season),
++        "verified_status": t_status,
++        "kickoff_delta_seconds": round(abs((t_ko_dt - ko_dt).total_seconds()), 3),
++    }
++
++
+ def _classify_lineup_state(bundle: MatchObservationBundle, payload: dict[str, Any]) -> dict[str, Any]:
+     """Diferencia explícitamente alineaciones confirmadas vs probables vs no disponibles."""
+     le = dict(getattr(bundle, "target_lineup_evaluation", None) or {})
+@@ -125,7 +394,11 @@
+     return [lo_k, hi_k]
+ 
+ 
+-def _observations_fingerprint(bundle: MatchObservationBundle, cutoff_dt: datetime) -> str:
++def _observations_fingerprint(
++    bundle: MatchObservationBundle,
++    cutoff_dt: datetime,
++    elo_meta: dict[str, Any],
++) -> str:
+     return _canonical_sha256(
+         {
+             "cutoff_utc": cutoff_dt.isoformat(),
+@@ -140,6 +413,8 @@
+                 (m.fixture_id, m.kickoff_utc, m.own_metrics.get("goals"), m.conceded_metrics.get("goals"), m.venue)
+                 for m in bundle.away_matches
+             ],
++            "elo_fixtures_asof": elo_meta.get("total_elo_fixtures_asof"),
++            "teams_in_history_n": elo_meta.get("teams_in_history_n"),
+         }
+     )
+ 
+@@ -151,6 +426,9 @@
+     records_dir: Path,
+     elo_tracker: AsOfEloTracker | None = None,
+     team_ordered_by_id: dict[int, list[Any]] | None = None,
++    corpus_root: Path | None = None,
++    extra_fixtures: list[dict[str, Any]] | None = None,
++    extra_team_series: dict[int, list[HistoricalTeamMatch]] | None = None,
+     bwin_odds: dict[str, Any] | None = None,
+     odds_captured_utc: str | None = None,
+     odds_sha256: str | None = None,
+@@ -159,6 +437,7 @@
+     now_utc: datetime | None = None,
+     min_corpus_cutoff_utc: str = CORPUS_CUTOFF_UTC,
+     allow_overwrite: bool = False,
++    verify_code_hashes: bool = True,
+ ) -> Path:
+     """Genera y congela un registro prospectivo PREMATCH estrictamente antes del kickoff."""
+     if allow_overwrite:
+@@ -171,8 +450,6 @@
+ 
+     target_resp = ((ctx.get("target_fixture_full") or {}).get("response") or [])
+     target_fx_obj = (target_resp[0].get("fixture") or {}) if target_resp else {}
+-    target_goals_obj = (target_resp[0].get("goals") or {}) if target_resp else {}
+-    target_status = str((target_fx_obj.get("status") or {}).get("short") or fx.get("status") or "NS").strip().upper()
+ 
+     ko_raw = fx.get("date") or target_fx_obj.get("date")
+     if not ko_raw:
+@@ -181,10 +458,6 @@
+ 
+     if now_dt >= ko_dt:
+         raise ProspectiveRegistryError(f"RETROSPECTIVE_RECORD_FORBIDDEN:now({now_dt.isoformat()})>=kickoff({ko_dt.isoformat()})")
+-    if target_status in LIVE_OR_FINISHED_STATUSES:
+-        raise ProspectiveRegistryError(f"RETROSPECTIVE_RECORD_FORBIDDEN:status={target_status}")
+-    if target_goals_obj.get("home") is not None or target_goals_obj.get("away") is not None:
+-        raise ProspectiveRegistryError("RETROSPECTIVE_RECORD_FORBIDDEN:TARGET_GOALS_ALREADY_PRESENT")
+ 
+     corpus_cut_dt = parse_utc_timestamp(min_corpus_cutoff_utc)
+     if ko_dt <= corpus_cut_dt:
+@@ -200,6 +473,8 @@
+         raise ProspectiveRegistryError("RETROSPECTIVE_RECORD_FORBIDDEN:cutoff>=kickoff")
+ 
+     bundle = ObservationStore.from_match_engine_json(match_engine_payload, cutoff_utc=cutoff_dt)
++    identity_check = _verify_target_fixture_identity(match_engine_payload, bundle, ko_dt)
++
+     stratum = (
+         bundle.home_matches[0].competition_stratum
+         if bundle.home_matches
+@@ -207,20 +482,43 @@
+     )
+     stratum_norm = "NATIONAL_TEAM" if stratum == "NATIONAL_TEAM" else "CLUB"
+ 
+-    cfgs, manifest_version = load_frozen_configs(manifest_path)
+-    obs_sha = _observations_fingerprint(bundle, cutoff_dt)
++    cfgs, manifest_version = load_frozen_configs(manifest_path, verify_code_hashes=verify_code_hashes)
++
++    if elo_tracker is None or team_ordered_by_id is None:
++        built_elo, built_teams, elo_builder_meta = build_asof_elo_and_team_history(
++            bundle=bundle,
++            cutoff_dt=cutoff_dt,
++            corpus_root=corpus_root,
++            extra_fixtures=extra_fixtures,
++            extra_team_series=extra_team_series,
++        )
++        if elo_tracker is None:
++            elo_tracker = built_elo
++        if team_ordered_by_id is None:
++            team_ordered_by_id = built_teams
++    else:
++        elo_builder_meta = {
++            "corpus_loaded": False,
++            "corpus_fixtures_raw": 0,
++            "total_elo_fixtures_asof": sum(len(v) for v in elo_tracker.history.values()),
++            "teams_in_history_n": len(team_ordered_by_id),
++            "excluded_post_cutoff_n": 0,
++            "elo_provenance_counts": dict(elo_tracker.provenance_counts),
++            "elo_excluded_non_finished": int(elo_tracker.excluded_non_finished),
++        }
++
++    obs_sha = _observations_fingerprint(bundle, cutoff_dt, elo_builder_meta)
+     params_sha = _canonical_sha256({m: dataclasses.asdict(cfgs[m]) for m in FROZEN_MODEL_NAMES})
+ 
+-    # Todos los modelos reciben copias idénticas del mismo estado informativo as-of.
+-    home_obs_frozen = list(bundle.home_matches)
+-    away_obs_frozen = list(bundle.away_matches)
++    home_obs_frozen = tuple(bundle.home_matches)
++    away_obs_frozen = tuple(bundle.away_matches)
+ 
+     predictions: dict[str, Any] = {}
+     for mname in FROZEN_MODEL_NAMES:
+         cfg = cfgs[mname]
+         res = predict_experimental_match(
+-            list(home_obs_frozen),
+-            list(away_obs_frozen),
++            home_obs_frozen,
++            away_obs_frozen,
+             home_id=bundle.home_id,
+             away_id=bundle.away_id,
+             target_ko_dt=ko_dt,
+@@ -260,12 +558,43 @@
+             "info_state_sha256": obs_sha,
+             "components": comp,
+         }
++
++    degradation_reasons: list[str] = []
++    if not predictions["M0_plus_Elo"]["components"].get("elo_coverage_ok"):
++        degradation_reasons.append("M0_PLUS_ELO_DEGRADED_NO_ELO_COVERAGE")
++    if not predictions["M4_plus_Elo"]["components"].get("elo_coverage_ok"):
++        degradation_reasons.append("M4_PLUS_ELO_DEGRADED_NO_ELO_COVERAGE")
++    if float(predictions["M4"]["components"].get("sos_coverage_rate") or 0.0) <= 0.0:
++        degradation_reasons.append("M4_DEGRADED_NO_SOS_COVERAGE")
++    if float(predictions["M4_plus_Elo"]["components"].get("sos_coverage_rate") or 0.0) <= 0.0:
++        degradation_reasons.append("M4_PLUS_ELO_DEGRADED_NO_SOS_COVERAGE")
++
++    comparison_integrity = {
++        "full_four_model_comparison_valid": len(degradation_reasons) == 0,
++        "degradation_reasons": degradation_reasons,
++        "elo_effective": {
++            "m0_plus_elo_ok": bool(predictions["M0_plus_Elo"]["components"].get("elo_coverage_ok")),
++            "m4_plus_elo_ok": bool(predictions["M4_plus_Elo"]["components"].get("elo_coverage_ok")),
++            "elo_home": predictions["M0_plus_Elo"]["components"].get("elo_home"),
++            "elo_away": predictions["M0_plus_Elo"]["components"].get("elo_away"),
++            "elo_home_n": predictions["M0_plus_Elo"]["components"].get("elo_home_n"),
++            "elo_away_n": predictions["M0_plus_Elo"]["components"].get("elo_away_n"),
++        },
++        "sos_effective": {
++            "m4_sos_coverage_rate": predictions["M4"]["components"].get("sos_coverage_rate"),
++            "m4_plus_elo_sos_coverage_rate": predictions["M4_plus_Elo"]["components"].get("sos_coverage_rate"),
++        },
++    }
+ 
++    odds_status, normalized_odds_cap = _classify_odds_status(bwin_odds, odds_captured_utc, odds_sha256, now_dt, ko_dt)
++
+     exclusions: list[str] = []
+     if len(bundle.home_matches) < 6 or len(bundle.away_matches) < 6:
+         exclusions.append(f"LOW_HISTORY_LT_6(home={len(bundle.home_matches)},away={len(bundle.away_matches)})")
+-    if not bwin_odds:
++    if odds_status == "NO_ODDS":
+         exclusions.append("NO_BWIN_ODDS_CAPTURED")
++    elif odds_status == "ODDS_UNVERIFIED":
++        exclusions.append("BWIN_ODDS_UNVERIFIED_TIMESTAMP")
+ 
+     red_unk_h = sum(1 for m in bundle.home_matches if (m.red_card_detail or {}).get("red_card_status") == "RED_CARD_UNKNOWN")
+     red_unk_a = sum(1 for m in bundle.away_matches if (m.red_card_detail or {}).get("red_card_status") == "RED_CARD_UNKNOWN")
+@@ -286,6 +615,7 @@
+             "away_id": bundle.away_id,
+             "away_name": bundle.away_name,
+         },
++        "identity_verification": identity_check,
+         "timing": {
+             "kickoff_utc": ko_dt.isoformat(),
+             "kickoff_madrid": ko_dt.astimezone(MADRID_TZ).isoformat(),
+@@ -303,11 +633,7 @@
+             "manifest_sha256": _canonical_sha256(json.loads(manifest_path.read_text(encoding="utf-8"))),
+             "model_params_sha256": params_sha,
+             "frozen_manifest_version": manifest_version,
+-            "elo_tracker_provenance": {
+-                "present": elo_tracker is not None,
+-                "provenance_counts": dict(elo_tracker.provenance_counts) if elo_tracker is not None else {},
+-                "excluded_non_finished": int(elo_tracker.excluded_non_finished) if elo_tracker is not None else 0,
+-            },
++            "elo_builder_meta": elo_builder_meta,
+             "source_paths": dict(source_paths or {}),
+         },
+         "history_summary": {
+@@ -318,9 +644,12 @@
+             "red_card_unknown_home_n": red_unk_h,
+             "red_card_unknown_away_n": red_unk_a,
+         },
++        "model_comparison_integrity": comparison_integrity,
+         "lineup_status": _classify_lineup_state(bundle, match_engine_payload),
+         "bwin_odds": {
+-            "captured_utc": odds_captured_utc,
++            "odds_status": odds_status,
++            "economic_eval_eligible": odds_status == "ODDS_VERIFIED",
++            "captured_utc": normalized_odds_cap or odds_captured_utc,
+             "quotes": dict(bwin_odds or {}),
+         },
+         "shadow_independence": {
+@@ -335,8 +664,6 @@
+     records_dir.mkdir(parents=True, exist_ok=True)
+     slug = f"{bundle.fixture_id}_{pre_kickoff_block['event_id'] or 'noevent'}.json"
+     out_path = records_dir / slug
+-    if out_path.exists():
+-        raise ProspectiveRegistryError(f"IMMUTABLE_RECORD_ALREADY_EXISTS:{out_path}")
+ 
+     full_doc = {
+         "schema_version": REGISTRY_SCHEMA_VERSION,
+@@ -344,18 +671,24 @@
+         "pre_kickoff_sha256": _canonical_sha256(pre_kickoff_block),
+         "settlement_mode": "SEPARATE_FILE_IMMUTABLE_PRE_KICKOFF",
+     }
+-    out_path.write_text(json.dumps(full_doc, indent=2, ensure_ascii=False), encoding="utf-8")
++    encoded = json.dumps(full_doc, indent=2, ensure_ascii=False).encode("utf-8")
++    try:
++        with out_path.open("xb") as fh:
++            fh.write(encoded)
++    except FileExistsError as exc:
++        raise ProspectiveRegistryError(f"IMMUTABLE_RECORD_ALREADY_EXISTS:{out_path}") from exc
+     return out_path
+ 
+ 
+ def _extract_authoritative_fields(source_payload: dict[str, Any]) -> dict[str, Any]:
+-    """Extrae fixture_id, equipos, liga, estado y marcador desde API-Football o payload estructurado."""
++    """Extrae campos y metadatos de procedencia de API-Football o snapshot estructurado."""
+     if isinstance(source_payload.get("response"), list) and source_payload["response"]:
+         item = source_payload["response"][0]
+         fx = item.get("fixture") or {}
+         lg = item.get("league") or {}
+         tm = item.get("teams") or {}
+         gl = item.get("goals") or {}
++        has_api_envelope = bool(source_payload.get("get") == "fixtures" and isinstance(source_payload.get("parameters"), dict))
+         return {
+             "fixture_id": fx.get("id"),
+             "home_id": (tm.get("home") or {}).get("id"),
+@@ -364,10 +697,14 @@
+             "status": (fx.get("status") or {}).get("short"),
+             "hg": gl.get("home"),
+             "ag": gl.get("away"),
++            "has_api_envelope": has_api_envelope,
++            "provider_meta": source_payload.get("_provenance") or {},
+         }
+     ctx_resp = (((source_payload.get("context") or {}).get("target_fixture_full") or {}).get("response") or [])
+     if ctx_resp:
+-        return _extract_authoritative_fields({"response": ctx_resp})
++        out = _extract_authoritative_fields({"response": ctx_resp})
++        out["provider_meta"] = source_payload.get("_provenance") or {}
++        return out
+     return {
+         "fixture_id": source_payload.get("fixture_id"),
+         "home_id": source_payload.get("home_id"),
+@@ -376,7 +713,28 @@
+         "status": source_payload.get("status"),
+         "hg": source_payload.get("hg"),
+         "ag": source_payload.get("ag"),
++        "has_api_envelope": False,
++        "provider_meta": source_payload.get("_provenance") or {},
+     }
++
++
++def _has_verified_provider_provenance(
++    source_payload: dict[str, Any],
++    *,
++    source_path: Path | None,
++    provider_provenance_verified: bool,
++) -> tuple[bool, str]:
++    if provider_provenance_verified:
++        return True, "EXPLICIT_VERIFIED_PROVIDER"
++    extracted = _extract_authoritative_fields(source_payload)
++    pmeta = extracted.get("provider_meta") or {}
++    if extracted.get("has_api_envelope") and pmeta.get("provider") == "API-Football" and pmeta.get("captured_at_utc"):
++        return True, "API_FOOTBALL_ENVELOPE_WITH_PROVENANCE"
++    if source_path is not None and extracted.get("has_api_envelope"):
++        norm = source_path.as_posix()
++        if "/outputs/matches/" in norm or norm.startswith("outputs/matches/") or "/outputs/api_cache/" in norm or norm.startswith("outputs/api_cache/"):
++            return True, "SANCTIONED_LOCAL_API_SNAPSHOT"
++    return False, "UNVERIFIED_ARBITRARY_JSON_PROVENANCE"
+ 
+ 
+ def verify_authoritative_result(
+@@ -387,7 +745,7 @@
+     match_status: str,
+     authoritative_fixture: dict[str, Any],
+ ) -> dict[str, Any]:
+-    """Verifica fixture_id, equipos, competición, estado final y marcador contra fuente autorizada."""
++    """Verifica coincidencia de fixture_id, equipos, competición, estado final y marcador."""
+     src = _extract_authoritative_fields(authoritative_fixture)
+     exp_fid = int(pre_kickoff["fixture_id"])
+     exp_hid = int(pre_kickoff["teams"]["home_id"])
+@@ -416,6 +774,7 @@
+         )
+ 
+     return {
++        "fields_matched": True,
+         "verified_fixture_id": exp_fid,
+         "verified_teams": [exp_hid, exp_aid],
+         "verified_league_id": exp_lid,
+@@ -438,7 +797,9 @@
+     match_status: str = "FT",
+     settled_at_utc: datetime | None = None,
+     authoritative_fixture: dict[str, Any] | None = None,
++    source_path: Path | None = None,
+     source_label: str | None = None,
++    provider_provenance_verified: bool = False,
+     simulation_mode: bool = False,
+     settlements_dir: Path | None = None,
+ ) -> dict[str, Any]:
+@@ -472,9 +833,12 @@
+         )
+ 
+     verification_detail: dict[str, Any] | None = None
++    prov_ok = False
++    prov_reason = "NONE"
+     if simulation_mode:
+         verification_status = "SIMULATED_TEST_ONLY"
+         creditable = False
++        prov_reason = "SIMULATION_MODE"
+     elif authoritative_fixture is not None:
+         verification_detail = verify_authoritative_result(
+             pre,
+@@ -483,11 +847,21 @@
+             match_status=st,
+             authoritative_fixture=authoritative_fixture,
+         )
+-        verification_status = "VERIFIED_AUTHORITATIVE"
+-        creditable = True
++        prov_ok, prov_reason = _has_verified_provider_provenance(
++            authoritative_fixture,
++            source_path=source_path,
++            provider_provenance_verified=provider_provenance_verified,
++        )
++        if prov_ok:
++            verification_status = "VERIFIED_AUTHORITATIVE"
++            creditable = True
++        else:
++            verification_status = "UNVERIFIED_SOURCE_PROVENANCE"
++            creditable = False
+     else:
+         verification_status = "UNVERIFIED_RESULT"
+         creditable = False
++        prov_reason = "MANUAL_NO_SOURCE"
+ 
+     y_1x2 = "HOME" if hg > ag else ("DRAW" if hg == ag else "AWAY")
+     y_hw = 1 if hg > ag else 0
+@@ -520,9 +894,11 @@
+     settlement_obj = {
+         "status": "SETTLED",
+         "verification_status": verification_status,
++        "provider_provenance_verified": prov_ok,
++        "provider_provenance_reason": prov_reason,
+         "creditable": creditable,
+         "is_simulation": bool(simulation_mode),
+-        "source_label": source_label or ("SIMULATION" if simulation_mode else ("AUTHORITATIVE_JSON" if authoritative_fixture else "MANUAL_UNVERIFIED")),
++        "source_label": source_label or (str(source_path) if source_path else ("SIMULATION" if simulation_mode else "MANUAL_UNVERIFIED")),
+         "verification_detail": verification_detail,
+         "match_status": st,
+         "hg": int(hg),
+@@ -541,7 +917,11 @@
+         "settlement": settlement_obj,
+     }
+     settlement_path.parent.mkdir(parents=True, exist_ok=True)
+-    settlement_path.write_text(json.dumps(settlement_doc, indent=2, ensure_ascii=False), encoding="utf-8")
++    try:
++        with settlement_path.open("xb") as fh:
++            fh.write(json.dumps(settlement_doc, indent=2, ensure_ascii=False).encode("utf-8"))
++    except FileExistsError as exc:
++        raise ProspectiveRegistryError(f"RECORD_ALREADY_SETTLED:{settlement_path}") from exc
+     return {
+         "pre_kickoff_sha256": doc["pre_kickoff_sha256"],
+         "record_file_sha256": record_file_sha256,
+@@ -550,11 +930,17 @@
+     }
+ 
+ 
+-def evaluate_prospective_records(records_dir: Path, *, settlements_dir: Path | None = None) -> dict[str, Any]:
+-    """Evalúa de forma pareada registros acreditables (VERIFIED_AUTHORITATIVE), independiente de Shadow."""
++def evaluate_prospective_records(
++    records_dir: Path,
++    *,
++    settlements_dir: Path | None = None,
++    require_full_four_model_comparison: bool = True,
++) -> dict[str, Any]:
++    """Evalúa registros acreditables (VERIFIED_AUTHORITATIVE), separando métricas deportivas y económicas."""
+     settled_docs: list[tuple[dict[str, Any], dict[str, Any]]] = []
+     pending_n = 0
+     excluded_n = 0
++    degraded_comparison_rejected_n = 0
+     unverified_result_n = 0
+     simulated_test_n = 0
+     tampered: list[str] = []
+@@ -568,7 +954,6 @@
+             tampered.append(p.name)
+             continue
+ 
+-        # Leer liquidación separada (preferido 2.2C) o heredada inline (2.2B).
+         s_path = default_settlement_path(p, settlements_dir=settlements_dir)
+         settlement_obj: dict[str, Any] | None = None
+         if s_path.is_file():
+@@ -595,11 +980,20 @@
+         if not pre.get("eligible_for_paired_eval", True):
+             excluded_n += 1
+             continue
++
++        mci = pre.get("model_comparison_integrity") or {}
++        if require_full_four_model_comparison and not mci.get("full_four_model_comparison_valid", False):
++            degraded_comparison_rejected_n += 1
++            continue
++
+         if all(m in (pre.get("predictions") or {}) for m in FROZEN_MODEL_NAMES):
+             settled_docs.append((doc, settlement_obj))
+ 
+     club_docs = [(d, s) for d, s in settled_docs if d["pre_kickoff"]["competition"]["stratum"] != "NATIONAL_TEAM"]
+     nat_docs = [(d, s) for d, s in settled_docs if d["pre_kickoff"]["competition"]["stratum"] == "NATIONAL_TEAM"]
++    economic_docs = [
++        (d, s) for d, s in settled_docs if (d["pre_kickoff"].get("bwin_odds") or {}).get("odds_status") == "ODDS_VERIFIED"
++    ]
+ 
+     def _agg(items: list[tuple[dict[str, Any], dict[str, Any]]]) -> dict[str, Any]:
+         if not items:
+@@ -638,8 +1032,10 @@
+ 
+     return {
+         "settled_paired_n": len(settled_docs),
++        "economic_eval_eligible_n": len(economic_docs),
+         "pending_n": pending_n,
+         "excluded_n": excluded_n,
++        "degraded_comparison_rejected_n": degraded_comparison_rejected_n,
+         "unverified_result_n": unverified_result_n,
+         "simulated_test_n": simulated_test_n,
+         "tampered_rejected": tampered,
+@@ -652,5 +1048,3 @@
+         "CLUB": _agg(club_docs),
+         "NATIONAL_TEAM": _agg(nat_docs),
+     }
+-
+-
+
+--- a/tools/prospective_tracker.py
++++ b/tools/prospective_tracker.py
+@@ -1,12 +1,13 @@
+ #!/usr/bin/env python3
+-"""CLI de registro y evaluación prospectiva PREMATCH (Iteración 2.2B -> 2.2C).
++"""CLI de registro y evaluación prospectiva PREMATCH (Iteración 2.2B -> 2.2C.1).
+ 
+ Ejemplos:
+-  # 1) Registrar predicciones congeladas ANTES del kickoff:
++  # 1) Registrar predicciones congeladas ANTES del kickoff (con Elo y SoS as-of):
+   PYTHONPATH=. .venv/bin/python tools/prospective_tracker.py record \
+     --match-engine outputs/matches/<EVENT_ID>/inputs/match_engine_<EVENT_ID>.json \
+     --bwin-txt outputs/matches/<EVENT_ID>/inputs/cuotas_bwin_<EVENT_ID>.txt \
+     --manifest audit/iteracion_2_2b/MANIFEST_MODELOS_CONGELADOS.json \
++    --corpus-root . \
+     --records-dir outputs/prospective_records
+ 
+   # 2) Liquidar resultado oficial DESPUÉS del partido con fuente autorizada (FT/AET/PEN):
+@@ -29,6 +30,7 @@
+ 
+ from bet_engine.modeling.prospective_registry import (
+     evaluate_prospective_records,
++    extract_bwin_capture_utc,
+     record_prospective_prediction,
+     settle_prospective_record,
+ )
+@@ -36,12 +38,13 @@
+ 
+ 
+ def main() -> int:
+-    parser = argparse.ArgumentParser(description="Tracker prospectivo PREMATCH (Iteración 2.2C)")
++    parser = argparse.ArgumentParser(description="Tracker prospectivo PREMATCH (Iteración 2.2C.1)")
+     sub = parser.add_subparsers(dest="cmd", required=True)
+ 
+     p_rec = sub.add_parser("record", help="Registra predicciones congeladas antes del kickoff")
+     p_rec.add_argument("--match-engine", type=Path, required=True)
+     p_rec.add_argument("--manifest", type=Path, default=Path("audit/iteracion_2_2b/MANIFEST_MODELOS_CONGELADOS.json"))
++    p_rec.add_argument("--corpus-root", type=Path, default=Path("."), help="Raíz del corpus histórico as-of para Elo y SoS")
+     p_rec.add_argument("--records-dir", type=Path, default=Path("outputs/prospective_records"))
+     p_rec.add_argument("--bwin-txt", type=Path, default=None)
+     p_rec.add_argument("--shadow-json", type=Path, default=None)
+@@ -62,10 +65,12 @@
+         payload = json.loads(args.match_engine.read_text(encoding="utf-8"))
+         odds = None
+         odds_sha = None
++        odds_cap_utc = None
+         if args.bwin_txt and args.bwin_txt.is_file():
+             fx = payload.get("fixture") or {}
+             odds = parse_bwin_odds_txt(args.bwin_txt, home_name=fx.get("home_name"), away_name=fx.get("away_name"))
+             odds_sha = hashlib.sha256(args.bwin_txt.read_bytes()).hexdigest()
++            odds_cap_utc = extract_bwin_capture_utc(args.bwin_txt)
+         shadow_decision = None
+         if args.shadow_json and args.shadow_json.is_file():
+             sdoc = json.loads(args.shadow_json.read_text(encoding="utf-8"))
+@@ -74,13 +79,16 @@
+             match_engine_payload=payload,
+             manifest_path=args.manifest,
+             records_dir=args.records_dir,
++            corpus_root=args.corpus_root,
+             bwin_odds=odds,
++            odds_captured_utc=odds_cap_utc,
+             odds_sha256=odds_sha,
+             shadow_decision=shadow_decision,
+             source_paths={
+                 "match_engine": str(args.match_engine),
+                 "bwin_txt": str(args.bwin_txt) if args.bwin_txt else "",
+                 "manifest": str(args.manifest),
++                "corpus_root": str(args.corpus_root) if args.corpus_root else "",
+             },
+         )
+         rec_doc = json.loads(out.read_text(encoding="utf-8"))
+@@ -92,7 +100,10 @@
+             "kickoff_utc": pre["timing"]["kickoff_utc"],
+             "kickoff_madrid": pre["timing"]["kickoff_madrid"],
+             "temporal_integrity_status": pre["timing"]["temporal_integrity_status"],
++            "fixture_identity_verified": pre["identity_verification"]["fixture_identity_verified"],
+             "history_summary": pre["history_summary"],
++            "model_comparison_integrity": pre["model_comparison_integrity"],
++            "odds_status": pre["bwin_odds"]["odds_status"],
+             "pre_kickoff_sha256": rec_doc["pre_kickoff_sha256"],
+         }
+         print(json.dumps(summary, indent=2, ensure_ascii=False))
+@@ -108,6 +119,7 @@
+             ag=args.ag,
+             match_status=args.status,
+             authoritative_fixture=auth_fx,
++            source_path=args.source_json,
+             source_label=str(args.source_json) if args.source_json else None,
+             simulation_mode=bool(args.simulate),
+         )
+@@ -123,5 +135,3 @@
+ 
+ if __name__ == "__main__":
+     raise SystemExit(main())
+-
+-
+
+--- a/test/test_iteracion_2_2c_registry_and_elo.py
++++ b/test/test_iteracion_2_2c_registry_and_elo.py
+@@ -33,6 +33,9 @@
+ 
+ def _make_auth_fixture(pre: dict, hg: int, ag: int, status: str = "FT") -> dict:
+     return {
++        "get": "fixtures",
++        "parameters": {"id": str(pre["fixture_id"])},
++        "_provenance": {"provider": "API-Football", "captured_at_utc": "2026-11-25T22:25:00+00:00"},
+         "response": [
+             {
+                 "fixture": {"id": pre["fixture_id"], "status": {"short": status}},
+@@ -43,7 +46,7 @@
+                 },
+                 "goals": {"home": hg, "away": ag},
+             }
+-        ]
++        ],
+     }
+ 
+ 
+@@ -60,7 +63,12 @@
+         payload["context"]["target_fixture_full"] = {
+             "response": [
+                 {
+-                    "fixture": {"date": future_ko.isoformat(), "status": {"short": "NS"}},
++                    "fixture": {"id": payload["fixture"]["fixture_id"], "date": future_ko.isoformat(), "status": {"short": "NS"}},
++                    "league": {"id": payload["fixture"]["league_id"], "season": payload["fixture"]["season"]},
++                    "teams": {
++                        "home": {"id": payload["fixture"]["home_id"]},
++                        "away": {"id": payload["fixture"]["away_id"]},
++                    },
+                     "goals": {"home": None, "away": None},
+                 }
+             ]
+@@ -91,6 +99,7 @@
+                 match_engine_payload=payload,
+                 manifest_path=manifest_path,
+                 records_dir=rec_dir,
++                corpus_root=ROOT,
+                 bwin_odds={"home_win": 2.40, "draw": 3.10, "away_win": 3.00},
+                 odds_captured_utc=now_pre.isoformat(),
+                 odds_sha256="abc123",
+@@ -113,7 +122,7 @@
+                 "manifest_sha256",
+                 "model_params_sha256",
+                 "frozen_manifest_version",
+-                "elo_tracker_provenance",
++                "elo_builder_meta",
+             ):
+                 self.assertIn(req_key, prov)
+                 self.assertTrue(prov[req_key])
+@@ -297,7 +306,12 @@
+         payload["context"]["target_fixture_full"] = {
+             "response": [
+                 {
+-                    "fixture": {"date": future_ko.isoformat(), "status": {"short": "NS"}},
++                    "fixture": {"id": payload["fixture"]["fixture_id"], "date": future_ko.isoformat(), "status": {"short": "NS"}},
++                    "league": {"id": payload["fixture"]["league_id"], "season": payload["fixture"]["season"]},
++                    "teams": {
++                        "home": {"id": payload["fixture"]["home_id"]},
++                        "away": {"id": payload["fixture"]["away_id"]},
++                    },
+                     "goals": {"home": None, "away": None},
+                 }
+             ]
+
+--- /dev/null
++++ b/audit/iteracion_2_2b/MANIFEST_MODELOS_CONGELADOS.json
+
++{
++  "schema_version": "2.2B-frozen-models",
++  "generated_utc": "2026-11-18T10:18:25.105833+00:00",
++  "corpus_last_fixture_utc": "2026-11-14T19:45:00+00:00",
++  "prospective_sample_status": "PENDIENTE_MUESTRA_PROSPECTIVA",
++  "prospective_ft_found_after_cutoff_n": 0,
++  "prospective_min_sample_target": {
++    "CLUB": 200,
++    "NATIONAL_TEAM": 50
++  },
++  "code_hashes": {
++    "bet_engine/modeling/experimental_v2_1b.py": "e7cfd77d426d85ecce40bd82b6e99918764641e5ea640f0e7169009fad1f6355",
++    "bet_engine/modeling/prospective_registry.py": "0701287568209ea1341f41193286ff93f66086f14b5a610e9d508fc55572cdbb",
++    "bet_engine/modeling/distributions.py": "b85d7ab092217833234f53f0b9d90b56705c115f4b9a373a25e282ef5d5d8276",
++    "bet_engine/context/observation_store.py": "c9223b468b6ceba0ab92b805fb292766da8165047264bcd6db8eeeb5b5c812d0",
++    "config/constants.py": "8bfb38339f628868b53b81f714e3506674fa91a558f76215d228bf7282043325"
++  },
++  "train_fit_base_rates": {
++    "CLUB": [
++      1.5938,
++      1.339
++    ],
++    "NATIONAL_TEAM": [
++      1.8148,
++      1.4444
++    ]
++  },
++  "elo_parameters": {
++    "initial_rating": 1500.0,
++    "k_factor": 20.0,
++    "hfa": 55.0,
++    "scale": 400.0,
++    "min_matches_for_use": 3
++  },
++  "frozen_candidates": {
++    "M0": {
++      "name": "M0_baseline_L20",
++      "multiplicative": false,
++      "use_sos_opp_rates": false,
++      "sos_alpha": 0.35,
++      "use_elo": false,
++      "elo_weight": 0.25,
++      "half_life_days": null,
++      "venue_blend": 0.25,
++      "shrink_k": 8.0,
++      "rho": -0.04
++    },
++    "M0_plus_Elo": {
++      "name": "M0_plus_Elo_0.25",
++      "multiplicative": false,
++      "use_sos_opp_rates": false,
++      "sos_alpha": 0.35,
++      "use_elo": true,
++      "elo_weight": 0.25,
++      "half_life_days": null,
++      "venue_blend": 0.25,
++      "shrink_k": 8.0,
++      "rho": -0.04
++    },
++    "M3": {
++      "name": "M3_mult_sos0.4_novb",
++      "multiplicative": true,
++      "use_sos_opp_rates": true,
++      "sos_alpha": 0.4,
++      "use_elo": false,
++      "elo_weight": 0.25,
++      "half_life_days": null,
++      "venue_blend": 0.0,
++      "shrink_k": 8.0,
++      "rho": -0.04
++    },
++    "M4": {
++      "name": "M4_mult_sos0.4_novb_k12",
++      "multiplicative": true,
++      "use_sos_opp_rates": true,
++      "sos_alpha": 0.4,
++      "use_elo": false,
++      "elo_weight": 0.25,
++      "half_life_days": null,
++      "venue_blend": 0.0,
++      "shrink_k": 12.0,
++      "rho": -0.04
++    },
++    "M4_plus_Elo": {
++      "name": "M4_plus_Elo_0.25",
++      "multiplicative": true,
++      "use_sos_opp_rates": true,
++      "sos_alpha": 0.4,
++      "use_elo": true,
++      "elo_weight": 0.25,
++      "half_life_days": null,
++      "venue_blend": 0.0,
++      "shrink_k": 12.0,
++      "rho": -0.04
++    }
++  },
++  "sources": [
++    {
++      "path": "outputs/reconciliation_real_20261111/coverage_models_final/preselection_cache_recovered.json",
++      "sha256": "eda44f051bf5a51fb8ffe0546aa559f4bc4cdb0a05037017e09a8666c2227867",
++      "bytes": 2299148
++    },
++    {
++      "path": "outputs/discovery/2026-11-02_1500_0300/prospective_trial/enriched/preselection.json",
++      "sha256": "20218d6ef05c505428709f74b43749f0375de4e4c67035f14dbafbd3821c237e",
++      "bytes": 450231
++    },
++    {
++      "path": "outputs/discovery/2026-11-03_1500_0300/prospective_trial/enriched/preselection.json",
++      "sha256": "ca8327bf94636731275312ce7d7fc7229592eaee511f998e918ae3d94dbf8d2c",
++      "bytes": 121271
++    },
++    {
++      "path": "outputs/discovery/2026-11-03_1600_0200/prospective_trial/enriched/preselection.json",
++      "sha256": "bf6b6658c37f9d9e4df63be7f96799c61bad42b9f6d4ceab627a3f6f346d1584",
++      "bytes": 120772
++    },
++    {
++      "path": "outputs/discovery/2026-11-07_1500_0300/prospective_trial/enriched/preselection.json",
++      "sha256": "f1095a2f3ea9dec8719cad05102a80cd712e1d5af20d526a0a28e54a4ac94341",
++      "bytes": 22877586
++    },
++    {
++      "path": "outputs/discovery/2026-11-09_1500_0300/prospective_trial/enriched/preselection.json",
++      "sha256": "ada40f30a2acb128d396f6a24fda98450cfdceb1ac1eac82e90ebeb85f5a3d57",
++      "bytes": 1569699
++    },
++    {
++      "path": "outputs/discovery/2026-11-10_1500_0300/prospective_trial/enriched/preselection.json",
++      "sha256": "f44191416d7d1d91a06aea6f73d1184b3684f5202c8aa6bf990e2c812728008a",
++      "bytes": 2790401
++    },
++    {
++      "path": "outputs/discovery/2026-11-11_1500_0300/prospective_trial/enriched/preselection.json",
++      "sha256": "122ef053a86adff6c28cef0b7d5295a37a66bf183c9a2f26cc1a32c66ca79239",
++      "bytes": 2265733
++    },
++    {
++      "path": "outputs/discovery/2026-11-12_1500_0300/prospective_trial/enriched/preselection.json",
++      "sha256": "9f9cadb94bcd7f977fb896d03b4e5e9171724ea8b1c4985cb44644bff0fa6d5f",
++      "bytes": 830857
++    },
++    {
++      "path": "outputs/discovery/2026-11-17_1500_0300/prospective_trial/enriched/preselection.json",
++      "sha256": "705a4fe44016403e45e0ecd1459223049aba0985865b89c93786c4cec31f42f0",
++      "bytes": 512723
++    }
++  ],
++  "prospective_registry_module": "bet_engine/modeling/prospective_registry.py",
++  "prospective_cli": "tools/prospective_tracker.py"
++}
+
+--- /dev/null
++++ b/test/test_iteracion_2_2c_1_fixes.py
+
++#!/usr/bin/env python3
++"""Pruebas obligatorias Iteración 2.2C.1:
++1. M0 y M0+Elo divergen con ratings as-of distintos y válidos.
++2. M4 y M4+Elo divergen bajo las mismas condiciones.
++3. SoS se aplica con historial de rivales válido.
++4. Ausencia de datos Elo/SoS produce degradación explícita y rechazo como comparación completa de 4 modelos.
++5. Ningún dato posterior al cutoff entra al modelo (Elo ni SoS).
++6. Fixture incorrecto/ambiguo queda bloqueado.
++7. JSON de marcador sin procedencia acreditada no obtiene VERIFIED_AUTHORITATIVE.
++8. Dos registros simultáneos no sobrescriben el mismo archivo (creación exclusiva).
++9. Las cuotas conservan su timestamp de captura y separan evaluación deportiva vs económica.
++"""
++
++from __future__ import annotations
++
++import concurrent.futures
++import copy
++import json
++import tempfile
++import unittest
++from datetime import datetime, timedelta, timezone
++from pathlib import Path
++
++from bet_engine.context.observation_store import HistoricalTeamMatch
++from bet_engine.modeling.prospective_registry import (
++    ProspectiveRegistryError,
++    evaluate_prospective_records,
++    extract_bwin_capture_utc,
++    record_prospective_prediction,
++    settle_prospective_record,
++)
++
++ROOT = Path(__file__).resolve().parent.parent
++
++
++def _hm(fid: int, tid: int, oid: int, ko: datetime, hg: float, ag: float, venue: str = "HOME", stratum: str = "CLUB") -> HistoricalTeamMatch:
++    return HistoricalTeamMatch(
++        fixture_id=fid,
++        team_id=tid,
++        opponent_id=oid,
++        kickoff_utc=ko.isoformat(),
++        available_at_utc=(ko + timedelta(minutes=125)).isoformat(),
++        league_id=39,
++        league_name="Test League",
++        season=2026,
++        competition_stratum=stratum,
++        venue=venue,
++        status="FT",
++        coach_id=None,
++        coach_name=None,
++        red_card_distortion=False,
++        own_metrics={"goals": hg},
++        conceded_metrics={"goals": ag},
++        has_detailed_stats=True,
++        source="TEST",
++    )
++
++
++class TestIteracion22C1Fixes(unittest.TestCase):
++    def _load_real_future_payload(self) -> tuple[dict, Path, datetime]:
++        me_path = ROOT / "outputs/matches/7905487/inputs/match_engine_7905487.json"
++        manifest_path = ROOT / "audit/iteracion_2_2b/MANIFEST_MODELOS_CONGELADOS.json"
++        if not (me_path.is_file() and manifest_path.is_file()):
++            self.skipTest("Fixtures o manifest no presentes")
++        payload = copy.deepcopy(json.loads(me_path.read_text(encoding="utf-8")))
++        future_ko = datetime(2026, 11, 25, 20, 0, tzinfo=timezone.utc)
++        now_pre = future_ko - timedelta(hours=3)
++        payload["fixture"]["date"] = future_ko.isoformat()
++        payload["generated_at"] = (now_pre - timedelta(minutes=5)).isoformat()
++        payload["context"]["target_fixture_full"] = {
++            "response": [
++                {
++                    "fixture": {"id": payload["fixture"]["fixture_id"], "date": future_ko.isoformat(), "status": {"short": "NS"}},
++                    "league": {"id": payload["fixture"]["league_id"], "season": payload["fixture"]["season"]},
++                    "teams": {
++                        "home": {"id": payload["fixture"]["home_id"]},
++                        "away": {"id": payload["fixture"]["away_id"]},
++                    },
++                    "goals": {"home": None, "away": None},
++                }
++            ]
++        }
++        return payload, manifest_path, future_ko
++
++    def test_1_2_3_4_5_elo_sos_divergence_degradation_and_cutoff_guard(self) -> None:
++        payload, manifest_path, future_ko = self._load_real_future_payload()
++        now_pre = future_ko - timedelta(hours=3)
++
++        # Fixture post-cutoff que NO debe entrar nunca ni en Elo ni en SoS
++        post_ko = now_pre + timedelta(minutes=10)
++        hid = int(payload["fixture"]["home_id"])
++        aid = int(payload["fixture"]["away_id"])
++        extra_post_fx = [
++            {"fixture_id": 999991, "home_id": hid, "away_id": 9991, "hg": 9, "ag": 0, "stratum": "NATIONAL_TEAM", "ko_dt": post_ko, "status": "FT"},
++        ]
++        extra_post_team = {
++            9991: [_hm(999992, 9991, 9992, post_ko, 0, 8, stratum="NATIONAL_TEAM")],
++        }
++
++        with tempfile.TemporaryDirectory() as td:
++            # A) Con corpus real as-of: las 4 variantes deben divergir y aplicar Elo + SoS
++            rec_full_dir = Path(td) / "full"
++            rec_full = record_prospective_prediction(
++                match_engine_payload=payload,
++                manifest_path=manifest_path,
++                records_dir=rec_full_dir,
++                corpus_root=ROOT,
++                extra_fixtures=extra_post_fx,
++                extra_team_series=extra_post_team,
++                now_utc=now_pre,
++            )
++            doc = json.loads(rec_full.read_text(encoding="utf-8"))
++            pre = doc["pre_kickoff"]
++            preds = pre["predictions"]
++
++            # Test 1: M0 y M0+Elo divergen con ratings Elo reales distintos
++            self.assertTrue(preds["M0_plus_Elo"]["components"]["elo_coverage_ok"])
++            self.assertNotEqual(preds["M0_plus_Elo"]["components"]["elo_home"], preds["M0_plus_Elo"]["components"]["elo_away"])
++            self.assertNotEqual(preds["M0"]["outcomes_1x2"], preds["M0_plus_Elo"]["outcomes_1x2"])
++
++            # Test 2: M4 y M4+Elo divergen bajo las mismas condiciones
++            self.assertTrue(preds["M4_plus_Elo"]["components"]["elo_coverage_ok"])
++            self.assertNotEqual(preds["M4"]["lambda_home"], preds["M4_plus_Elo"]["lambda_home"])
++            self.assertNotEqual(preds["M4"]["outcomes_1x2"], preds["M4_plus_Elo"]["outcomes_1x2"])
++
++            # Test 3: SoS se aplica con historial de rivales válido
++            self.assertGreater(preds["M4"]["components"]["sos_coverage_rate"], 0.0)
++            self.assertGreater(preds["M4_plus_Elo"]["components"]["sos_coverage_rate"], 0.0)
++            self.assertTrue(pre["model_comparison_integrity"]["full_four_model_comparison_valid"])
++
++            # Test 5: Ningún dato posterior al cutoff entró al modelo
++            elo_meta = pre["provenance"]["elo_builder_meta"]
++            self.assertGreaterEqual(elo_meta["excluded_post_cutoff_n"], 2)
++            self.assertEqual(
++                pre["timing"]["temporal_integrity_status"],
++                "PREMATCH_VERIFIED",
++            )
++
++            # B) Test 4: Ausencia de corpus/rivales degrada explícitamente y se rechaza en evaluate
++            rec_deg_dir = Path(td) / "degraded"
++            # Forzar un equipo sin rivales en team_ordered_by_id pasando diccionario vacío
++            rec_deg = record_prospective_prediction(
++                match_engine_payload=payload,
++                manifest_path=manifest_path,
++                records_dir=rec_deg_dir,
++                team_ordered_by_id={},
++                now_utc=now_pre,
++            )
++            deg_pre = json.loads(rec_deg.read_text(encoding="utf-8"))["pre_kickoff"]
++            mci_deg = deg_pre["model_comparison_integrity"]
++            self.assertFalse(mci_deg["full_four_model_comparison_valid"])
++            self.assertIn("M4_DEGRADED_NO_SOS_COVERAGE", mci_deg["degradation_reasons"])
++
++            # Liquidar con fuente autorizada: evaluate debe rechazarlo como comparación completa de 4 modelos
++            auth_ok = {
++                "get": "fixtures",
++                "parameters": {"id": str(deg_pre["fixture_id"])},
++                "_provenance": {"provider": "API-Football", "captured_at_utc": (future_ko + timedelta(minutes=140)).isoformat()},
++                "response": [
++                    {
++                        "fixture": {"id": deg_pre["fixture_id"], "status": {"short": "FT"}},
++                        "league": {"id": deg_pre["competition"]["league_id"]},
++                        "teams": {"home": {"id": hid}, "away": {"id": aid}},
++                        "goals": {"home": 1, "away": 1},
++                    }
++                ],
++            }
++            settle_prospective_record(
++                rec_deg,
++                hg=1,
++                ag=1,
++                match_status="FT",
++                settled_at_utc=future_ko + timedelta(minutes=140),
++                authoritative_fixture=auth_ok,
++            )
++            ev_deg = evaluate_prospective_records(rec_deg_dir)
++            self.assertEqual(ev_deg["settled_paired_n"], 0)
++            self.assertEqual(ev_deg["degraded_comparison_rejected_n"], 1)
++
++    def test_6_fixture_identity_and_unknown_status_blocked(self) -> None:
++        payload, manifest_path, future_ko = self._load_real_future_payload()
++        now_pre = future_ko - timedelta(hours=2)
++
++        with tempfile.TemporaryDirectory() as td:
++            rec_dir = Path(td) / "records"
++            # Discrepancia de fixture_id
++            bad_id = copy.deepcopy(payload)
++            bad_id["context"]["target_fixture_full"]["response"][0]["fixture"]["id"] = 99999999
++            with self.assertRaises(ProspectiveRegistryError):
++                record_prospective_prediction(match_engine_payload=bad_id, manifest_path=manifest_path, records_dir=rec_dir, now_utc=now_pre)
++
++            # Discrepancia de equipos
++            bad_team = copy.deepcopy(payload)
++            bad_team["context"]["target_fixture_full"]["response"][0]["teams"]["home"]["id"] = 123456
++            with self.assertRaises(ProspectiveRegistryError):
++                record_prospective_prediction(match_engine_payload=bad_team, manifest_path=manifest_path, records_dir=rec_dir, now_utc=now_pre)
++
++            # Contradicción de kickoff
++            bad_date = copy.deepcopy(payload)
++            bad_date["context"]["target_fixture_full"]["response"][0]["fixture"]["date"] = (future_ko + timedelta(hours=2)).isoformat()
++            with self.assertRaises(ProspectiveRegistryError):
++                record_prospective_prediction(match_engine_payload=bad_date, manifest_path=manifest_path, records_dir=rec_dir, now_utc=now_pre)
++
++            # Estado desconocido / ambiguo (TBD / UNKNOWN)
++            for st in ("TBD", "UNKNOWN", ""):
++                bad_st = copy.deepcopy(payload)
++                bad_st["context"]["target_fixture_full"]["response"][0]["fixture"]["status"]["short"] = st
++                with self.assertRaises(ProspectiveRegistryError):
++                    record_prospective_prediction(match_engine_payload=bad_st, manifest_path=manifest_path, records_dir=rec_dir, now_utc=now_pre)
++
++    def test_7_unaccredited_source_json_not_verified_authoritative(self) -> None:
++        payload, manifest_path, future_ko = self._load_real_future_payload()
++        now_pre = future_ko - timedelta(hours=2)
++
++        with tempfile.TemporaryDirectory() as td:
++            rec_dir = Path(td) / "records"
++            rec_path = record_prospective_prediction(
++                match_engine_payload=payload,
++                manifest_path=manifest_path,
++                records_dir=rec_dir,
++                corpus_root=ROOT,
++                now_utc=now_pre,
++            )
++            pre = json.loads(rec_path.read_text(encoding="utf-8"))["pre_kickoff"]
++
++            # JSON con estructura correcta pero SIN procedencia verificada de proveedor
++            arbitrary_json = {
++                "response": [
++                    {
++                        "fixture": {"id": pre["fixture_id"], "status": {"short": "FT"}},
++                        "league": {"id": pre["competition"]["league_id"]},
++                        "teams": {"home": {"id": pre["teams"]["home_id"]}, "away": {"id": pre["teams"]["away_id"]}},
++                        "goals": {"home": 2, "away": 0},
++                    }
++                ]
++            }
++            settled = settle_prospective_record(
++                rec_path,
++                hg=2,
++                ag=0,
++                match_status="FT",
++                settled_at_utc=future_ko + timedelta(minutes=140),
++                authoritative_fixture=arbitrary_json,
++                source_path=Path("/tmp/arbitrary_manual.json"),
++            )
++            self.assertEqual(settled["settlement"]["verification_status"], "UNVERIFIED_SOURCE_PROVENANCE")
++            self.assertFalse(settled["settlement"]["provider_provenance_verified"])
++            self.assertFalse(settled["settlement"]["creditable"])
++            ev = evaluate_prospective_records(rec_dir)
++            self.assertEqual(ev["settled_paired_n"], 0)
++            self.assertEqual(ev["unverified_result_n"], 1)
++
++    def test_8_concurrent_records_exclusive_creation_no_overwrite(self) -> None:
++        payload, manifest_path, future_ko = self._load_real_future_payload()
++        now_pre = future_ko - timedelta(hours=2)
++
++        with tempfile.TemporaryDirectory() as td:
++            rec_dir = Path(td) / "concurrent"
++
++            def _try_record() -> str:
++                try:
++                    p = record_prospective_prediction(
++                        match_engine_payload=payload,
++                        manifest_path=manifest_path,
++                        records_dir=rec_dir,
++                        now_utc=now_pre,
++                    )
++                    return f"OK:{p.name}"
++                except ProspectiveRegistryError as exc:
++                    return f"ERR:{exc}"
++
++            with concurrent.futures.ThreadPoolExecutor(max_workers=2) as ex:
++                results = list(ex.map(lambda _: _try_record(), range(2)))
++
++            ok_count = sum(1 for r in results if r.startswith("OK:"))
++            err_count = sum(1 for r in results if "IMMUTABLE_RECORD_ALREADY_EXISTS" in r)
++            self.assertEqual(ok_count, 1)
++            self.assertEqual(err_count, 1)
++
++    def test_9_bwin_odds_capture_timestamp_and_economic_separation(self) -> None:
++        payload, manifest_path, future_ko = self._load_real_future_payload()
++        now_pre = future_ko - timedelta(hours=2)
++
++        with tempfile.TemporaryDirectory() as td:
++            bwin_txt = Path(td) / "cuotas.txt"
++            cap_iso = (now_pre - timedelta(minutes=15)).isoformat()
++            bwin_txt.write_text(f"Evento: Gales vs Portugal\nCaptura: {cap_iso}\n1 2.50 X 3.10 2 2.80\n", encoding="utf-8")
++            extracted = extract_bwin_capture_utc(bwin_txt)
++            self.assertEqual(extracted, cap_iso)
++
++            # Con captura válida -> ODDS_VERIFIED y elegible económicamente
++            rec_ok = record_prospective_prediction(
++                match_engine_payload=payload,
++                manifest_path=manifest_path,
++                records_dir=Path(td) / "rec_ok",
++                corpus_root=ROOT,
++                bwin_odds={"home_win": 2.50, "draw": 3.10, "away_win": 2.80},
++                odds_captured_utc=extracted,
++                odds_sha256="sha_ok",
++                now_utc=now_pre,
++            )
++            pre_ok = json.loads(rec_ok.read_text(encoding="utf-8"))["pre_kickoff"]
++            self.assertEqual(pre_ok["bwin_odds"]["odds_status"], "ODDS_VERIFIED")
++            self.assertTrue(pre_ok["bwin_odds"]["economic_eval_eligible"])
++            self.assertEqual(pre_ok["bwin_odds"]["captured_utc"], cap_iso)
++
++            # Sin timestamp válido -> ODDS_UNVERIFIED, pero permite evaluar precisión deportiva
++            rec_unv = record_prospective_prediction(
++                match_engine_payload=payload,
++                manifest_path=manifest_path,
++                records_dir=Path(td) / "rec_unv",
++                corpus_root=ROOT,
++                bwin_odds={"home_win": 2.50, "draw": 3.10, "away_win": 2.80},
++                odds_captured_utc=None,
++                odds_sha256="sha_ok",
++                now_utc=now_pre,
++            )
++            pre_unv = json.loads(rec_unv.read_text(encoding="utf-8"))["pre_kickoff"]
++            self.assertEqual(pre_unv["bwin_odds"]["odds_status"], "ODDS_UNVERIFIED")
++            self.assertFalse(pre_unv["bwin_odds"]["economic_eval_eligible"])
++
++            auth_fx = {
++                "get": "fixtures",
++                "parameters": {"id": str(pre_unv["fixture_id"])},
++                "_provenance": {"provider": "API-Football", "captured_at_utc": (future_ko + timedelta(minutes=140)).isoformat()},
++                "response": [
++                    {
++                        "fixture": {"id": pre_unv["fixture_id"], "status": {"short": "FT"}},
++                        "league": {"id": pre_unv["competition"]["league_id"]},
++                        "teams": {"home": {"id": pre_unv["teams"]["home_id"]}, "away": {"id": pre_unv["teams"]["away_id"]}},
++                        "goals": {"home": 1, "away": 0},
++                    }
++                ],
++            }
++            settle_prospective_record(
++                rec_unv,
++                hg=1,
++                ag=0,
++                match_status="FT",
++                settled_at_utc=future_ko + timedelta(minutes=140),
++                authoritative_fixture=auth_fx,
++            )
++            ev_unv = evaluate_prospective_records(Path(td) / "rec_unv")
++            self.assertEqual(ev_unv["settled_paired_n"], 1)  # Precisión deportiva sí se evalúa
++            self.assertEqual(ev_unv["economic_eval_eligible_n"], 0)  # Métrica económica NO
++
++
++if __name__ == "__main__":
++    unittest.main()

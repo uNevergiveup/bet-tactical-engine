@@ -197,6 +197,7 @@ def execute(plan, *, external=False, confirmation=None, resume=False):
                          '--max-scrolls',str(plan.get('bwin_discovery',{}).get('max_scrolls',12))]
                 if plan['inputs']['bwin']:command.extend(['--catalog-snapshot',plan['inputs']['bwin']['path']])
                 if plan['browser_executable']:command.extend(['--browser-executable',plan['browser_executable']])
+                if external:command.append('--confirm-external')
                 child(command,'bwin.log')
             stage('bwin',discover_bwin,bwin)
         pre=out/'preselection.json'

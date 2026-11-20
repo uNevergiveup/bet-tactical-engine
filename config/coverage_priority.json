@@ -1,0 +1,7 @@
+{
+  "enabled": true,
+  "advanced_bonus": 5.0,
+  "additional_capability_weight": 0.5,
+  "minimum_sample": 4,
+  "skip_declared_false_details": true
+}

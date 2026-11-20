@@ -1,0 +1,170 @@
+{
+  "event_id": "7909713",
+  "match": "Argentina vs Costa Rica",
+  "snapshot_history_depth": {
+    "home": 6,
+    "away": 6,
+    "note": "Snapshot congelado L6; no se introducen datos futuros ni L20 externos."
+  },
+  "bwin_reference_not_for_training": {
+    "home_odd": 1.055,
+    "draw_odd": 15.5,
+    "away_odd": 29.0,
+    "raw_implied_home": 0.9479
+  },
+  "models": {
+    "M0": {
+      "lambda_home": 2.1916,
+      "lambda_away": 1.0162,
+      "outcomes_1x2": {
+        "home_win": 0.6372,
+        "draw": 0.2022,
+        "away_win": 0.1606
+      },
+      "p_over_2_5": 0.6217,
+      "p_btts_yes": 0.5703,
+      "delta_p_home_vs_m0": 0.0,
+      "uncertainty_p_home_bounds": [
+        0.403,
+        0.8271
+      ],
+      "prior_weight_share_home_att": 0.6375,
+      "components": {
+        "home_own_shrunk": null,
+        "away_def_shrunk": null,
+        "away_own_shrunk": null,
+        "home_def_shrunk": null,
+        "home_n_eff": 4.55,
+        "away_n_eff": 4.45,
+        "sos_coverage_rate": 0.0,
+        "elo_home": null,
+        "elo_away": null,
+        "elo_coverage_ok": false
+      }
+    },
+    "M1": {
+      "lambda_home": 3.2551,
+      "lambda_away": 0.707,
+      "outcomes_1x2": {
+        "home_win": 0.8547,
+        "draw": 0.099,
+        "away_win": 0.0463
+      },
+      "p_over_2_5": 0.7563,
+      "p_btts_yes": 0.4891,
+      "delta_p_home_vs_m0": 0.2175,
+      "uncertainty_p_home_bounds": [
+        0.6834,
+        0.9494
+      ],
+      "prior_weight_share_home_att": 0.6316,
+      "components": {
+        "home_own_shrunk": 2.6898,
+        "away_def_shrunk": 1.7708,
+        "away_own_shrunk": 1.2208,
+        "home_def_shrunk": 1.0648,
+        "home_n_eff": 4.6667,
+        "away_n_eff": 4.6667,
+        "sos_coverage_rate": 0.0,
+        "elo_home": null,
+        "elo_away": null,
+        "elo_home_n": 0,
+        "elo_away_n": 0,
+        "elo_coverage_ok": false
+      }
+    },
+    "M2": {
+      "lambda_home": 3.234,
+      "lambda_away": 0.707,
+      "outcomes_1x2": {
+        "home_win": 0.8527,
+        "draw": 0.1003,
+        "away_win": 0.0471
+      },
+      "p_over_2_5": 0.7531,
+      "p_btts_yes": 0.4887,
+      "delta_p_home_vs_m0": 0.2154,
+      "uncertainty_p_home_bounds": [
+        0.6802,
+        0.9485
+      ],
+      "prior_weight_share_home_att": 0.6316,
+      "components": {
+        "home_own_shrunk": 2.7008,
+        "away_def_shrunk": 1.7522,
+        "away_own_shrunk": 1.2208,
+        "home_def_shrunk": 1.0648,
+        "home_n_eff": 4.6667,
+        "away_n_eff": 4.6667,
+        "sos_coverage_rate": 0.2,
+        "elo_home": null,
+        "elo_away": null,
+        "elo_home_n": 0,
+        "elo_away_n": 0,
+        "elo_coverage_ok": false
+      }
+    },
+    "M3": {
+      "lambda_home": 2.8257,
+      "lambda_away": 0.939,
+      "outcomes_1x2": {
+        "home_win": 0.7609,
+        "draw": 0.1446,
+        "away_win": 0.0945
+      },
+      "p_over_2_5": 0.7254,
+      "p_btts_yes": 0.5754,
+      "delta_p_home_vs_m0": 0.1236,
+      "uncertainty_p_home_bounds": [
+        0.5485,
+        0.9026
+      ],
+      "prior_weight_share_home_att": 0.6316,
+      "components": {
+        "home_own_shrunk": 2.3437,
+        "away_def_shrunk": 1.7642,
+        "away_own_shrunk": 1.3778,
+        "home_def_shrunk": 1.2531,
+        "home_n_eff": 4.6667,
+        "away_n_eff": 4.6667,
+        "sos_coverage_rate": 0.2,
+        "elo_home": null,
+        "elo_away": null,
+        "elo_home_n": 0,
+        "elo_away_n": 0,
+        "elo_coverage_ok": false
+      }
+    },
+    "M4": {
+      "lambda_home": 2.5645,
+      "lambda_away": 1.0521,
+      "outcomes_1x2": {
+        "home_win": 0.697,
+        "draw": 0.1715,
+        "away_win": 0.1315
+      },
+      "p_over_2_5": 0.7002,
+      "p_btts_yes": 0.6036,
+      "delta_p_home_vs_m0": 0.0598,
+      "uncertainty_p_home_bounds": [
+        0.4701,
+        0.8653
+      ],
+      "prior_weight_share_home_att": 0.72,
+      "components": {
+        "home_own_shrunk": 2.1652,
+        "away_def_shrunk": 1.7332,
+        "away_own_shrunk": 1.4359,
+        "home_def_shrunk": 1.3472,
+        "home_n_eff": 4.6667,
+        "away_n_eff": 4.6667,
+        "sos_coverage_rate": 0.2,
+        "elo_home": null,
+        "elo_away": null,
+        "elo_home_n": 0,
+        "elo_away_n": 0,
+        "elo_coverage_ok": false
+      }
+    }
+  }
+}

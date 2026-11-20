@@ -5,6 +5,7 @@ No network, inference of team IDs, or use of a cache downloaded after asof.
 from pathlib import Path
 from datetime import timedelta
 import json
+from prematch_cache_record import temporal_stamp
 from preselect_matches import read_stat_block, numeric
 import prematch_prospective_trial as t
 
@@ -26,6 +27,7 @@ def observations_from_games(games, team_id, details, requested_ids=None):
                     elif item.get('type')=='Ball Possession' and item.get('value') is not None:
                         possession=numeric(str(item['value']).rstrip('%'))
                         if possession is not None and 0<=possession<=100:target['possession_pct']=possession
+        has_detail_values = bool(own or opp)
         # Only regular-time FT games enter the tactical sample.
         if g.get('status')!='FT':continue
         own['goals']=g['team_goals'];opp['goals']=g['opponent_goals']
@@ -36,11 +38,20 @@ def observations_from_games(games, team_id, details, requested_ids=None):
             if h is not None and target['goals'] is not None and h<=target['goals']:
                 target['goals_h1']=h;target['goals_h2']=target['goals']-h
         request_status=('NOT_REQUESTED' if g['id'] not in requested else
-                        'VALID' if bool(raw.get('statistics')) and (own or opp) else 'REQUESTED_MISSING')
-        rows.append({'fixture_id':g['id'],'team_id':team_id,'opponent_id':other,
-                     'kickoff_utc':g['date_utc'],'league_id':g['league_id'],'season':g['season'],
-                     'venue':g['venue'],'status':'FT','statistics_requested':g['id'] in requested,
-                     'statistics_request_status':request_status,'own':own,'conceded':opp})
+                        'VALID' if has_detail_values else 'REQUESTED_MISSING')
+        row={**{key:g[key] for key in ('result_available_at_utc','completed_at_utc','fixture_completed_at_utc') if key in g},'fixture_id':g['id'],'team_id':team_id,'opponent_id':other,
+             'kickoff_utc':g['date_utc'],'league_id':g['league_id'],'season':g['season'],
+             'venue':g['venue'],'status':'FT','statistics_requested':g['id'] in requested,
+             'statistics_request_status':request_status,'own':own,'conceded':opp}
+        acquired=[v for v in (raw.get('_acquired_at_utc'),g.get('_acquired_at_utc')) if v]
+        if acquired:row['acquired_at_utc']=max(acquired,key=lambda v:temporal_stamp(v))
+        lineups=[lu for lu in raw.get('lineups',[]) if lu.get('team',{}).get('id')==team_id]
+        if len(lineups)==1:
+            lu=lineups[0];coach=lu.get('coach') or {};cid=coach.get('id');cname=coach.get('name')
+            if lu.get('formation'):row['formation']=lu.get('formation')
+            if isinstance(cid,int) and not isinstance(cid,bool):row['coach_id']=cid
+            if cname:row['coach_name']=cname
+        rows.append(row)
     return rows
 
 
@@ -203,13 +214,31 @@ def longitudinal_profile(team_id, observations, raw_rows):
     for entry in players.values():
         entry['observations'].sort(key=lambda r:r['kickoff'],reverse=True);entry['roles']='NOMINAL_POSITIONS_ONLY_NO_FUNCTIONAL_ROLE_VERIFIED'
         entry['metrics']={}
+        app_n=len(entry['observations']);app_min=sum(r['minutes'] for r in entry['observations'])
         for m in metrics:
             valid=[r for r in entry['observations'] if r['metrics'][m] is not None];minutes=sum(r['minutes'] for r in valid);total=sum(r['metrics'][m] for r in valid)
+            missing_obs=[r for r in entry['observations'] if r['metrics'][m] is None]
+            zero_obs=[r for r in valid if r['metrics'][m]==0]
+            pos_obs=[r for r in valid if r['metrics'][m]>0]
             usable=len(valid)>=3 and minutes>=180
-            entry['metrics'][m]={'metric':m,'unit':'count','observed_matches':len(valid),'eligible_minutes':minutes,
-                'fixture_ids':[r['fixture_id'] for r in valid],'total':total if valid else None,
+            entry['metrics'][m]={'metric':m,'unit':'count','appearances_n':app_n,'appearances_minutes':app_min,
+                'observed_matches':len(valid),'missing_matches':len(missing_obs),'zero_matches':len(zero_obs),'positive_matches':len(pos_obs),
+                'eligible_minutes':minutes,'fixture_ids':[r['fixture_id'] for r in valid],
+                'missing_fixture_ids':[r['fixture_id'] for r in missing_obs],'zero_fixture_ids':[r['fixture_id'] for r in zero_obs],
+                'positive_fixture_ids':[r['fixture_id'] for r in pos_obs],'total':total if valid else None,
                 'per90':round(90*total/minutes,4) if usable else None,'formula':'90 * sum(observed metric) / sum(minutes in same observations)',
                 'status':'DESCRIPTIVE_EXPOSURE_ONLY' if usable else 'INSUFFICIENT_DATA'}
+    seen_form_fids={f['fixture_id'] for f in formations}
+    seen_coach_fids={c['fixture_id'] for c in coaches}
+    for row in observations:
+        fid=row.get('fixture_id');at=row.get('kickoff_utc')
+        if row.get('formation') and fid not in seen_form_fids:
+            formations.append({'fixture_id':fid,'kickoff':at,'formation':row['formation']})
+            seen_form_fids.add(fid)
+        if (row.get('coach_id') is not None or row.get('coach_name')) and fid not in seen_coach_fids:
+            coaches.append({'fixture_id':fid,'kickoff':at,'coach':{'id':row.get('coach_id'),'name':row.get('coach_name')},
+                            'status':'PROVIDER_RECORDED_NOT_CONFIRMED_CURRENT'})
+            seen_coach_fids.add(fid)
     groups={}
     for row in observations:
         key=f"{row['league_id']}:{row['season']}";groups.setdefault(key,[]).append(row)
@@ -249,8 +278,19 @@ def contextual_segments(profile):
         if finite(h1) and finite(a1):groups[competition+(':HT_LEADING' if h1>a1 else ':HT_TRAILING' if h1<a1 else ':HT_DRAWING')].append(r)
         for key in ('formation','coach_id'):
             if r.get(key) is not None:groups[competition+':'+key+'='+str(r[key])].append(r)
+        if r.get('coach_name'):
+            cid_tag=str(r.get('coach_id')) if r.get('coach_id') is not None else '0'
+            groups[competition+':coach='+cid_tag+':'+str(r['coach_name'])].append(r)
+    def segment_stat(rows,kind,metric):
+        expected=rows if metric=='goals' else [r for r in rows if r.get('statistics_requested',True) or finite(r.get(kind,{}).get(metric))]
+        vals=[float(r.get(kind,{}).get(metric)) for r in expected if finite(r.get(kind,{}).get(metric))]
+        base=dict(stats(vals))
+        base.update({'segment_n':len(rows),'expected_n':len(expected),'not_detailed_n':len(rows)-len(expected),
+                     'missing_n':len(expected)-len(vals),'zero_n':sum(1 for v in vals if v==0),'positive_n':sum(1 for v in vals if v>0)})
+        return base
     return {'segments':{key:{'fixture_ids':[r['fixture_id'] for r in rows],
-        'metrics':{metric:{kind:stats([r.get(kind,{}).get(metric) for r in rows if finite(r.get(kind,{}).get(metric))]) for kind in ('own','conceded')} for metric in ('goals','shots','on_target','corners','fouls','yellow','possession_pct','goals_h1','goals_h2')}} for key,rows in sorted(groups.items())},
+        'sample_n':len(rows),'detailed_n':sum(1 for r in rows if r.get('statistics_requested',True)),
+        'metrics':{metric:{kind:segment_stat(rows,kind,metric) for kind in ('own','conceded')} for metric in ('goals','xg','shots','on_target','corners','fouls','yellow','offsides','blocked_shots','possession_pct','goals_h1','goals_h2')}} for key,rows in sorted(groups.items())},
         'unavailable':{'favorite_status':'Requires archived prematch odds or documented prior assessment; final result forbidden as proxy',
                        'opponent_strength':'Requires opponent references strictly before each historical kickoff',
                        'score_state':'FT totals cannot be attributed to periods leading/drawing/trailing',

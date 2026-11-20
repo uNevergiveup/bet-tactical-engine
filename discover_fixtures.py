@@ -106,7 +106,7 @@ def parse_fixture(raw: dict[str, Any]) -> dict[str, Any]:
         raise ValueError("home_id y away_id idénticos")
     if not (home.get("name") and away.get("name") and league.get("name")):
         raise ValueError("nombres de equipos/competición ausentes")
-    return {
+    row = {
         "fixture_id": fid,
         "kickoff_madrid": local.isoformat(timespec="seconds"),
         "kickoff_utc": local.astimezone(UTC).isoformat(timespec="seconds"),
@@ -125,6 +125,14 @@ def parse_fixture(raw: dict[str, Any]) -> dict[str, Any]:
         "city": stadium.get("city"),
         "coverage_status": "NOT_AUDITED",
     }
+    # Category is attached at the first point where league ID, name, country
+    # and season coexist. Unknown competitions remain genuinely unknown.
+    from filter_major_leagues import explicit_competition_category
+    category=explicit_competition_category(row)
+    if category:row.update(category)
+    from competition_registry import category as registry_category
+    row.update(registry_category(row))
+    return row
 
 
 def filter_fixtures(
@@ -339,18 +347,24 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--start", type=parse_hour, default=None, help="Inicio HH:MM (configuración canónica)")
     parser.add_argument("--end", type=parse_hour, default=None, help="Fin HH:MM (configuración canónica)")
     parser.add_argument("--root", type=Path, default=Path(__file__).resolve().parent, help="Raíz del proyecto scraper")
+    parser.add_argument("--output-dir", type=Path,
+                        help="Destino explícito de esta evaluación; evita compartir snapshots entre ejecuciones")
+    parser.add_argument("--asof", help=argparse.SUPPRESS)
     parser.add_argument("--refresh", action="store_true", help="Ignorar caché (dos consultas API nuevas)")
     parser.add_argument("--show", type=int, default=40, help="Máximo de partidos en consola (0 = todos)")
     parser.add_argument("--choose", type=int, metavar="FIXTURE_ID", help="Selección manual desde fixtures.json; no consulta API")
     args = parser.parse_args(argv)
     root = args.root.expanduser().resolve()
-    now = datetime.now(UTC)
+    now = datetime.fromisoformat(args.asof.replace("Z", "+00:00")) if args.asof else datetime.now(UTC)
+    if now.tzinfo is None or now.utcoffset() is None:
+        parser.error("--asof requiere offset horario explícito")
+    now = now.astimezone(UTC)
     from prematch_prospective_trial import load_window_config,resolve_window,automatic_day
     cfg,_,_=load_window_config(root)
     _,args.start,args.end=resolve_window(cfg,args.window,args.start,args.end)
     day = args.date or automatic_day(now,args.start,args.end)
     begin, end = build_window(day, args.start, args.end)
-    folder = output_folder(root, begin, end)
+    folder = args.output_dir.expanduser().resolve() if args.output_dir else output_folder(root, begin, end)
 
     if args.choose is not None:
         try:

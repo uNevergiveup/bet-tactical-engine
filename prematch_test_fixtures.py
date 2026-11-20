@@ -8,7 +8,10 @@ from datetime import datetime, timedelta, timezone
 
 def integral_fixture(root):
     import prematch_integral_analysis_v1046 as engine
-    from test_prematch_integral_analysis_v1046 import row, performance
+    try:
+        from test_prematch_integral_analysis_v1046 import row, performance
+    except ImportError:
+        from test.test_prematch_integral_analysis_v1046 import row, performance
     deep = root / 'outputs/matches/7902458/analysis/deep_v1042'
     deep.mkdir(parents=True)
     cutoff = datetime(2026, 11, 6, 14, tzinfo=timezone.utc)

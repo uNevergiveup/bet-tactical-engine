@@ -43,6 +43,8 @@ class CandidateLedger:
 
 def failure_state(reason):
     reason = str(reason).upper()
+    if any(x in reason for x in ('SCRAPER_CAPTURE_FAILED', 'SCRAPER_FAILED', 'TIMEOUT', 'PREFLIGHT_RUN_ERROR')):
+        return 'SIN_CUOTAS'
     if any(x in reason for x in ('IDENTITY', 'MISMATCH', 'CONFLICT', 'TITLE', 'NAME_IDENTITY', 'EVENT_ID')):
         return 'IDENTIDAD_INCORRECTA'
     if any(x in reason for x in ('COVERAGE', 'RESEARCHABLE', 'STATISTICAL', 'CUTOFF')):

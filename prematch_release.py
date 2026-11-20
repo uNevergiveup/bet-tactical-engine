@@ -36,6 +36,37 @@ def verify_refs(refs, root):
             raise ValueError('SOURCE_CHANGED: '+name+': '+str(exc)) from exc
 
 
+def _preflight_temporal_fields(root, preflight_ref, fixture_id, event_id, bwin_url):
+    """Propagate verified Phase 3 temporal identity contract from daily preflight."""
+    from prematch_paths import local_reference
+    import select_single_match as selector
+    ppath = Path(preflight_ref['path'])
+    pdata = t.read(ppath)
+    matches = [m for m in (pdata.get('matches') or [])
+               if str(m.get('fixture_id')) == str(fixture_id)
+               and str(m.get('bwin_event_id')) == str(event_id)
+               and m.get('bwin_url') == bwin_url]
+    if len(matches) != 1:
+        return {}
+    pm = matches[0]
+    ev = pm.get('time_evidence') or {}
+    if ev.get('status') not in {'DISPLAY_TIME_CORROBORATED', 'COUNTDOWN_TIME_CORROBORATED', 'ABSOLUTE_TIME_VERIFIED'}:
+        return {}
+    src_disc = pdata.get('source_discovery')
+    src_sha = pdata.get('source_sha256')
+    if not src_disc or not src_sha:
+        return {}
+    dpath = local_reference(root, src_disc, src_sha)
+    if not dpath.is_file() or t.sha(dpath) != src_sha:
+        return {}
+    discovery = t.read(dpath)
+    return {
+        'preflight_path': preflight_ref['path'],
+        'preflight_sha256': preflight_ref['sha256'],
+        'temporal_identity_evidence': selector.temporal_identity_contract(pm, discovery, src_sha, ppath),
+    }
+
+
 def bridge(root,handoff_path,output=None,*,historical=False,asof=None):
     """Translate the chosen fixture only; never invoke a second selector."""
     handoff_path=Path(handoff_path).resolve();doc=t.read(handoff_path)
@@ -83,6 +114,7 @@ def bridge(root,handoff_path,output=None,*,historical=False,asof=None):
         'research_missing_evidence':rank.get('research_missing_evidence',[]),
         'hard_block_reasons':[],
         'odds_txt':doc['odds_txt'],'odds_sha256':doc['odds_sha256'],'capture_madrid':doc['capture_madrid'],
+        **_preflight_temporal_fields(root,refs['preflight'],doc['fixture_id'],eid,doc['bwin_url']),
         'source_refs':refs,'source_decision':str(output/'selection_decision.json'),
         'actionable_bet':False,'ready_to_bet':False,'version':VERSION}
     winner={**selection,'market_families_ready':selection['market_families_ready_for_research']}

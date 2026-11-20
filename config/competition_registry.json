@@ -1,0 +1,557 @@
+{
+  "schema_version": "1.1-competition-registry",
+  "competitions": [
+    {
+      "provider": "API_FOOTBALL",
+      "league_id": 140,
+      "country": "Spain",
+      "names": [
+        "La Liga"
+      ],
+      "gender": "M",
+      "season": 2026,
+      "type": "LEAGUE",
+      "national_tier": 1,
+      "level": "SENIOR",
+      "evidence": "filter_major_leagues.CATALOG_BY_COUNTRY + frozen identity regression evidence"
+    },
+    {
+      "provider": "API_FOOTBALL",
+      "league_id": 525,
+      "country": "World",
+      "names": [
+        "UEFA Champions League Women"
+      ],
+      "gender": "F",
+      "season": 2026,
+      "type": "NATIONAL_OFFICIAL",
+      "national_tier": null,
+      "level": "SENIOR",
+      "evidence": "frozen API fixture 1638311 + verified identity regression evidence"
+    },
+    {
+      "provider": "API_FOOTBALL",
+      "league_id": 64,
+      "country": "France",
+      "names": [
+        "Feminine Division 1"
+      ],
+      "gender": "F",
+      "season": 2026,
+      "type": "LEAGUE",
+      "national_tier": 1,
+      "level": "SENIOR",
+      "evidence": "CURATED_NATIONAL_TIER_IDENTITY_WITH_FROZEN_API_LABEL"
+    },
+    {
+      "provider": "API_FOOTBALL",
+      "league_id": 139,
+      "country": "Italy",
+      "names": [
+        "Serie A Women"
+      ],
+      "gender": "F",
+      "season": 2026,
+      "type": "LEAGUE",
+      "national_tier": 1,
+      "level": "SENIOR",
+      "evidence": "filter_major_leagues.CATALOG_BY_COUNTRY + frozen manual_api/fixtures.json"
+    },
+    {
+      "provider": "API_FOOTBALL",
+      "league_id": 180,
+      "country": "Scotland",
+      "names": [
+        "Championship"
+      ],
+      "gender": "M",
+      "season": 2026,
+      "type": "LEAGUE",
+      "national_tier": 2,
+      "level": "SENIOR",
+      "evidence": "CURATED_NATIONAL_TIER_IDENTITY_WITH_FROZEN_API_LABEL"
+    },
+    {
+      "provider": "API_FOOTBALL",
+      "league_id": 739,
+      "country": "Switzerland",
+      "names": [
+        "AXA Women’s Super League"
+      ],
+      "gender": "F",
+      "season": 2026,
+      "type": "LEAGUE",
+      "national_tier": 1,
+      "level": "SENIOR",
+      "evidence": "filter_major_leagues.CATALOG_BY_COUNTRY + frozen manual_api/fixtures.json"
+    },
+    {
+      "provider": "API_FOOTBALL",
+      "league_id": 570,
+      "country": "Ghana",
+      "names": [
+        "Premier League"
+      ],
+      "gender": "M",
+      "season": 2026,
+      "type": "LEAGUE",
+      "national_tier": 1,
+      "level": "SENIOR",
+      "evidence": "filter_major_leagues.CATALOG_BY_COUNTRY + frozen manual_api/fixtures.json"
+    },
+    {
+      "provider": "API_FOOTBALL",
+      "league_id": 415,
+      "country": "Benin",
+      "names": [
+        "Championnat National"
+      ],
+      "gender": "M",
+      "season": 2026,
+      "type": "LEAGUE",
+      "national_tier": 1,
+      "level": "SENIOR",
+      "evidence": "filter_major_leagues.CATALOG_BY_COUNTRY + frozen manual_api/fixtures.json"
+    },
+    {
+      "provider": "API_FOOTBALL",
+      "league_id": 399,
+      "country": "Nigeria",
+      "names": [
+        "NPFL"
+      ],
+      "gender": "M",
+      "season": 2027,
+      "type": "LEAGUE",
+      "national_tier": 1,
+      "level": "SENIOR",
+      "evidence": "filter_major_leagues.CATALOG_BY_COUNTRY + frozen manual_api/fixtures.json"
+    },
+    {
+      "provider": "API_FOOTBALL",
+      "league_id": 141,
+      "country": "Spain",
+      "names": [
+        "Segunda División"
+      ],
+      "gender": "M",
+      "season": 2026,
+      "type": "LEAGUE",
+      "national_tier": 2,
+      "level": "SENIOR",
+      "evidence": "CURATED_NATIONAL_TIER_IDENTITY_WITH_FROZEN_API_LABEL"
+    },
+    {
+      "provider": "API_FOOTBALL",
+      "league_id": 89,
+      "country": "Netherlands",
+      "names": [
+        "Eerste Divisie"
+      ],
+      "gender": "M",
+      "season": 2026,
+      "type": "LEAGUE",
+      "national_tier": 2,
+      "level": "SENIOR",
+      "evidence": "CURATED_NATIONAL_TIER_IDENTITY_WITH_FROZEN_API_LABEL"
+    },
+    {
+      "provider": "API_FOOTBALL",
+      "league_id": 423,
+      "country": "Burkina-Faso",
+      "names": [
+        "Ligue 1"
+      ],
+      "gender": "M",
+      "season": 2026,
+      "type": "LEAGUE",
+      "national_tier": 1,
+      "level": "SENIOR",
+      "evidence": "filter_major_leagues.CATALOG_BY_COUNTRY + frozen manual_api/fixtures.json"
+    },
+    {
+      "provider": "API_FOOTBALL",
+      "league_id": 598,
+      "country": "Mali",
+      "names": [
+        "Première Division"
+      ],
+      "gender": "M",
+      "season": 2026,
+      "type": "LEAGUE",
+      "national_tier": 1,
+      "level": "SENIOR",
+      "evidence": "filter_major_leagues.CATALOG_BY_COUNTRY + frozen manual_api/fixtures.json"
+    },
+    {
+      "provider": "API_FOOTBALL",
+      "league_id": 403,
+      "country": "Senegal",
+      "names": [
+        "Ligue 1"
+      ],
+      "gender": "M",
+      "season": 2026,
+      "type": "LEAGUE",
+      "national_tier": 1,
+      "level": "SENIOR",
+      "evidence": "filter_major_leagues.CATALOG_BY_COUNTRY + frozen manual_api/fixtures.json"
+    },
+    {
+      "provider": "API_FOOTBALL",
+      "league_id": 142,
+      "country": "Spain",
+      "names": [
+        "Primera División Femenina"
+      ],
+      "gender": "F",
+      "season": 2026,
+      "type": "LEAGUE",
+      "national_tier": 1,
+      "level": "SENIOR",
+      "evidence": "filter_major_leagues.CATALOG_BY_COUNTRY + frozen manual_api/fixtures.json"
+    },
+    {
+      "provider": "API_FOOTBALL",
+      "league_id": 411,
+      "country": "Cameroon",
+      "names": [
+        "Elite One"
+      ],
+      "gender": "M",
+      "season": 2027,
+      "type": "LEAGUE",
+      "national_tier": 1,
+      "level": "SENIOR",
+      "evidence": "filter_major_leagues.CATALOG_BY_COUNTRY + frozen manual_api/fixtures.json"
+    },
+    {
+      "provider": "API_FOOTBALL",
+      "league_id": 254,
+      "country": "USA",
+      "names": [
+        "NWSL Women"
+      ],
+      "gender": "F",
+      "season": 2026,
+      "type": "LEAGUE",
+      "national_tier": 1,
+      "level": "SENIOR",
+      "evidence": "filter_major_leagues.CATALOG_BY_COUNTRY + frozen manual_api/fixtures.json"
+    },
+    {
+      "provider": "API_FOOTBALL",
+      "league_id": 129,
+      "country": "Argentina",
+      "names": [
+        "Primera Nacional"
+      ],
+      "gender": "M",
+      "season": 2026,
+      "type": "LEAGUE",
+      "national_tier": 2,
+      "level": "SENIOR",
+      "evidence": "CURATED_NATIONAL_TIER_IDENTITY_WITH_FROZEN_API_LABEL"
+    },
+    {
+      "provider": "API_FOOTBALL",
+      "league_id": 568,
+      "country": "Suriname",
+      "names": [
+        "Eerste Divisie"
+      ],
+      "gender": "M",
+      "season": 2026,
+      "type": "LEAGUE",
+      "national_tier": 1,
+      "level": "SENIOR",
+      "evidence": "filter_major_leagues.CATALOG_BY_COUNTRY + frozen manual_api/fixtures.json"
+    },
+    {
+      "provider": "API_FOOTBALL",
+      "league_id": 72,
+      "country": "Brazil",
+      "names": [
+        "Serie B"
+      ],
+      "gender": "M",
+      "season": 2026,
+      "type": "LEAGUE",
+      "national_tier": 2,
+      "level": "SENIOR",
+      "evidence": "CURATED_NATIONAL_TIER_IDENTITY_WITH_FROZEN_API_LABEL"
+    },
+    {
+      "provider": "API_FOOTBALL",
+      "league_id": 268,
+      "country": "Uruguay",
+      "names": [
+        "Primera División"
+      ],
+      "gender": "M",
+      "season": 2026,
+      "type": "LEAGUE",
+      "national_tier": 1,
+      "level": "SENIOR",
+      "evidence": "filter_major_leagues.CATALOG_BY_COUNTRY + frozen manual_api/fixtures.json"
+    },
+    {
+      "provider": "API_FOOTBALL",
+      "league_id": 1229,
+      "country": "Peru",
+      "names": [
+        "Liga Women"
+      ],
+      "gender": "F",
+      "season": 2026,
+      "type": "LEAGUE",
+      "national_tier": 1,
+      "level": "SENIOR",
+      "evidence": "filter_major_leagues.CATALOG_BY_COUNTRY + frozen manual_api/fixtures.json"
+    },
+    {
+      "provider": "API_FOOTBALL",
+      "league_id": 239,
+      "country": "Colombia",
+      "names": [
+        "Primera A"
+      ],
+      "gender": "M",
+      "season": 2026,
+      "type": "LEAGUE",
+      "national_tier": 1,
+      "level": "SENIOR",
+      "evidence": "filter_major_leagues.CATALOG_BY_COUNTRY + frozen manual_api/fixtures.json"
+    },
+    {
+      "provider": "API_FOOTBALL",
+      "league_id": 281,
+      "country": "Peru",
+      "names": [
+        "Primera División"
+      ],
+      "gender": "M",
+      "season": 2026,
+      "type": "LEAGUE",
+      "national_tier": 1,
+      "level": "SENIOR",
+      "evidence": "filter_major_leagues.CATALOG_BY_COUNTRY + frozen manual_api/fixtures.json"
+    },
+    {
+      "provider": "API_FOOTBALL",
+      "league_id": 339,
+      "country": "Guatemala",
+      "names": [
+        "Liga Nacional"
+      ],
+      "gender": "M",
+      "season": 2026,
+      "type": "LEAGUE",
+      "national_tier": 1,
+      "level": "SENIOR",
+      "evidence": "filter_major_leagues.CATALOG_BY_COUNTRY + frozen manual_api/fixtures.json"
+    },
+    {
+      "provider": "API_FOOTBALL",
+      "league_id": 304,
+      "country": "Panama",
+      "names": [
+        "Liga Panameña de Fútbol"
+      ],
+      "gender": "M",
+      "season": 2026,
+      "type": "LEAGUE",
+      "national_tier": 1,
+      "level": "SENIOR",
+      "evidence": "filter_major_leagues.CATALOG_BY_COUNTRY + frozen manual_api/fixtures.json"
+    },
+    {
+      "provider": "API_FOOTBALL",
+      "league_id": 71,
+      "country": "Brazil",
+      "names": [
+        "Serie A"
+      ],
+      "gender": "M",
+      "season": 2026,
+      "type": "LEAGUE",
+      "national_tier": 1,
+      "level": "SENIOR",
+      "evidence": "filter_major_leagues.CATALOG_BY_COUNTRY + frozen manual_api/fixtures.json"
+    },
+    {
+      "provider": "API_FOOTBALL",
+      "league_id": 421,
+      "country": "Aruba",
+      "names": [
+        "Division di Honor"
+      ],
+      "gender": "M",
+      "season": 2026,
+      "type": "LEAGUE",
+      "national_tier": 1,
+      "level": "SENIOR",
+      "evidence": "filter_major_leagues.CATALOG_BY_COUNTRY + frozen manual_api/fixtures.json"
+    },
+    {
+      "provider": "API_FOOTBALL",
+      "league_id": 269,
+      "country": "Uruguay",
+      "names": [
+        "Segunda División"
+      ],
+      "gender": "M",
+      "season": 2026,
+      "type": "LEAGUE",
+      "national_tier": 2,
+      "level": "SENIOR",
+      "evidence": "CURATED_NATIONAL_TIER_IDENTITY_WITH_FROZEN_API_LABEL"
+    },
+    {
+      "provider": "API_FOOTBALL",
+      "league_id": 262,
+      "country": "Mexico",
+      "names": [
+        "Liga MX"
+      ],
+      "gender": "M",
+      "season": 2026,
+      "type": "LEAGUE",
+      "national_tier": 1,
+      "level": "SENIOR",
+      "evidence": "filter_major_leagues.CATALOG_BY_COUNTRY + frozen manual_api/fixtures.json"
+    },
+    {
+      "provider": "API_FOOTBALL",
+      "league_id": 1130,
+      "country": "USA",
+      "names": [
+        "USL Super League"
+      ],
+      "gender": "F",
+      "season": 2026,
+      "type": "LEAGUE",
+      "national_tier": 1,
+      "level": "SENIOR",
+      "evidence": "filter_major_leagues.CATALOG_BY_COUNTRY + frozen manual_api/fixtures.json"
+    },
+    {
+      "provider": "API_FOOTBALL",
+      "league_id": 673,
+      "country": "Mexico",
+      "names": [
+        "Liga MX Femenil"
+      ],
+      "gender": "F",
+      "season": 2026,
+      "type": "LEAGUE",
+      "national_tier": 1,
+      "level": "SENIOR",
+      "evidence": "filter_major_leagues.CATALOG_BY_COUNTRY + frozen manual_api/fixtures.json"
+    },
+    {
+      "provider": "API_FOOTBALL",
+      "league_id": 370,
+      "country": "El-Salvador",
+      "names": [
+        "Primera Division"
+      ],
+      "gender": "M",
+      "season": 2026,
+      "type": "LEAGUE",
+      "national_tier": 1,
+      "level": "SENIOR",
+      "evidence": "filter_major_leagues.CATALOG_BY_COUNTRY + frozen manual_api/fixtures.json"
+    },
+    {
+      "provider": "API_FOOTBALL",
+      "league_id": 5,
+      "country": "World",
+      "names": [
+        "UEFA Nations League"
+      ],
+      "gender": "M",
+      "season": 2026,
+      "type": "NATIONAL_OFFICIAL",
+      "national_tier": null,
+      "level": "SENIOR",
+      "evidence": "EXISTING_EXPLICIT_COMPETITION_CATEGORIES"
+    },
+    {
+      "provider": "API_FOOTBALL",
+      "league_id": 10,
+      "country": "World",
+      "names": [
+        "Friendlies"
+      ],
+      "gender": "UNKNOWN",
+      "season": 2026,
+      "type": "NATIONAL_FRIENDLY",
+      "national_tier": null,
+      "level": "UNKNOWN",
+      "evidence": "API_COMPETITION_ID_SCOPE_REQUIRES_FIXTURE_CATEGORY_EVIDENCE"
+    },
+    {
+      "provider": "API_FOOTBALL",
+      "league_id": 667,
+      "country": "World",
+      "names": [
+        "Club Friendlies"
+      ],
+      "gender": "M",
+      "season": 2026,
+      "type": "CLUB_FRIENDLY",
+      "national_tier": null,
+      "level": "SENIOR",
+      "evidence": "API_COMPETITION_ID_SCOPE_REQUIRES_FIXTURE_CATEGORY_EVIDENCE"
+    },
+    {
+      "provider": "API_FOOTBALL",
+      "league_id": 66,
+      "country": "France",
+      "names": [
+        "Coupe de France"
+      ],
+      "gender": "M",
+      "season": 2026,
+      "type": "NATIONAL_CUP",
+      "national_tier": null,
+      "level": "SENIOR",
+      "evidence": "EXISTING_EXPLICIT_COMPETITION_CATEGORIES"
+    },
+    {
+      "provider": "API_FOOTBALL",
+      "league_id": 143,
+      "country": "Spain",
+      "names": [
+        "Copa del Rey"
+      ],
+      "gender": "M",
+      "season": 2026,
+      "type": "NATIONAL_CUP",
+      "national_tier": null,
+      "level": "SENIOR",
+      "evidence": "EXISTING_EXPLICIT_COMPETITION_CATEGORIES"
+    },
+    {"provider":"API_FOOTBALL","league_id":435,"country":"Spain","names":["Primera División RFEF - Group 1"],"gender":"M","season":2026,"type":"LEAGUE","national_tier":3,"level":"SENIOR","evidence":"filter_major_leagues.KNOWN_EXCLUDED_IDS + frozen exact API League ID/name"},
+    {"provider":"API_FOOTBALL","league_id":436,"country":"Spain","names":["Primera División RFEF - Group 2"],"gender":"M","season":2026,"type":"LEAGUE","national_tier":3,"level":"SENIOR","evidence":"filter_major_leagues.KNOWN_EXCLUDED_IDS + frozen exact API League ID/name"},
+    {"provider":"API_FOOTBALL","league_id":875,"country":"Spain","names":["Segunda División RFEF - Group 1"],"gender":"M","season":2026,"type":"LEAGUE","national_tier":4,"level":"SENIOR","evidence":"filter_major_leagues.KNOWN_EXCLUDED_IDS + frozen exact API League ID/name"},
+    {"provider":"API_FOOTBALL","league_id":876,"country":"Spain","names":["Segunda División RFEF - Group 2"],"gender":"M","season":2026,"type":"LEAGUE","national_tier":4,"level":"SENIOR","evidence":"filter_major_leagues.KNOWN_EXCLUDED_IDS + frozen exact API League ID/name"},
+    {"provider":"API_FOOTBALL","league_id":878,"country":"Spain","names":["Segunda División RFEF - Group 4"],"gender":"M","season":2026,"type":"LEAGUE","national_tier":4,"level":"SENIOR","evidence":"filter_major_leagues.KNOWN_EXCLUDED_IDS + frozen exact API League ID/name"},
+    {"provider":"API_FOOTBALL","league_id":439,"country":"Spain","names":["Tercera División RFEF - Group 1"],"gender":"M","season":2026,"type":"LEAGUE","national_tier":5,"level":"SENIOR","evidence":"filter_major_leagues.KNOWN_EXCLUDED_IDS + frozen exact API League ID/name"},
+    {"provider":"API_FOOTBALL","league_id":442,"country":"Spain","names":["Tercera División RFEF - Group 4"],"gender":"M","season":2026,"type":"LEAGUE","national_tier":5,"level":"SENIOR","evidence":"filter_major_leagues.KNOWN_EXCLUDED_IDS + frozen exact API League ID/name"},
+    {"provider":"API_FOOTBALL","league_id":443,"country":"Spain","names":["Tercera División RFEF - Group 5"],"gender":"M","season":2026,"type":"LEAGUE","national_tier":5,"level":"SENIOR","evidence":"filter_major_leagues.KNOWN_EXCLUDED_IDS + frozen exact API League ID/name"},
+    {"provider":"API_FOOTBALL","league_id":444,"country":"Spain","names":["Tercera División RFEF - Group 6"],"gender":"M","season":2026,"type":"LEAGUE","national_tier":5,"level":"SENIOR","evidence":"filter_major_leagues.KNOWN_EXCLUDED_IDS + frozen exact API League ID/name"},
+    {"provider":"API_FOOTBALL","league_id":445,"country":"Spain","names":["Tercera División RFEF - Group 7"],"gender":"M","season":2026,"type":"LEAGUE","national_tier":5,"level":"SENIOR","evidence":"filter_major_leagues.KNOWN_EXCLUDED_IDS + frozen exact API League ID/name"},
+    {"provider":"API_FOOTBALL","league_id":446,"country":"Spain","names":["Tercera División RFEF - Group 8"],"gender":"M","season":2026,"type":"LEAGUE","national_tier":5,"level":"SENIOR","evidence":"filter_major_leagues.KNOWN_EXCLUDED_IDS + frozen exact API League ID/name"},
+    {"provider":"API_FOOTBALL","league_id":447,"country":"Spain","names":["Tercera División RFEF - Group 9"],"gender":"M","season":2026,"type":"LEAGUE","national_tier":5,"level":"SENIOR","evidence":"filter_major_leagues.KNOWN_EXCLUDED_IDS + frozen exact API League ID/name"},
+    {"provider":"API_FOOTBALL","league_id":448,"country":"Spain","names":["Tercera División RFEF - Group 10"],"gender":"M","season":2026,"type":"LEAGUE","national_tier":5,"level":"SENIOR","evidence":"filter_major_leagues.KNOWN_EXCLUDED_IDS + frozen exact API League ID/name"},
+    {"provider":"API_FOOTBALL","league_id":449,"country":"Spain","names":["Tercera División RFEF - Group 11"],"gender":"M","season":2026,"type":"LEAGUE","national_tier":5,"level":"SENIOR","evidence":"filter_major_leagues.KNOWN_EXCLUDED_IDS + frozen exact API League ID/name"},
+    {"provider":"API_FOOTBALL","league_id":451,"country":"Spain","names":["Tercera División RFEF - Group 13"],"gender":"M","season":2026,"type":"LEAGUE","national_tier":5,"level":"SENIOR","evidence":"filter_major_leagues.KNOWN_EXCLUDED_IDS + frozen exact API League ID/name"},
+    {"provider":"API_FOOTBALL","league_id":454,"country":"Spain","names":["Tercera División RFEF - Group 16"],"gender":"M","season":2026,"type":"LEAGUE","national_tier":5,"level":"SENIOR","evidence":"filter_major_leagues.KNOWN_EXCLUDED_IDS + frozen exact API League ID/name"},
+    {"provider":"API_FOOTBALL","league_id":456,"country":"Spain","names":["Tercera División RFEF - Group 18"],"gender":"M","season":2026,"type":"LEAGUE","national_tier":5,"level":"SENIOR","evidence":"filter_major_leagues.KNOWN_EXCLUDED_IDS + frozen exact API League ID/name"},
+    {"provider":"API_FOOTBALL","league_id":138,"country":"Italy","names":["Serie C - Girone A"],"gender":"M","season":2026,"type":"LEAGUE","national_tier":3,"level":"SENIOR","evidence":"filter_major_leagues.KNOWN_EXCLUDED_IDS + frozen exact API League ID/name"},
+    {"provider":"API_FOOTBALL","league_id":942,"country":"Italy","names":["Serie C - Girone B"],"gender":"M","season":2026,"type":"LEAGUE","national_tier":3,"level":"SENIOR","evidence":"filter_major_leagues.KNOWN_EXCLUDED_IDS + frozen exact API League ID/name"},
+    {"provider":"API_FOOTBALL","league_id":943,"country":"Italy","names":["Serie C - Girone C"],"gender":"M","season":2026,"type":"LEAGUE","national_tier":3,"level":"SENIOR","evidence":"filter_major_leagues.KNOWN_EXCLUDED_IDS + frozen exact API League ID/name"}
+  ]
+}
