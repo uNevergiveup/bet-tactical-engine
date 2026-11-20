@@ -846,12 +846,98 @@ def cmd_bwin_verify(args: argparse.Namespace) -> int:
     return 0
 
 
+def _archive_legacy_preselection(
+    existing_path: Path,
+    out_folder: Path,
+    now_utc: datetime,
+) -> dict[str, Any]:
+    """Conserva una copia binaria inmutable del preselection.json previo sin alterar su contenido."""
+    raw_bytes = existing_path.read_bytes()
+    prior_sha = hashlib.sha256(raw_bytes).hexdigest()
+    archive_dir = out_folder / "archive"
+    archive_dir.mkdir(parents=True, exist_ok=True)
+    archive_path = archive_dir / f"preselection_{prior_sha[:12]}.json"
+    if archive_path.exists():
+        if archive_path.read_bytes() != raw_bytes:
+            raise StepError(f"ARCHIVE_HASH_COLLISION:{archive_path}")
+    else:
+        with archive_path.open("xb") as handle:
+            handle.write(raw_bytes)
+    return {
+        "archive_path": str(archive_path),
+        "archive_sha256": prior_sha,
+        "archived_at_utc": now_utc.isoformat(),
+    }
+
+
+def _audit_preselection_compatibility(
+    existing_doc: dict[str, Any],
+    major_doc: dict[str, Any],
+    current_filter_sha: str | None,
+) -> dict[str, Any]:
+    """Audita compatibilidad de fingerprint y procedencia antes de decidir reanudación o migración."""
+    prior_sha = existing_doc.get("source_filter_sha256")
+    prior_filter_ts = existing_doc.get("source_filter_generated_at_utc")
+    current_filter_ts = major_doc.get("generated_at_utc")
+    prior_matches = existing_doc.get("matches") or []
+    prior_evaluated_ids = [int(m["fixture_id"]) for m in prior_matches if m.get("fixture_id") is not None]
+    prior_fully_eval = (existing_doc.get("counts") or {}).get("fully_evaluated")
+    prior_errors = existing_doc.get("api_errors") or {}
+
+    if isinstance(prior_sha, str) and prior_sha and current_filter_sha and prior_sha == current_filter_sha:
+        return {
+            "compatible_for_merge": True,
+            "migration_reason": "COMPATIBLE_SOURCE_FILTER_SHA256",
+            "reasons": [],
+            "reusable_stats": True,
+            "prior_fingerprint_backfilled": False,
+            "prior_source_filter_sha256": prior_sha,
+            "current_source_filter_sha256": current_filter_sha,
+            "prior_filter_generated_at_utc": prior_filter_ts,
+            "current_filter_generated_at_utc": current_filter_ts,
+            "prior_evaluated_ids": prior_evaluated_ids,
+            "prior_fully_evaluated": prior_fully_eval,
+        }
+
+    reasons: list[str] = []
+    if not prior_sha:
+        migration_reason = "LEGACY_NULL_FINGERPRINT"
+        reasons.append("MISSING_SOURCE_FILTER_SHA256")
+        if prior_filter_ts != current_filter_ts:
+            reasons.append("SOURCE_FILTER_TIMESTAMP_MISMATCH")
+        else:
+            reasons.append("UNPROVEN_FILTER_BYTES_CANNOT_BACKFILL_SHA256")
+    else:
+        migration_reason = "SOURCE_FILTER_CHANGED"
+        reasons.append("SOURCE_FILTER_SHA256_MISMATCH")
+        if prior_filter_ts != current_filter_ts:
+            reasons.append("SOURCE_FILTER_TIMESTAMP_MISMATCH")
+
+    if prior_errors or not prior_fully_eval:
+        reasons.append("PRIOR_REPORT_HAS_NO_VALID_EVALUATED_STATS")
+
+    return {
+        "compatible_for_merge": False,
+        "migration_reason": migration_reason,
+        "reasons": reasons,
+        "reusable_stats": False,
+        "prior_fingerprint_backfilled": False,
+        "prior_source_filter_sha256": prior_sha,
+        "current_source_filter_sha256": current_filter_sha,
+        "prior_filter_generated_at_utc": prior_filter_ts,
+        "current_filter_generated_at_utc": current_filter_ts,
+        "prior_evaluated_ids": prior_evaluated_ids,
+        "prior_fully_evaluated": prior_fully_eval,
+    }
+
+
 def cmd_stats_fetch(args: argparse.Namespace) -> int:
     import preselect_matches as pm
 
     now_utc = _now_utc(args.asof)
     root, eval_dir, _, _ = _resolve_eval_dir(args, now_utc)
-    _, major_doc = _load_major_doc(eval_dir)
+    major_path, major_doc = _load_major_doc(eval_dir)
+    current_filter_sha = _sha256_file(major_path)
 
     recon = _bwin_reconcile_records(eval_dir, major_doc, now_utc)
     verified_ids = {int(r["fixture_id"]) for r in recon["verified"]}
@@ -872,7 +958,24 @@ def cmd_stats_fetch(args: argparse.Namespace) -> int:
         )
 
     existing_path = out_folder / "preselection.json"
-    existing_doc = _read_json(existing_path) if existing_path.is_file() and not args.refresh else None
+    existing_doc: dict[str, Any] | None = None
+    migration_meta: dict[str, Any] | None = None
+    if existing_path.is_file():
+        prior_doc = _read_json(existing_path)
+        compat = _audit_preselection_compatibility(prior_doc, major_doc, current_filter_sha)
+        if args.refresh or not compat["compatible_for_merge"]:
+            archive_info = _archive_legacy_preselection(existing_path, out_folder, now_utc)
+            migration_reason = "MANUAL_REFRESH" if (args.refresh and compat["compatible_for_merge"]) else compat["migration_reason"]
+            migration_meta = {
+                **compat,
+                "migration_reason": migration_reason,
+                "stats_reused_from_prior_report": False,
+                **archive_info,
+            }
+            existing_doc = None
+        else:
+            existing_doc = prior_doc
+
     already_ids = {int(m["fixture_id"]) for m in (existing_doc or {}).get("matches", [])}
     missing_ids = sorted(target_ids - already_ids)
 
@@ -885,13 +988,17 @@ def cmd_stats_fetch(args: argparse.Namespace) -> int:
 
         if not API_KEY:
             raise StepError("FOOTBALL_API_KEY no configurada (revisa config/.env)")
+        if existing_doc is not None and existing_path.is_file():
+            # Conserva también snapshot previo antes de fusionar nuevos fixtures.
+            _archive_legacy_preselection(existing_path, out_folder, now_utc)
+        client_asof = now_utc if args.asof else None
         client = pm.ApiFootball(
             API_KEY,
             FOOTBALL_BASE_URL,
             root,
             timeout=REQUEST_TIMEOUT,
             refresh=args.refresh,
-            asof=now_utc,
+            asof=client_asof,
         )
         try:
             fresh = pm.run_evaluator(
@@ -904,19 +1011,36 @@ def cmd_stats_fetch(args: argparse.Namespace) -> int:
                 history_seasons=args.history_seasons,
                 mode=args.mode,
                 fixture_ids=set(missing_ids),
+                source_filter_sha256=current_filter_sha,
             )
         finally:
             client.close()
-        report = pm.merge_preselection_reports(existing_doc, fresh) if existing_doc else fresh
+        if fresh.get("source_filter_sha256") is None:
+            fresh["source_filter_sha256"] = current_filter_sha
+        elif current_filter_sha and fresh.get("source_filter_sha256") != current_filter_sha:
+            raise StepError(
+                f"STATS_FETCH_FILTER_SHA_MISMATCH:{fresh.get('source_filter_sha256')}!={current_filter_sha}"
+            )
+        if not fresh.get("source_filter_generated_at_utc"):
+            fresh["source_filter_generated_at_utc"] = major_doc.get("generated_at_utc")
+
+        report = pm.merge_preselection_reports(existing_doc, fresh, allow_new_fixtures=True) if existing_doc else fresh
         for m in report.get("matches", []):
             fid = int(m["fixture_id"])
             m["bwin_accredited"] = fid in verified_ids
             m["research_only_without_bwin"] = fid not in verified_ids
             m["commercial_eligible"] = (fid in verified_ids) and not args.research_without_bwin
         report["route_mode"] = route_tag
+        report["source_filter_path"] = str(major_path.resolve())
+        if migration_meta is not None:
+            report["snapshot_migration"] = migration_meta
         pm.save_report(report, out_folder)
         status = "COMPLETED"
-        reason = f"FETCHED_{len(missing_ids)}_FIXTURES"
+        reason = (
+            f"MIGRATED_{migration_meta['migration_reason']}_FETCHED_{len(missing_ids)}_FIXTURES"
+            if migration_meta is not None
+            else f"FETCHED_{len(missing_ids)}_FIXTURES"
+        )
 
     family_cov = {
         str(m["fixture_id"]): {
@@ -940,16 +1064,24 @@ def cmd_stats_fetch(args: argparse.Namespace) -> int:
         "generated_at_utc": now_utc.isoformat(),
         "counts": counts,
         "family_coverage": family_cov,
+        "source_filter_path": str(major_path),
+        "source_filter_sha256": current_filter_sha,
         "preselection_path": str(existing_path),
         "preselection_sha256": _sha256_file(existing_path),
+        "snapshot_migration": migration_meta or report.get("snapshot_migration"),
     }
     md_lines = [
         "# Paso 6: Stats Fetch (API-Football)",
         "",
         f"- Estado: **{status}** ({reason}) | Ruta: `{route_tag}`",
         f"- Partidos en `preselection.json`: **{counts['matches_in_report']}**",
-        f"- Artefacto: `{existing_path}`",
+        f"- Filtro origen (`fixtures_major.json`): `{current_filter_sha}`",
+        f"- Artefacto: `{existing_path}` (`{payload['preselection_sha256']}`)",
     ]
+    if migration_meta is not None:
+        md_lines.append(
+            f"- Migración de snapshot previo: **{migration_meta['migration_reason']}** -> copia inmutable `{migration_meta['archive_path']}` (`{migration_meta['archive_sha256']}`)"
+        )
     step_json, step_md = _write_step_artifacts(eval_dir, "stats_fetch", payload, md_lines)
     _print_step_summary("stats-fetch", status, reason, counts, {"preselection": existing_path, "step_json": step_json, "step_md": step_md})
     return 0
@@ -997,6 +1129,10 @@ def cmd_patterns(args: argparse.Namespace) -> int:
         "supported_total": sum(v["supported_signals"] for v in signal_summary.values()),
         "without_bwin_market": sum(v["signals_without_bwin_market"] for v in signal_summary.values()),
     }
+    pre_doc = _read_json(pre_path)
+    pre_sha = _sha256_file(pre_path)
+    tactical_json_path = tactical_out / "tactical_signal_engine.json"
+    tactical_sha = _sha256_file(tactical_json_path)
     payload = {
         "schema_version": SCHEMA_VERSION,
         "step": "patterns",
@@ -1005,14 +1141,19 @@ def cmd_patterns(args: argparse.Namespace) -> int:
         "generated_at_utc": now_utc.isoformat(),
         "counts": counts,
         "signal_summary": signal_summary,
-        "tactical_json": str(tactical_out / "tactical_signal_engine.json"),
+        "preselection_path": str(pre_path),
+        "preselection_sha256": pre_sha,
+        "source_filter_sha256": pre_doc.get("source_filter_sha256"),
+        "tactical_json": str(tactical_json_path),
+        "tactical_json_sha256": tactical_sha,
         "tactical_md": str(tactical_out / "TACTICAL_SELECTION_REPORT.md"),
     }
     md_lines = [
         "# Paso 7: Patrones Estadísticos y Señales Descriptivas",
         "",
         f"- Partidos evaluados: **{counts['fixtures']}** | Señales sustentadas: **{counts['supported_total']}** | Sin mercado Bwin: **{counts['without_bwin_market']}**",
-        f"- Reporte motor: `{tactical_out / 'TACTICAL_SELECTION_REPORT.md'}`",
+        f"- Preselección entrada: `{pre_path}` (`{pre_sha}`) | Filtro origen: `{pre_doc.get('source_filter_sha256')}`",
+        f"- Reporte motor: `{tactical_out / 'TACTICAL_SELECTION_REPORT.md'}` (`{tactical_sha}`)",
         "",
         "Nota: Los candidatos descriptivos se conservan aunque no tengan probabilidad calibrada ni oferta Bwin.",
     ]

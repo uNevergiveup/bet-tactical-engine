@@ -87,10 +87,78 @@ class ApiFootball:
             raise PreselectionError('Presupuesto API inválido: reserve debe ser menor que budget')
         self.request_budget=request_budget;self.request_reserve=request_reserve;self.request_ledger=[]
         self.consecutive_failures=0
+        self._ft_detail_cache_index:dict[int,tuple[datetime,dict[str,Any],Path,str]]|None=None
         self.session=requests.Session()
         self.session.headers.update({'x-apisports-key':api_key,'Accept':'application/json',
                                      'User-Agent':f'prematch-preselection/{VERSION}'})
     def close(self):self.session.close()
+    def _load_ft_detail_cache_index(self) -> dict[int,tuple[datetime,dict[str,Any],Path,str]]:
+        if self._ft_detail_cache_index is not None:
+            return self._ft_detail_cache_index
+        index:dict[int,tuple[datetime,dict[str,Any],Path,str]]={}
+        cache_dir=self.root/'outputs'/'data'/'cache'/'preselect_api'
+        if not cache_dir.is_dir():
+            self._ft_detail_cache_index=index
+            return index
+        for p in sorted(cache_dir.glob('*.json')):
+            try:
+                raw_bytes=p.read_bytes()
+                obj=json.loads(raw_bytes)
+                stamp=utc_datetime(obj.get('retrieved_at_utc'))
+                if self.asof is not None and stamp>self.asof:
+                    continue
+                rows=obj.get('response')
+                if not isinstance(rows,list):
+                    continue
+                file_sha=hashlib.sha256(raw_bytes).hexdigest()
+                for row in rows:
+                    if not isinstance(row,dict):continue
+                    fix=row.get('fixture') or {}
+                    fid=positive_int(fix.get('id'))
+                    if fid is None or (fix.get('status') or {}).get('short')!='FT':continue
+                    stats=row.get('statistics')
+                    if not isinstance(stats,list) or not stats:continue
+                    prev=index.get(fid)
+                    if prev is None or stamp>prev[0]:
+                        index[fid]=(stamp,row,p,file_sha)
+            except (OSError,ValueError,TypeError,KeyError):
+                continue
+        self._ft_detail_cache_index=index
+        return index
+    def get_fixture_details(self,batch:list[int],cutoff:datetime|None=None) -> list[dict[str,Any]]:
+        if self.refresh or not batch:
+            return self.get('fixtures',{'ids':'-'.join(str(x) for x in batch)}) if batch else []
+        limit=self.asof or cutoff or datetime.now(UTC)
+        index=self._load_ft_detail_cache_index()
+        cached_rows=[];reused_fids=[];used_sources={};remaining=[]
+        max_stamp=None
+        for fid in batch:
+            hit=index.get(fid)
+            if hit is not None:
+                stamp,row,path,file_sha=hit
+                if stamp<=limit and historical_available(row,limit):
+                    cached_rows.append(dict(row,_acquired_at_utc=stamp.isoformat()))
+                    reused_fids.append(fid)
+                    used_sources[str(path.resolve())]={'path':str(path.resolve()),'sha256':file_sha,'retrieved_at_utc':stamp.isoformat()}
+                    if max_stamp is None or stamp>max_stamp:max_stamp=stamp
+                    continue
+            remaining.append(fid)
+        if cached_rows:
+            self.cache_hits+=1
+            self.request_ledger.append({
+                'request_id':'hist_ft_detail_'+'_'.join(str(x) for x in reused_fids),
+                'endpoint':'fixtures',
+                'parameters':{'ids':'-'.join(str(x) for x in reused_fids)},
+                'requested_at_utc':datetime.now(UTC).isoformat(),
+                'status':'HISTORICAL_DETAIL_CACHE_HIT',
+                'attempts':0,
+                'reused_fixture_ids':reused_fids,
+                'cache_sources':list(used_sources.values()),
+                'first_observed_at_utc':max_stamp.isoformat() if max_stamp else None,
+            })
+        if remaining:
+            cached_rows.extend(self.get('fixtures',{'ids':'-'.join(str(x) for x in remaining)}))
+        return cached_rows
     def get(self,route:str,params:dict[str,Any]) -> list[dict[str,Any]]:
         query=urlencode(sorted((str(k),str(v)) for k,v in params.items()))
         key=hashlib.sha256((route+'?'+query).encode()).hexdigest()
@@ -774,7 +842,8 @@ def history_seasons_for_team(fixture_seasons:set[int], cutoff:datetime,
 def run_evaluator(doc:dict[str,Any],client:Any,now:datetime,history_limit:int=20,
                   detail_limit:int=8,max_matches:int=0,fixture_id:int|None=None,
                   history_seasons:int=3,mode:str='full',detail_top:int=30,
-                  fixture_ids:set[int]|None=None, coverage_rules:dict|None=None) -> dict[str,Any]:
+                  fixture_ids:set[int]|None=None, coverage_rules:dict|None=None,
+                  source_filter_sha256:str|None=None) -> dict[str,Any]:
     if doc.get('schema_version')!='1.0-major-leagues':
         raise PreselectionError('Entrada no es fixtures_major.json V1.0')
     if not 1 <= history_seasons <= 3:
@@ -886,7 +955,10 @@ def run_evaluator(doc:dict[str,Any],client:Any,now:datetime,history_limit:int=20
     for i in range(0,len(detail_list),20):
         batch=detail_list[i:i+20]
         try:
-            rows=client.get('fixtures',{'ids':'-'.join(str(x) for x in batch)})
+            if hasattr(client,'get_fixture_details'):
+                rows=client.get_fixture_details(batch,cutoff=now)
+            else:
+                rows=client.get('fixtures',{'ids':'-'.join(str(x) for x in batch)})
             for raw in rows:
                 if isinstance(raw,dict):
                     fid=(raw.get('fixture') or {}).get('id')
@@ -951,7 +1023,7 @@ def run_evaluator(doc:dict[str,Any],client:Any,now:datetime,history_limit:int=20
                                'kickoff_madrid':f.get('kickoff_madrid'),'status':status})
     skipped_targets=sum(m.get('detail_acquisition_reason')=='DECLARED_FALSE_SKIPPED' for m in result if m['fixture_id'] in detail_selected)
     return {'schema_version':VERSION,'generated_at_utc':now.isoformat(),
-      'source_filter_sha256':None,'source_filter_generated_at_utc':doc.get('generated_at_utc'),
+      'source_filter_sha256':source_filter_sha256,'source_filter_generated_at_utc':doc.get('generated_at_utc'),
       'counts':{'input_filter':len(doc['fixtures']),'evaluated':len(result),
                 'stale_skipped':len(stale),'histories_requested':len(cutoff_by_team),
                 'history_season_requests':history_queries,
@@ -989,11 +1061,13 @@ def read_fixture_ids_file(path:Path) -> set[int]:
     return result
 
 
-def merge_preselection_reports(base:dict[str,Any],updated:dict[str,Any]) -> dict[str,Any]:
+def merge_preselection_reports(base:dict[str,Any],updated:dict[str,Any],allow_new_fixtures:bool=False) -> dict[str,Any]:
     """Fusiona únicamente fixtures coincidentes; no finge haber actualizado los demás.
 
     Exige identidad del descubrimiento y de liga/temporada, registra diferencias
     temporales y recalcula rankings sin confundir N/D con estadística cero.
+    Si allow_new_fixtures=True (mismo source_filter_sha256), incorpora fixtures nuevos
+    de una tanda incremental sin sobrescribir ni alterar otros existentes.
     """
     if base.get('schema_version') not in ('1.2-preselection','1.3-preselection'):
         raise PreselectionError('--merge-report requiere un informe V1.2 o V1.3')
@@ -1004,10 +1078,15 @@ def merge_preselection_reports(base:dict[str,Any],updated:dict[str,Any]) -> dict
     if len(old)!=len(base.get('matches',[])):
         raise PreselectionError('IDs duplicados en informe base')
     replaced=[]
+    added=[]
     for m in updated.get('matches',[]):
         fid=m['fixture_id']
         if fid not in old:
-            raise PreselectionError(f'Fixture {fid} no figura en informe base')
+            if not allow_new_fixtures:
+                raise PreselectionError(f'Fixture {fid} no figura en informe base')
+            old[fid]=m
+            added.append(fid)
+            continue
         previous=old[fid]
         if (m.get('league_id'),m.get('season'),m.get('home'),m.get('away'),m.get('kickoff_madrid')) != (previous.get('league_id'),previous.get('season'),previous.get('home'),previous.get('away'),previous.get('kickoff_madrid')):
             raise PreselectionError(f'Identidad distinta para fixture {fid}: no se fusiona')
@@ -1036,6 +1115,7 @@ def merge_preselection_reports(base:dict[str,Any],updated:dict[str,Any]) -> dict
         'base_api_usage':base.get('api_usage'),
         'update_api_usage':updated.get('api_usage'),
         'updated_fixture_ids':replaced,
+        'added_fixture_ids':added,
         'old_detailed_count':sum(bool(x.get('details_checked')) for x in base.get('matches',[])),
         'output_detailed_count':counts['details_requested'],
         'temporal_note':'Las clasificaciones y el histórico pueden proceder de instantes distintos; NO usar como backtest as-of sin auditoría.'
