@@ -36,7 +36,7 @@ CALENDAR = (
 EVENT_RE = re.compile(r"(?:^|/)eventos/[^?#]*?(?:-2:|:)(\d{5,12})(?:[/?#]|$)", re.I)
 COUNTDOWN_RE = re.compile(r"\b(?:comienza|empieza)\s+en\s+(?:(?P<h>\d{1,2})\s*h(?:oras?)?\s*)?(?P<m>\d{1,3})\s*min(?:utos?)?\b", re.I)
 LIVE_RE = re.compile(r"(?:\blive(?:1t|2t|descanso)?\b|\ben\s+vivo\b|\bdescanso\b|\bhalf\s*time\b|\b\d\s*[tT]\s*[•:])", re.I)
-FEMALE_RE = re.compile(r"(?:\bwomen(?:'s)?\b|\bwomens\b|\bfemenin[oa]\b|\bfeminin[ea]\b|\bfrauen\b|\bfemminile\b|\bdamen\b|\(w\)|\sw\b)", re.I)
+FEMALE_RE = re.compile(r"(?:\bwomen(?:'s)?\b|\bwomens\b|\bfemenin[oa]\b|\bfeminin[ea]\b|\bfrauen\b|\bfemminile\b|\bdamen\b|\(w\)|\sw\b|\(f\)|(?<=\s)f(?:hoy|ma[nñ]ana)?(?=\s|$))", re.I)
 NON_ADULT_RE = re.compile(r"(?:\b(?:u|sub)\s*[- ]?(?:1[0-9]|2[0-3])\b|\bunder\s*[- ]?(?:1[0-9]|2[0-3])\b|\byouth\b|\bjuvenil(?:es)?\b|\breserves?\b|\breservas?\b)", re.I)
 CHROME_ERRORS = ("ERR_CONNECTION", "DNS", "Access Denied", "Forbidden", "403", "CAPTCHA", "captcha")
 STOP_TOKENS = {
@@ -272,13 +272,34 @@ def team_tokens(name: str) -> list[str]:
     return result or norm(name).split()
 
 
+_CLUB_CITY_TRANSLATIONS = {
+    "koln": "colonia",
+    "colonia": "koln",
+    "munchen": "munich",
+    "munich": "munchen",
+    "tbilisi": "tiflis",
+    "tiflis": "tbilisi",
+    "brugge": "brujas",
+    "brujas": "brugge",
+    "marseille": "marsella",
+    "marsella": "marseille",
+    "nurnberg": "nuremberg",
+    "mainz": "maguncia",
+    "gent": "gante",
+    "antwerp": "amberes",
+    "kobenhavn": "copenhague",
+    "basel": "basilea",
+}
+
+
 def identity_name_evidence(event_text: str, slug: str) -> str:
     """Remove catalog clocks before comparing team names.
 
     Otherwise a club number can accidentally match ``20`` from ``20:00`` or a
     date, which was observed in the 100-fixture retrieval regression.
     """
-    clean = re.sub(r"\b(?:Hoy|Mañana)\s*/\s*\d{1,2}:\d{2}\b", " ", str(event_text), flags=re.I)
+    clean = re.sub(r"(?i)([a-z0-9])\s*f(?:hoy|ma[nñ]ana)\s*/\s*\d{1,2}:\d{2}\b", r"\1 f ", str(event_text))
+    clean = re.sub(r"\b(?:Hoy|Mañana)\s*/\s*\d{1,2}:\d{2}\b", " ", clean, flags=re.I)
     clean = re.sub(r"\b\d{1,2}/\d{1,2}/\d{2,4}\s+\d{1,2}:\d{2}\b", " ", clean)
     return f"{clean} {slug}"
 
@@ -341,6 +362,29 @@ def team_candidate_queries(team: str, *, national_context: bool = False) -> set[
                 rest = query[len(long_prefix):].strip()
                 if any(len(tok) >= 4 for tok in team_tokens(rest)):
                     queries.add(f"{short_prefix}{rest}")
+        # German ordinal prefix like "1. FC Koln" -> candidate variant without "1 "
+        if re.match(r"^(?:1|1\.)\s+(?:fc|fsv|sv|sc)\s+", query):
+            rest = re.sub(r"^(?:1|1\.)\s+", "", query).strip()
+            if any(len(tok) >= 4 for tok in team_tokens(rest)):
+                queries.add(rest)
+        # Institutional single-word "deportivo <unique_club>" (min 7 chars, avoids short city collisions)
+        if query.startswith("deportivo "):
+            rest = query[len("deportivo "):].strip()
+            if len(rest) >= 7 and " " not in rest:
+                queries.add(rest)
+        # Safe abbreviation expansion: "st " <-> "saint "
+        if re.search(r"\bst\b", query):
+            queries.add(re.sub(r"\bst\b", "saint", query))
+        elif re.search(r"\bsaint\b", query):
+            queries.add(re.sub(r"\bsaint\b", "st", query))
+        # Safe city-club lexical translations (candidate retrieval only)
+        q_toks = query.split()
+        if any(t in _CLUB_CITY_TRANSLATIONS for t in q_toks):
+            translated = " ".join(_CLUB_CITY_TRANSLATIONS.get(t, t) for t in q_toks)
+            queries.add(translated)
+            non_stop = [t for t in translated.split() if t not in STOP_TOKENS and not t.isdigit()]
+            if non_stop and any(len(t) >= 5 for t in non_stop):
+                queries.add(" ".join(non_stop))
     queries.update(INSTITUTIONAL_CANDIDATE_ALIASES.get(query, ()))
     for canonical,aliases in TEAM_ALIASES.items():
         variants={norm(x) for x in (canonical,*aliases)}
@@ -461,7 +505,7 @@ def team_order_status(home: str, away: str, evidence: str, *, national_context: 
 
 
 def category_compatibility(fixture: dict, evidence: str) -> str:
-    observed_female = bool(FEMALE_RE.search(evidence) or re.search(r'(?i)(?:\(f\)|\bf\b)',evidence))
+    observed_female = bool(FEMALE_RE.search(evidence))
     observed_non_adult = bool(NON_ADULT_RE.search(evidence))
     expected = str(fixture.get("gender") or "UNKNOWN").upper()
     if observed_non_adult:
@@ -588,13 +632,22 @@ def displayed_header_kickoff(evidence: dict) -> datetime | None:
             return None
         start = start.astimezone(TZ); end = end.astimezone(TZ)
         if start.date() != end.date():return None
-        label = norm(evidence.get('date_label',''))
-        if label not in ('hoy','manana'):return None
+        raw_label = str(evidence.get('date_label', '')).strip()
+        label = norm(raw_label)
         clock = evidence.get('time_label','').strip()
         if not re.fullmatch(r'\d{1,2}:\d{2}',clock):return None
         hour,minute = map(int,clock.split(':'))
         if hour>23 or minute>59:return None
-        date = end.date() + timedelta(days=int(label=='manana'))
+        if label in ('hoy', 'manana'):
+            date = end.date() + timedelta(days=int(label=='manana'))
+        else:
+            m_date = re.fullmatch(r'(\d{1,2})/(\d{1,2})/(\d{2,4})', raw_label)
+            if not m_date:
+                return None
+            d_val, m_val, y_val = int(m_date.group(1)), int(m_date.group(2)), int(m_date.group(3))
+            if y_val < 100:
+                y_val += 2000
+            date = datetime(y_val, m_val, d_val).date()
         kickoff = datetime(date.year,date.month,date.day,hour,minute,tzinfo=TZ)
         # A displayed clock without an offset cannot disambiguate a DST fold.
         if kickoff.replace(fold=0).utcoffset() != kickoff.replace(fold=1).utcoffset():return None
@@ -1355,6 +1408,14 @@ def inspect_event(browser, result: dict, fixture: dict, navigation_timeout: int,
             if norm(title) not in ('', 'bwin'):
                 break
             page.wait_for_timeout(500)
+        # Wait briefly for Angular scoreboard header (.event-time) or JSON-LD to hydrate
+        header = page.locator('ms-event-details-main ms-prematch-scoreboard .event-time')
+        for _ in range(8):
+            if header.count() == 1 and header.locator('.date').count() == 1 and header.locator('.time').count() == 1:
+                break
+            if event_absolute_kickoff(page.content()) is not None:
+                break
+            page.wait_for_timeout(400)
         observation["observed_at_utc"] = datetime.now(timezone.utc).isoformat()
         observation["page_title"] = page.title()
         observation["event_id_from_url"] = extract_event_id(page.url)
@@ -1390,6 +1451,18 @@ def inspect_event(browser, result: dict, fixture: dict, navigation_timeout: int,
         if observed_start:
             observation["event_start_machine_readable"] = observed_start.isoformat()
         candidate_start = local_kickoff(fixture["kickoff_madrid"])
+        observation["api_kickoff_madrid"] = candidate_start.isoformat() if candidate_start else None
+        observation["api_kickoff_utc"] = candidate_start.astimezone(timezone.utc).isoformat() if candidate_start else None
+        observation["bwin_observed_time"] = {
+            "header_evidence": header_evidence,
+            "catalog_text": result.get("text"),
+            "catalog_observed_at_utc": result.get("text_observed_at_utc"),
+        }
+        observation["accredited_kickoff_utc"] = (
+            observed_start.astimezone(timezone.utc).isoformat()
+            if (observed_start is not None and not clock_conflict)
+            else None
+        )
         observation.update(countdown_corrob(result, candidate_start))
         if observed_start and candidate_start:
             observation["kickoff_difference_minutes"] = round(abs((candidate_start - observed_start).total_seconds()) / 60, 1)
@@ -1406,23 +1479,31 @@ def inspect_event(browser, result: dict, fixture: dict, navigation_timeout: int,
         observation['page_category_compatibility']=category_compatibility(fixture,observation['page_title'])
         if clock_conflict:
             observation['identity_status'] = 'CONFLICTING_TIME_SOURCES_REVIEW'
+            observation['time_verification_status'] = 'TIME_CONFLICT'
         elif observation["event_id_from_url"] != result["bwin_event_id"]:
             observation["identity_status"] = "EVENT_ID_CHANGED_REVIEW"
+            observation['time_verification_status'] = 'TIME_UNVERIFIED_EXPLORATORY_ONLY'
         elif not title_ok:
             observation["identity_status"] = "TITLE_MISMATCH_REVIEW"
+            observation['time_verification_status'] = 'TIME_UNVERIFIED_EXPLORATORY_ONLY'
         elif observed_start is not None:
             if observation["kickoff_difference_minutes"] is not None and observation["kickoff_difference_minutes"] <= 15:
                 observation["identity_status"] = "NAME_AND_ABSOLUTE_TIME_MATCH"
+                observation['time_verification_status'] = 'TIME_VERIFIED'
             else:
                 observation["identity_status"] = "KICKOFF_MISMATCH_REVIEW"
+                observation['time_verification_status'] = 'TIME_MISMATCH'
         elif observation["countdown_difference_minutes"] is not None:
             # Rounded and occasionally delayed countdown. Keep confidence lower than absolute timestamp.
             if observation["countdown_difference_minutes"] <= 4.0:
                 observation["identity_status"] = "NAME_AND_RELATIVE_TIME_CORROBORATED"
+                observation['time_verification_status'] = 'TIME_CORROBORATED_RELATIVE'
             else:
                 observation["identity_status"] = "KICKOFF_COUNTDOWN_MISMATCH_REVIEW"
+                observation['time_verification_status'] = 'TIME_MISMATCH'
         else:
             observation["identity_status"] = "NAME_MATCH_TIME_NOT_MACHINE_VERIFIED"
+            observation['time_verification_status'] = 'TIME_UNVERIFIED_EXPLORATORY_ONLY'
     except Exception as exc:
         observation["status"] = "ERROR"
         observation["error"] = f"{type(exc).__name__}: {exc}"[:500]

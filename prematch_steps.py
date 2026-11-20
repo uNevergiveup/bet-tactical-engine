@@ -133,15 +133,35 @@ def _bwin_reconcile_records(
     ) if bwin_root.is_dir() else []
 
     auto_by_fid: dict[int, tuple[Path, dict[str, Any]]] = {}
+    latest_scan_meta: dict[str, Any] = {}
     for p in auto_paths:
         try:
             doc = _read_json(p)
         except (OSError, json.JSONDecodeError, ValueError):
             continue
+        if not latest_scan_meta and isinstance(doc.get("latest_scan"), dict):
+            latest_scan_meta = dict(doc["latest_scan"])
         for row in doc.get("matches") or []:
             fid = row.get("fixture_id")
             if isinstance(fid, int) and fid not in auto_by_fid:
                 auto_by_fid[fid] = (p, row)
+
+    # Detect cross-snapshot verified bwin_event_id contradictions
+    snapshot_verified_eids: dict[int, set[str]] = {}
+    scans_dir = bwin_root / "scans"
+    if scans_dir.is_dir():
+        for sp in sorted(scans_dir.glob("bwin_discovery_*.json")):
+            try:
+                sdoc = _read_json(sp)
+            except (OSError, json.JSONDecodeError, ValueError):
+                continue
+            for row in sdoc.get("matches") or []:
+                fid = row.get("fixture_id")
+                if isinstance(fid, int) and row.get("status") == "IDENTITY_VERIFIED_AUTOMATICALLY" and row.get("bwin_event_id"):
+                    snapshot_verified_eids.setdefault(fid, set()).add(str(row["bwin_event_id"]))
+
+    latest_scope = str(latest_scan_meta.get("scan_scope") or "")
+    latest_targeted = {int(x) for x in (latest_scan_meta.get("targeted_fixture_ids") or []) if str(x).isdigit()}
 
     verified: list[dict[str, Any]] = []
     incomplete: list[dict[str, Any]] = []
@@ -190,7 +210,11 @@ def _bwin_reconcile_records(
         )
 
         if state != "TEMPORAL_BLOCKED":
-            if manual_status == "BWIN_IDENTITY_CONFLICT":
+            cross_eids = snapshot_verified_eids.get(fid) or set()
+            if len(cross_eids) > 1:
+                state = "CONFLICT"
+                reason = f"SNAPSHOT_EVENT_ID_CONTRADICTION:{','.join(sorted(cross_eids))}"
+            elif manual_status == "BWIN_IDENTITY_CONFLICT":
                 state = "CONFLICT"
                 reason = ",".join(manual_entry.get("conflict_reasons") or ["BWIN_IDENTITY_CONFLICT"])
                 bwin_event_id = manual_entry.get("extracted_event_id")
@@ -235,6 +259,18 @@ def _bwin_reconcile_records(
                 else:
                     state = "PENDING_MANUAL"
                     reason = auto_status or "NOT_FOUND_IN_SCANNED_PAGES"
+            elif latest_scope == "INDIVIDUAL_SCAN" and fid not in latest_targeted:
+                state = "PENDING_MANUAL"
+                reason = "NOT_SCANNED_IN_THIS_RUN"
+
+        scanned_in_latest = True if (not latest_scope or latest_scope == "FULL_SCAN" or fid in latest_targeted) else False
+        reused_prior = bool(auto_row and not scanned_in_latest)
+        verified_at = (auto_row or {}).get("scanned_at_utc") if verification_source in ("AUTO", "AUTO+MANUAL") else (manual_entry or {}).get("verified_at_utc")
+        verif_age_min = None
+        if verified_at:
+            v_dt = bd.local_kickoff(verified_at)
+            if v_dt is not None:
+                verif_age_min = round((now_utc - v_dt.astimezone(timezone.utc)).total_seconds() / 60.0, 2)
 
         rec = {
             "fixture_id": fid,
@@ -252,6 +288,10 @@ def _bwin_reconcile_records(
             "bwin_event_id": bwin_event_id,
             "bwin_url": bwin_url,
             "verification_source": verification_source,
+            "scanned_in_latest_run": scanned_in_latest,
+            "reused_from_prior_scan": reused_prior,
+            "verified_at_utc": verified_at,
+            "verification_age_minutes": verif_age_min,
             "auto_discovery_path": auto_path,
             "candidates": candidates,
         }
@@ -433,6 +473,116 @@ def cmd_filter(args: argparse.Namespace) -> int:
     return 0
 
 
+def _persist_bwin_discovery_with_merge(
+    bwin_dir: Path,
+    payload: dict[str, Any],
+    *,
+    now_utc: datetime,
+    targeted_fids: set[int] | None,
+) -> None:
+    """Archiva snapshot inmutable de la corrida y fusiona sin perder verificaciones previas."""
+    scan_scope = "INDIVIDUAL_SCAN" if targeted_fids else "FULL_SCAN"
+    scan_id = f"{now_utc:%Y%m%dT%H%M%SZ}_{scan_scope.lower()}"
+    scan_iso = now_utc.isoformat()
+
+    tagged_matches: list[dict[str, Any]] = []
+    for row in payload.get("matches") or []:
+        tagged_matches.append({
+            **row,
+            "scan_id": scan_id,
+            "scanned_at_utc": scan_iso,
+            "scan_scope": scan_scope,
+        })
+
+    run_snapshot = {
+        **payload,
+        "scan_id": scan_id,
+        "scan_scope": scan_scope,
+        "targeted_fixture_ids": sorted(targeted_fids) if targeted_fids else [],
+        "matches": tagged_matches,
+    }
+    scans_dir = bwin_dir / "scans"
+    scans_dir.mkdir(parents=True, exist_ok=True)
+    snap_path = scans_dir / f"bwin_discovery_{scan_id}.json"
+    _atomic_json(snap_path, run_snapshot)
+
+    merged_payload = dict(run_snapshot)
+    merged_payload["latest_scan"] = {
+        "scan_id": scan_id,
+        "scanned_at_utc": scan_iso,
+        "scan_scope": scan_scope,
+        "targeted_fixture_ids": sorted(targeted_fids) if targeted_fids else [],
+        "snapshot_path": str(snap_path),
+    }
+
+    main_path = bwin_dir / "bwin_discovery.json"
+    if targeted_fids and main_path.is_file():
+        try:
+            prior = _read_json(main_path)
+        except (OSError, json.JSONDecodeError, ValueError):
+            prior = {}
+
+        # Merge catalog_observed by bwin_event_id
+        cat_by_id: dict[str, dict[str, Any]] = {
+            str(e["bwin_event_id"]): e
+            for e in (prior.get("catalog_observed") or [])
+            if e.get("bwin_event_id")
+        }
+        for e in payload.get("catalog_observed") or []:
+            if e.get("bwin_event_id"):
+                cat_by_id[str(e["bwin_event_id"])] = e
+
+        # Merge pages by url
+        pages_by_url: dict[str, dict[str, Any]] = {
+            str(pg["url"]): pg for pg in (prior.get("pages") or []) if pg.get("url")
+        }
+        for pg in payload.get("pages") or []:
+            if pg.get("url"):
+                pages_by_url[str(pg["url"])] = pg
+
+        # Merge matches by fixture_id with contradiction check
+        matches_by_fid: dict[int, dict[str, Any]] = {}
+        for row in prior.get("matches") or []:
+            fid = row.get("fixture_id")
+            if isinstance(fid, int):
+                matches_by_fid[fid] = row
+        contradictions: list[dict[str, Any]] = list(prior.get("snapshot_contradictions") or [])
+        for row in tagged_matches:
+            fid = row.get("fixture_id")
+            if not isinstance(fid, int):
+                continue
+            prev = matches_by_fid.get(fid)
+            if (
+                prev
+                and prev.get("status") == "IDENTITY_VERIFIED_AUTOMATICALLY"
+                and row.get("status") == "IDENTITY_VERIFIED_AUTOMATICALLY"
+                and prev.get("bwin_event_id")
+                and row.get("bwin_event_id")
+                and str(prev["bwin_event_id"]) != str(row["bwin_event_id"])
+            ):
+                contradictions.append({
+                    "fixture_id": fid,
+                    "prior_event_id": str(prev["bwin_event_id"]),
+                    "new_event_id": str(row["bwin_event_id"]),
+                    "detected_at_utc": scan_iso,
+                })
+                row = {
+                    **row,
+                    "status": "BWIN_IDENTITY_CONFLICT",
+                    "identity_status": "BWIN_IDENTITY_CONFLICT",
+                    "prior_verified_event_id": str(prev["bwin_event_id"]),
+                }
+            matches_by_fid[fid] = row
+
+        merged_payload["catalog_observed"] = list(cat_by_id.values())
+        merged_payload["pages"] = list(pages_by_url.values())
+        merged_payload["matches"] = list(matches_by_fid.values())
+        if contradictions:
+            merged_payload["snapshot_contradictions"] = contradictions
+
+    bd.write_reports(bwin_dir, merged_payload)
+
+
 def cmd_bwin_scan(args: argparse.Namespace) -> int:
     now_utc = _now_utc(args.asof)
     _, eval_dir, _, _ = _resolve_eval_dir(args, now_utc)
@@ -441,9 +591,10 @@ def cmd_bwin_scan(args: argparse.Namespace) -> int:
     candidates = list(major_doc.get("fixtures") or [])
     if args.include_review:
         candidates.extend(major_doc.get("review") or [])
+    wanted_fids: set[int] | None = None
     if args.fixture_id:
-        wanted = set(args.fixture_id)
-        candidates = [f for f in candidates if int(f["fixture_id"]) in wanted]
+        wanted_fids = {int(x) for x in args.fixture_id}
+        candidates = [f for f in candidates if int(f["fixture_id"]) in wanted_fids]
 
     bwin_dir = eval_dir / "prospective_trial/bwin"
     bwin_dir.mkdir(parents=True, exist_ok=True)
@@ -453,14 +604,19 @@ def cmd_bwin_scan(args: argparse.Namespace) -> int:
     if args.catalog_snapshot and not args.confirm_external:
         catalog = bd.load_local_catalog_snapshots(args.catalog_snapshot)
         results = [bd.summarize(fx, bd.match_catalog(fx, catalog), None, args.timeout, inspect=False) for fx in candidates]
-        bd.write_reports(bwin_dir, {
-            "schema_version": "0.2-bwin-discovery",
-            "generated_at_utc": now_utc.isoformat(),
-            "source": "LOCAL_CATALOG_SNAPSHOT",
-            "catalog_observed": catalog,
-            "pages": [],
-            "matches": results,
-        })
+        _persist_bwin_discovery_with_merge(
+            bwin_dir,
+            {
+                "schema_version": "0.2-bwin-discovery",
+                "generated_at_utc": now_utc.isoformat(),
+                "source": "LOCAL_CATALOG_SNAPSHOT",
+                "catalog_observed": catalog,
+                "pages": [],
+                "matches": results,
+            },
+            now_utc=now_utc,
+            targeted_fids=wanted_fids,
+        )
         scan_status = "COMPLETED_OFFLINE_SNAPSHOT"
         scan_reason = "MATCHED_AGAINST_LOCAL_CATALOG_SNAPSHOT"
     elif args.confirm_external and not args.no_browser:
@@ -486,13 +642,18 @@ def cmd_bwin_scan(args: argparse.Namespace) -> int:
                 ]
             finally:
                 browser.close()
-        bd.write_reports(bwin_dir, {
-            "schema_version": "0.5-bwin-discovery-v3",
-            "generated_at_utc": now_utc.isoformat(),
-            "catalog_observed": catalog,
-            "pages": pages,
-            "matches": results,
-        })
+        _persist_bwin_discovery_with_merge(
+            bwin_dir,
+            {
+                "schema_version": "0.5-bwin-discovery-v3",
+                "generated_at_utc": now_utc.isoformat(),
+                "catalog_observed": catalog,
+                "pages": pages,
+                "matches": results,
+            },
+            now_utc=now_utc,
+            targeted_fids=wanted_fids,
+        )
         scan_status = "COMPLETED_ONLINE"
         scan_reason = "BWIN_ONLINE_DISCOVERY_AND_INSPECTION"
 
@@ -908,7 +1069,28 @@ def cmd_odds_capture(args: argparse.Namespace) -> int:
 
             dest = capture_dir / f"cuotas_bwin_{eid}_{stamp}.txt" if canonical_txt.is_file() else canonical_txt
             dest.parent.mkdir(parents=True, exist_ok=True)
-            sb.scrape_event(rec["bwin_url"], dest, headless=args.headless, timeout=args.timeout)
+            if hasattr(sb, "scrape_event"):
+                sb.scrape_event(rec["bwin_url"], dest, headless=args.headless, timeout=args.timeout)
+            elif not canonical_txt.is_file():
+                sb.main(["--url", rec["bwin_url"], "--confirm-external"])
+            else:
+                stage_stamp = now_utc.strftime("%Y%m%dT%H%M%S000000Z")
+                stage_inputs = canonical_txt.parent.parent / "staging" / stage_stamp / str(eid) / "inputs"
+                stage_inputs.mkdir(parents=True, exist_ok=True)
+                prev_env = {k: os.environ.get(k) for k in ("PREMATCH_EVENT_DATA_DIR", "PREMATCH_IMMUTABLE_CAPTURE", "PREMATCH_EVENT_ID")}
+                try:
+                    os.environ["PREMATCH_EVENT_DATA_DIR"] = str(stage_inputs)
+                    os.environ["PREMATCH_IMMUTABLE_CAPTURE"] = "1"
+                    os.environ["PREMATCH_EVENT_ID"] = str(eid)
+                    sb.main(["--url", rec["bwin_url"], "--confirm-external"])
+                finally:
+                    for k, v in prev_env.items():
+                        if v is None:
+                            os.environ.pop(k, None)
+                        else:
+                            os.environ[k] = v
+                staged_txt = stage_inputs / f"cuotas_bwin_{eid}.txt"
+                dest.write_bytes(staged_txt.read_bytes())
             target_txt = dest
             capture_mode = "SCRAPED_LIVE_BWIN"
         elif canonical_txt.is_file():
@@ -1462,7 +1644,348 @@ def build_parser() -> argparse.ArgumentParser:
     p_stat = sub.add_parser("status", parents=[common], help="Consultar estado del pipeline modular")
     p_stat.set_defaults(func=cmd_status)
 
+    p_es = sub.add_parser("early-scout", parents=[common], help="EARLY_TACTICAL_SCOUT independiente sin cuotas (EXPERIMENTAL_SHADOW)")
+    p_es.add_argument("--fixture-id", type=int)
+    p_es.add_argument("--event-id")
+    p_es.add_argument("--external-report", action="append", default=[], type=Path, help="Ruta a informe cualitativo externo (.md)")
+    p_es.add_argument("--import-analysis", type=Path, help="Ruta a JSON de analisis tactico generado por Codex/IA")
+    p_es.add_argument("--output-dir", type=Path)
+    p_es.add_argument("--research-without-bwin", action="store_true")
+    p_es.set_defaults(func=cmd_early_scout)
+
+    p_mc = sub.add_parser("market-catalog", parents=[common], help="Extraer catalogo comercial Bwin completo (EXPERIMENTAL_SHADOW)")
+    p_mc.add_argument("--fixture-id", type=int)
+    p_mc.add_argument("--event-id")
+    p_mc.add_argument("--odds-file", type=Path, required=True)
+    p_mc.add_argument("--captured-at-utc")
+    p_mc.add_argument("--output-dir", type=Path)
+    p_mc.set_defaults(func=cmd_market_catalog)
+
+    p_mm = sub.add_parser("market-match", parents=[common], help="Vincular hipotesis tacticas con catalogo Bwin (EXPERIMENTAL_SHADOW)")
+    p_mm.add_argument("--fixture-id", type=int)
+    p_mm.add_argument("--event-id")
+    p_mm.add_argument("--scout-json", type=Path, required=True)
+    p_mm.add_argument("--catalog-json", type=Path, required=True)
+    p_mm.add_argument("--output-dir", type=Path)
+    p_mm.set_defaults(func=cmd_market_match)
+
+    p_cmp = sub.add_parser("market-compare", parents=[common], help="Comparador tactico de alternativas Bwin en 2 etapas (EXPERIMENTAL_SHADOW)")
+    p_cmp.add_argument("--fixture-id", type=int)
+    p_cmp.add_argument("--event-id")
+    p_cmp.add_argument("--scout-json", type=Path, required=True)
+    p_cmp.add_argument("--catalog-json", type=Path, required=True)
+    p_cmp.add_argument("--match-json", type=Path, required=True)
+    p_cmp.add_argument("--import-comparison", type=Path, help="Ruta a JSON de evaluacion comparativa generado por Codex/IA")
+    p_cmp.add_argument("--max-price-age", type=int, default=180)
+    p_cmp.add_argument("--output-dir", type=Path)
+    p_cmp.set_defaults(func=cmd_market_compare)
+
+    p_lr = sub.add_parser("lineup-refresh", parents=[common], help="Refrescar expediente con XI oficiales o probables (EXPERIMENTAL_SHADOW)")
+    p_lr.add_argument("--fixture-id", type=int)
+    p_lr.add_argument("--event-id")
+    p_lr.add_argument("--scout-json", type=Path, required=True)
+    p_lr.add_argument("--api-lineups-json", type=Path, help="Ruta a respuesta JSON /fixtures/lineups de API-Football")
+    p_lr.add_argument("--qualitative-md", type=Path, help="Ruta a informe cualitativo con XI probable")
+    p_lr.add_argument("--watch-player", action="append", default=[], help="Jugador a seguir en exposicion (titular/suplente/ausente)")
+    p_lr.add_argument("--output-dir", type=Path)
+    p_lr.set_defaults(func=cmd_lineup_refresh)
+
     return parser
+
+
+def _resolve_target_rec_from_eval(eval_dir: Path, args: argparse.Namespace, now_utc: datetime) -> dict[str, Any]:
+    _, major_doc = _load_major_doc(eval_dir)
+    recon = _bwin_reconcile_records(eval_dir, major_doc, now_utc)
+    for r in recon["all"]:
+        if getattr(args, "fixture_id", None) and int(r["fixture_id"]) == int(args.fixture_id):
+            return r
+        if getattr(args, "event_id", None) and str(r.get("bwin_event_id")) == str(args.event_id):
+            return r
+    raise StepError("TARGET_FIXTURE_OR_EVENT_NOT_FOUND_IN_EVAL_DIR")
+
+
+def cmd_market_catalog(args: argparse.Namespace) -> int:
+    from bet_engine.markets.bwin_catalog import extract_bwin_catalog
+
+    now_utc = _now_utc(args.asof)
+    root, eval_dir, _, _ = _resolve_eval_dir(args, now_utc)
+    target_rec = _resolve_target_rec_from_eval(eval_dir, args, now_utc)
+    fid = int(target_rec["fixture_id"])
+    eid = target_rec.get("bwin_event_id")
+    dossier_id = str(eid) if eid else f"research_fixture_{fid}"
+    out_dir = args.output_dir.expanduser().resolve() if args.output_dir else (root / "outputs/matches" / dossier_id / "market_phase2")
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    cat = extract_bwin_catalog(
+        args.odds_file.expanduser().resolve(),
+        event_id=str(eid) if eid else None,
+        fixture_id=fid,
+        home_name=target_rec["home"],
+        away_name=target_rec["away"],
+        captured_at_utc=args.captured_at_utc,
+    )
+    cat_path = out_dir / f"bwin_catalog_{dossier_id}.json"
+    _atomic_json(cat_path, cat)
+    _print_step_summary("market-catalog", "COMPLETED", "BWIN_CATALOG_EXTRACTED", cat["counts_by_commercial_coverage"], {"catalog_json": cat_path})
+    return 0
+
+
+def cmd_market_match(args: argparse.Namespace) -> int:
+    from bet_engine.context.evidence_aggregator import build_statistical_evidence_bundle
+    from bet_engine.markets.tactical_market_matcher import match_hypotheses_to_catalog
+
+    now_utc = _now_utc(args.asof)
+    root, eval_dir, _, _ = _resolve_eval_dir(args, now_utc)
+    target_rec = _resolve_target_rec_from_eval(eval_dir, args, now_utc)
+    fid = int(target_rec["fixture_id"])
+    eid = target_rec.get("bwin_event_id")
+    dossier_id = str(eid) if eid else f"research_fixture_{fid}"
+    out_dir = args.output_dir.expanduser().resolve() if args.output_dir else (root / "outputs/matches" / dossier_id / "market_phase2")
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    scout_doc = _read_json(args.scout_json.expanduser().resolve())
+    cat_doc = _read_json(args.catalog_json.expanduser().resolve())
+
+    tactical_path = eval_dir / "prospective_trial/tactical/tactical_signal_engine.json"
+    tactical_doc = _read_json(tactical_path) if tactical_path.is_file() else {}
+    raw_sources = (tactical_doc.get("sources") or {}).get("raw_cache_sources") or []
+
+    pre_path = eval_dir / "prospective_trial/enriched/preselection.json"
+    pre_match = None
+    if pre_path.is_file():
+        pre_doc = _read_json(pre_path)
+        pre_match = next((m for m in pre_doc.get("matches", []) if int(m.get("fixture_id", -1)) == fid), None)
+
+    home_id = int((pre_match or {}).get("home_id") or target_rec.get("home_id") or 0)
+    away_id = int((pre_match or {}).get("away_id") or target_rec.get("away_id") or 0)
+
+    ev_bundle = build_statistical_evidence_bundle(
+        home_id=home_id,
+        away_id=away_id,
+        kickoff_utc=target_rec.get("kickoff_utc"),
+        raw_cache_sources=raw_sources,
+        tactical_fx=(tactical_doc.get("fixtures") or {}).get(str(fid)),
+        pre_match=pre_match,
+    )
+    ev_path = out_dir / f"evidence_bundle_{dossier_id}.json"
+    _atomic_json(ev_path, ev_bundle)
+
+    matched = match_hypotheses_to_catalog(
+        scout_report=scout_doc,
+        bwin_catalog=cat_doc,
+        evidence_bundle=ev_bundle,
+    )
+    match_path = out_dir / f"market_match_{dossier_id}.json"
+    _atomic_json(match_path, matched)
+    _print_step_summary("market-match", "COMPLETED", "HYPOTHESES_MATCHED_TO_BWIN", {"matched": matched["matched_count"], "total": matched["hypotheses_total"]}, {"match_json": match_path, "evidence_json": ev_path})
+    return 0
+
+
+def cmd_market_compare(args: argparse.Namespace) -> int:
+    from bet_engine.markets.tactical_market_comparator import (
+        MarketComparisonError,
+        finalize_market_comparison,
+        prepare_market_comparison_package,
+    )
+
+    now_utc = _now_utc(args.asof)
+    root, eval_dir, _, _ = _resolve_eval_dir(args, now_utc)
+    target_rec = _resolve_target_rec_from_eval(eval_dir, args, now_utc)
+    fid = int(target_rec["fixture_id"])
+    eid = target_rec.get("bwin_event_id")
+    dossier_id = str(eid) if eid else f"research_fixture_{fid}"
+    out_dir = args.output_dir.expanduser().resolve() if args.output_dir else (root / "outputs/matches" / dossier_id / "market_phase2")
+
+    scout_doc = _read_json(args.scout_json.expanduser().resolve())
+    cat_doc = _read_json(args.catalog_json.expanduser().resolve())
+    match_doc = _read_json(args.match_json.expanduser().resolve())
+    ev_path = out_dir / f"evidence_bundle_{dossier_id}.json"
+    if not ev_path.is_file():
+        ev_path = out_dir / f"evidence_bundle_research_fixture_{fid}.json"
+    ev_doc = _read_json(ev_path) if ev_path.is_file() else None
+
+    try:
+        prep = prepare_market_comparison_package(
+            scout_report=scout_doc,
+            bwin_catalog=cat_doc,
+            matcher_result=match_doc,
+            evidence_bundle=ev_doc,
+            output_dir=out_dir,
+            asof_utc=now_utc,
+            max_price_age_minutes=args.max_price_age,
+        )
+        artifacts = {
+            "comparison_input": prep["input_json_path"],
+            "comparison_prompt": prep["prompt_md_path"],
+        }
+        reason = "MARKET_COMPARISON_PACKAGE_CREATED"
+        if args.import_comparison:
+            ai_doc = _read_json(args.import_comparison.expanduser().resolve())
+            fin = finalize_market_comparison(comp_input=prep["comparison_input"], ai_evaluation=ai_doc, output_dir=out_dir)
+            artifacts["comparison_json"] = fin["report_json_path"]
+            artifacts["comparison_md"] = fin["report_md_path"]
+            reason = "MARKET_COMPARISON_FINALIZED"
+    except MarketComparisonError as exc:
+        raise StepError(str(exc)) from exc
+
+    _print_step_summary("market-compare", "COMPLETED", reason, {"options": len(prep["comparison_input"]["candidate_options"])}, artifacts)
+    return 0
+
+
+def cmd_lineup_refresh(args: argparse.Namespace) -> int:
+    from bet_engine.markets.tactical_market_comparator import (
+        MarketComparisonError,
+        refresh_expedient_with_lineups,
+    )
+
+    now_utc = _now_utc(args.asof)
+    root, eval_dir, _, _ = _resolve_eval_dir(args, now_utc)
+    target_rec = _resolve_target_rec_from_eval(eval_dir, args, now_utc)
+    fid = int(target_rec["fixture_id"])
+    eid = target_rec.get("bwin_event_id")
+    dossier_id = str(eid) if eid else f"research_fixture_{fid}"
+    out_dir = args.output_dir.expanduser().resolve() if args.output_dir else (root / "outputs/matches" / dossier_id / "market_phase2")
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    scout_doc = _read_json(args.scout_json.expanduser().resolve())
+    pre_path = eval_dir / "prospective_trial/enriched/preselection.json"
+    pre_match = None
+    if pre_path.is_file():
+        pre_doc = _read_json(pre_path)
+        pre_match = next((m for m in pre_doc.get("matches", []) if int(m.get("fixture_id", -1)) == fid), None)
+    home_id = int((pre_match or {}).get("home_id") or target_rec.get("home_id") or 0)
+    away_id = int((pre_match or {}).get("away_id") or target_rec.get("away_id") or 0)
+
+    api_lu = _read_json(args.api_lineups_json.expanduser().resolve()) if args.api_lineups_json else None
+    if isinstance(api_lu, dict) and "response" in api_lu:
+        api_lu = api_lu["response"]
+    qual_md = args.qualitative_md.expanduser().resolve().read_text(encoding="utf-8", errors="replace") if args.qualitative_md else None
+
+    try:
+        ref = refresh_expedient_with_lineups(
+            scout_report=scout_doc,
+            fixture_id=fid,
+            event_id=str(eid) if eid else None,
+            home_id=home_id,
+            away_id=away_id,
+            home_name=target_rec["home"],
+            away_name=target_rec["away"],
+            kickoff_utc=target_rec.get("kickoff_utc") or target_rec.get("kickoff_madrid"),
+            now_utc=now_utc,
+            api_lineups_response=api_lu,
+            qualitative_markdown=qual_md,
+            watch_players=args.watch_player or [],
+        )
+    except MarketComparisonError as exc:
+        raise StepError(str(exc)) from exc
+
+    ref_path = out_dir / f"lineup_refresh_{dossier_id}.json"
+    _atomic_json(ref_path, ref)
+    _print_step_summary("lineup-refresh", "COMPLETED", str(ref["lineup_status"]), {"official_confirmed": int(ref["official_confirmed_22"]), "changes": len(ref["lineup_changes"])}, {"refresh_json": ref_path})
+    return 0
+
+
+def cmd_early_scout(args: argparse.Namespace) -> int:
+    from bet_engine.analytics.early_tactical_scout import (
+        EarlyScoutError,
+        finalize_early_scout,
+        prepare_early_scout_package,
+    )
+
+    now_utc = _now_utc(args.asof)
+    root, eval_dir, _, _ = _resolve_eval_dir(args, now_utc)
+    _, major_doc = _load_major_doc(eval_dir)
+    recon = _bwin_reconcile_records(eval_dir, major_doc, now_utc)
+
+    target_rec: dict[str, Any] | None = None
+    for r in recon["all"]:
+        if args.fixture_id and int(r["fixture_id"]) == int(args.fixture_id):
+            target_rec = r
+            break
+        if args.event_id and str(r.get("bwin_event_id")) == str(args.event_id):
+            target_rec = r
+            break
+    if not target_rec:
+        raise StepError("TARGET_FIXTURE_OR_EVENT_NOT_FOUND_IN_EVAL_DIR")
+
+    fid = int(target_rec["fixture_id"])
+    eid = target_rec.get("bwin_event_id")
+    dossier_id = str(eid) if eid else f"research_fixture_{fid}"
+    out_dir = args.output_dir.expanduser().resolve() if args.output_dir else (root / "outputs/matches" / dossier_id / "early_scout")
+
+    pre_path = eval_dir / (
+        "prospective_trial/research_only/preselection.json"
+        if args.research_without_bwin and (eval_dir / "prospective_trial/research_only/preselection.json").is_file()
+        else "prospective_trial/enriched/preselection.json"
+    )
+    pre_match = None
+    if pre_path.is_file():
+        pre_doc = _read_json(pre_path)
+        pre_match = next((m for m in pre_doc.get("matches", []) if int(m.get("fixture_id", -1)) == fid), None)
+
+    tactical_path = eval_dir / "prospective_trial/tactical/tactical_signal_engine.json"
+    tactical_fx = None
+    if tactical_path.is_file():
+        tactical_doc = _read_json(tactical_path)
+        tactical_fx = (tactical_doc.get("fixtures") or {}).get(str(fid))
+
+    ext_reports = [{"source": p.stem, "path": str(p.expanduser().resolve())} for p in (args.external_report or [])]
+    identity = {
+        "fixture_id": fid,
+        "event_id": eid,
+        "home": target_rec["home"],
+        "away": target_rec["away"],
+        "country": target_rec.get("country"),
+        "league": target_rec.get("league"),
+        "kickoff_utc": target_rec.get("kickoff_utc"),
+        "kickoff_madrid": target_rec.get("kickoff_madrid"),
+    }
+
+    try:
+        prep = prepare_early_scout_package(
+            identity=identity,
+            output_dir=out_dir,
+            pre_match=pre_match,
+            tactical_fx=tactical_fx,
+            external_reports=ext_reports,
+            asof_utc=now_utc,
+        )
+        artifacts: dict[str, Any] = {
+            "early_scout_input": prep["input_json_path"],
+            "early_scout_prompt": prep["prompt_md_path"],
+        }
+        reason = "EARLY_SCOUT_PACKAGE_CREATED"
+        if args.import_analysis:
+            ana_doc = _read_json(args.import_analysis.expanduser().resolve())
+            fin = finalize_early_scout(scout_input=prep["scout_input"], analysis=ana_doc, output_dir=out_dir)
+            artifacts["early_scout_json"] = fin["report_json_path"]
+            artifacts["early_scout_md"] = fin["report_md_path"]
+            reason = "EARLY_SCOUT_REPORT_FINALIZED"
+    except EarlyScoutError as exc:
+        raise StepError(str(exc)) from exc
+
+    payload = {
+        "schema_version": SCHEMA_VERSION,
+        "step": "early-scout",
+        "status": "COMPLETED",
+        "mode": "EXPERIMENTAL_SHADOW",
+        "reason": reason,
+        "generated_at_utc": now_utc.isoformat(),
+        "counts": {
+            "external_accepted": len(prep["scout_input"]["external_reports"]["accepted"]),
+            "external_rejected": len(prep["scout_input"]["external_reports"]["rejected"]),
+            "contradictions": len(prep["scout_input"]["external_reports"]["contradictions"]),
+        },
+        **artifacts,
+    }
+    step_json, _ = _write_step_artifacts(
+        eval_dir,
+        "early_scout",
+        payload,
+        [f"# EARLY TACTICAL SCOUT · {dossier_id}", "", f"- Estado: `{reason}`", f"- Cobertura: `{prep['scout_input']['coverage']['coverage_level']}`"],
+    )
+    _print_step_summary("early-scout", "COMPLETED", reason, payload["counts"], {**artifacts, "step_json": step_json})
+    return 0
 
 
 def main(argv: list[str] | None = None) -> int:
