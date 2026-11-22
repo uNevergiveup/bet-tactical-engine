@@ -501,6 +501,7 @@ class ShadowPipelineRunner:
         output_dir: Path | None = None,
         bwin_txt_path: Path | None = None,
         lineup_evaluation: dict[str, Any] | None = None,
+        lineup_independent_keys: frozenset[str] = frozenset(),
         lineup_cutoff_minutes: int | None = None,
         qualitative_markdown: str | None = None,
         manual_lineup: dict[str, Any] | None = None,
@@ -672,6 +673,10 @@ class ShadowPipelineRunner:
         lineups_confirmed_22 = is_confirmed_complete(lineup_status)
 
         effective_odds = dict(odds_map or {})
+        if lineup_independent_keys:
+            effective_odds = {key: odd for key, odd in effective_odds.items() if key in lineup_independent_keys}
+            eff_lineup_eval["lineup_independent_selection_keys"] = sorted(lineup_independent_keys)
+        lineup_gate_satisfied = lineups_confirmed_22 or bool(lineup_independent_keys)
         if not effective_odds:
             degradations.append("DEGRADED_MISSING_BWIN_ODDS_PRICE_PENDING")
 
@@ -683,6 +688,7 @@ class ShadowPipelineRunner:
             analytics_result=analytics_res,
             lineups_confirmed_complete=lineups_confirmed_22,
             lineup_status=lineup_status,
+            lineup_independent_keys=lineup_independent_keys,
             calibration_accredited_families=accredited_families,
         )
         prices_evaluated_at_utc = datetime.now(timezone.utc).isoformat() if effective_odds else None
@@ -803,7 +809,7 @@ class ShadowPipelineRunner:
             ),
         }
 
-        if not lineups_confirmed_22:
+        if not lineup_gate_satisfied:
             no_bet_reasons.append(f"LINEUPS_NOT_CONFIRMED:{lineup_status}")
         if not effective_odds:
             no_bet_reasons.append("PRECIO_PENDIENTE_DE_VERIFICACION_SIN_CUOTAS_BWIN")
@@ -823,14 +829,14 @@ class ShadowPipelineRunner:
             else:
                 no_bet_reasons.append("SOLO_CANDIDATO_INVESTIGABLE_EV_CONSERVADOR_NEGATIVO_POR_INCERTIDUMBRE")
 
-        decision = "CANDIDATE_IDENTIFIED" if (edges and lineups_confirmed_22 and not no_bet_reasons) else "NO_BET"
-        if not lineups_confirmed_22 and lineup_status == LineupStatus.LINEUPS_UNAVAILABLE_FINAL.value:
+        decision = "CANDIDATE_IDENTIFIED" if (edges and lineup_gate_satisfied and not no_bet_reasons) else "NO_BET"
+        if not lineup_gate_satisfied and lineup_status == LineupStatus.LINEUPS_UNAVAILABLE_FINAL.value:
             decision_taxonomy = "BLOQUEO_TECNICO"
         elif not effective_odds:
             decision_taxonomy = "BLOQUEO_TECNICO"
         elif l20_h.total_matches_available < 4 or l20_a.total_matches_available < 4:
             decision_taxonomy = "NO_BET_POR_EVIDENCIA"
-        elif breakdown["PICK_ACCIONABLE"] > 0 and lineups_confirmed_22 and not no_bet_reasons:
+        elif breakdown["PICK_ACCIONABLE"] > 0 and lineup_gate_satisfied and not no_bet_reasons:
             decision_taxonomy = "PICK_ACCIONABLE"
         elif breakdown["CANDIDATO_CONDICIONAL"] > 0:
             decision_taxonomy = "CANDIDATO_CONDICIONAL"
@@ -848,11 +854,11 @@ class ShadowPipelineRunner:
             "BLOQUEO_OPERATIVO": breakdown["BLOQUEO_TECNICO"],
         }
 
-        if not lineups_confirmed_22 or not effective_odds:
+        if not lineup_gate_satisfied or not effective_odds:
             decision_classification = "BLOQUEO_OPERATIVO"
         elif not modelled_quoted_opts:
             decision_classification = "MODELO_NO_DISPONIBLE"
-        elif breakdown["PICK_ACCIONABLE"] > 0 and lineups_confirmed_22 and not no_bet_reasons:
+        elif breakdown["PICK_ACCIONABLE"] > 0 and lineup_gate_satisfied and not no_bet_reasons:
             decision_classification = "BET_AUTORIZADO"
         elif (
             breakdown["CANDIDATO_CONDICIONAL"] > 0
@@ -1042,7 +1048,7 @@ class ShadowPipelineRunner:
             catalog_coverage_summary=catalog_summary,
             market_equivalences=audit_snapshot_equivalences(effective_odds),
             lineup_gate=eff_lineup_eval,
-            eligible_for_final_action=lineups_confirmed_22,
+            eligible_for_final_action=lineup_gate_satisfied,
             probabilities_computed_at_utc=probabilities_computed_at_utc,
             prices_evaluated_at_utc=prices_evaluated_at_utc,
             timestamp_granularity="IN_PROCESS_SEQUENTIAL_SHADOW_RUN",

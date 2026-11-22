@@ -89,6 +89,11 @@ class BwinPhase3Tests(unittest.TestCase):
                 if 'select_single_match.py' in command[1]:
                     destination=Path(command[command.index('--output-dir')+1])
                     (destination/'selected_match.json').write_text(selected.read_text())
+                if 'prepare' in command:
+                    self.assertIn('--reuse-odds', command)
+                    self.assertIn('--confirm-external', command)
+                    manifest=root/'outputs'/'matches'/str(saved['bwin_event_id'])/'manifest.json'
+                    manifest.write_text('{"status":"PREPARADO"}')
                 return SimpleNamespace(returncode=0)
             out=root/'run'
             with patch('socket.socket.connect',side_effect=AssertionError('network')),patch.object(d.trial,'now_madrid',return_value=when),patch('subprocess.run',side_effect=fake_cli) as runner:
@@ -97,6 +102,19 @@ class BwinPhase3Tests(unittest.TestCase):
                 self.assertEqual(result['preflight'],str(pf))
                 self.assertFalse((out/'fixtures/1570448/selection_pipeline/preflight.log').exists())
                 self.assertEqual(runner.call_count,2)
+                args.prepare_selected=True
+                args.confirm_external=False
+                with self.assertRaises(ValueError):
+                    d.select_verified_bwin(args,root,root/'blocked',ranked,pre,catalog)
+                self.assertEqual(runner.call_count,2)
+                args.confirm_external=True
+                prepared=d.select_verified_bwin(args,root,root/'prepare',ranked,pre,catalog)
+                self.assertEqual(prepared['status'],'PREPARED_FOR_RESEARCH')
+                self.assertEqual(prepared['manifest_sha256'],d.trial.sha(Path(prepared['manifest'])))
+                self.assertEqual(runner.call_count,5)
+                with self.assertRaisesRegex(ValueError,'CANONICAL_MANIFEST_EXISTS'):
+                    d.select_verified_bwin(args,root,root/'repeat',ranked,pre,catalog)
+                self.assertEqual(runner.call_count,5)
 
 
 if __name__=='__main__':unittest.main()

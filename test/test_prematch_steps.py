@@ -6,11 +6,71 @@ import hashlib
 import json
 import tempfile
 import unittest
+from argparse import Namespace
+from contextlib import ExitStack
+from datetime import datetime
 from pathlib import Path
 from unittest.mock import patch
 
 import bwin_manual_links as bml
 import prematch_steps as ps
+
+
+class TemporalIdentityTests(unittest.TestCase):
+    def test_verified_binding_survives_operation_gate(self):
+        fixture = _make_fixture(
+            1575221, home="Bayern", away="Köln", home_id=157, away_id=192,
+            kickoff_utc="2026-11-20T19:30:00+00:00",
+            kickoff_madrid="2026-11-20T20:30:00+01:00",
+        )
+        major = {"fixtures": [fixture]}
+        args = Namespace(fixture_id=1575221, event_id="7906958")
+        now = datetime.fromisoformat("2026-11-20T19:13:00+00:00")
+        links = {"links": {"1575221": {
+            "identity_status": "BWIN_MANUAL_LINK_VERIFIED",
+            "extracted_event_id": "7906958",
+            "bwin_url": "https://www.bwin.es/es/sports/eventos/evento:7906958",
+        }}}
+        with tempfile.TemporaryDirectory() as tmp, patch.object(
+            ps.bml, "load_manual_links", return_value=links
+        ), patch.object(ps, "_load_major_doc", return_value=(None, major)):
+            folder = Path(tmp)
+            recon = ps._bwin_reconcile_records(folder, major, now)
+            self.assertEqual(recon["verified"], [])
+            self.assertEqual(recon["temporal_blocked"][0]["bwin_event_id"], args.event_id)
+            self.assertEqual(recon["temporal_blocked"][0]["identity_state"], "VERIFIED")
+            with self.assertRaisesRegex(ps.StepError, "LEAD_BELOW"):
+                ps._resolve_target_rec_from_eval(folder, args, now)
+            self.assertEqual(ps.ANALYSIS_MIN_LEAD_MINUTES, 30)
+            self.assertEqual(
+                ps._resolve_target_rec_from_eval(
+                    folder, args, datetime.fromisoformat("2026-11-20T19:00:00+00:00")
+                )["fixture_id"],
+                args.fixture_id,
+            )
+            with self.assertRaisesRegex(ps.StepError, "LEAD_BELOW_MIN_PREMATCH"):
+                ps._resolve_target_rec_from_eval(
+                    folder, args, datetime.fromisoformat("2026-11-20T19:00:00.100000+00:00")
+                )
+            self.assertEqual(ps._resolve_target_rec_from_eval(
+                folder, args, now, min_lead_minutes=5
+            )["fixture_id"], args.fixture_id)
+            with self.assertRaises(ps.StepError):
+                ps._resolve_target_rec_from_eval(
+                    folder, Namespace(fixture_id=123, event_id=args.event_id), now, min_lead_minutes=5
+                )
+            self.assertTrue(ps._resolve_target_rec_from_eval(
+                folder, args, datetime.fromisoformat("2026-11-20T19:25:00+00:00"),
+                min_lead_minutes=5,
+            )["temporal_eligible"])
+            for timestamp in ("19:25:00.100000", "19:30:00"):
+                with self.subTest(timestamp=timestamp), self.assertRaises(ps.StepError):
+                    ps._resolve_target_rec_from_eval(folder, args, datetime.fromisoformat(
+                        f"2026-11-20T{timestamp}+00:00"
+                    ), min_lead_minutes=5)
+            fixture["status"] = "LIVE"
+            with self.assertRaisesRegex(ps.StepError, "TARGET_STATUS_NOT_PREMATCH"):
+                ps._resolve_target_rec_from_eval(folder, args, now, min_lead_minutes=5)
 
 
 def _make_fixture(
@@ -184,6 +244,102 @@ class TestPrematchSteps(unittest.TestCase):
         p.write_text(json.dumps(self.discovery_doc, indent=2), encoding="utf-8")
         return p
 
+    def test_phase1_run_creates_fresh_run_and_calls_existing_stages_in_order(self) -> None:
+        calls = []
+        new_run = self.root.resolve() / "new_run"
+
+        def record(stage):
+            def handler(args):
+                calls.append(stage)
+                self.assertEqual(args.eval_dir, new_run)
+                if stage == "discover":
+                    self.assertEqual(args.date, "2026-11-20")
+                    self.assertEqual(args.start.isoformat(), "17:15:00")
+                    self.assertEqual(args.end.isoformat(), "01:30:00")
+                    self.assertTrue(args.refresh)
+                elif stage == "bwin_scan":
+                    self.assertTrue(args.confirm_external)
+                return 0
+            return handler
+
+        command = ["phase1-run", "--root", str(self.root), "--eval-dir", str(new_run),
+                   "--start", "17:15", "--end", "01:30", "--confirm-external"]
+        stages = ["discover", "filter", "bwin_scan", "bwin_list", "stats_fetch", "patterns"]
+        with ExitStack() as mocks:
+            for stage in stages:
+                mocks.enter_context(patch.object(ps, f"cmd_{stage}", side_effect=record(stage)))
+            mocks.enter_context(patch.object(ps, "_now_utc", return_value=datetime.fromisoformat(self.asof)))
+            mocks.enter_context(patch.object(ps, "_load_major_doc", return_value=(None, {"fixtures": [self.fx_male]})))
+            mocks.enter_context(patch.object(ps, "_bwin_reconcile_records", return_value={"verified": [self.fx_male]}))
+            report = mocks.enter_context(patch.object(ps, "_write_phase1_list"))
+            self.assertEqual(ps.main(command), 0)
+            self.assertEqual(calls, stages)
+            self.assertTrue(new_run.is_dir())
+            self.assertEqual(report.call_args.kwargs["filename"], "ranking_fase1.md")
+            self.assertEqual(ps.main(command), 2)
+            self.assertEqual(calls, stages)
+
+    def test_phase1_list_recalculates_margin_and_preserves_rank_offline(self) -> None:
+        fixtures = [
+            dict(self.fx_male, fixture_id=fid, home=name,
+                 kickoff_utc=kickoff, kickoff_madrid=None)
+            for fid, name, kickoff in (
+                (1001, "Dentro de dos horas", "2026-11-20T20:00:00+00:00"),
+                (1002, "Después de medianoche", "2026-11-20T23:30:00+00:00"),
+                (1003, "Dentro de una hora", "2026-11-20T19:00:00+00:00"),
+                (1004, "Ya empezó", "2026-11-20T18:00:00+00:00"),
+                (1005, "Sin vínculo", "2026-11-20T22:30:00+00:00"),
+            )
+        ]
+        ps._atomic_json(self.eval_dir / "fixtures_major.json", {
+            "schema_version": ps.fml.VERSION, "fixtures": fixtures,
+        })
+        pre_path = self.eval_dir / "prospective_trial/enriched/preselection.json"
+        ps._atomic_json(pre_path, {"matches": fixtures})
+        rank_path = self.eval_dir / "prospective_trial/tactical/tactical_signal_engine.json"
+        ps._atomic_json(rank_path, {
+            "asof_madrid": "2026-11-20T15:00:00+01:00",
+            "sources": {"preselection_sha256": ps._sha256_file(pre_path)},
+            "statistical_ranking": [
+                {"fixture_id": fid, "position": position, "statistical_research_score": 90 - position}
+                for position, fid in enumerate((1003, 1002, 1001, 1004, 1005), 1)
+            ],
+        })
+        ps._atomic_json(self.eval_dir / "prospective_trial/bwin/bwin_discovery.json", {
+            "matches": [
+                {"fixture_id": fid, "status": "IDENTITY_VERIFIED_AUTOMATICALLY",
+                 "bwin_event_id": str(700000 + fid), "bwin_url": "https://www.bwin.es/es/sports/eventos/demo"}
+                for fid in (1001, 1002, 1003, 1004)
+            ],
+        })
+        report = self.eval_dir / "segunda_eleccion.md"
+        command = ["phase1-list", "--eval-dir", str(self.eval_dir)]
+        now = datetime.fromisoformat("2026-11-20T18:00:00+00:00")
+        artifacts_before = (pre_path.read_bytes(), rank_path.read_bytes())
+        with (
+            patch.object(ps, "_now_utc", return_value=now),
+            patch.object(ps, "cmd_stats_fetch") as fetch,
+            patch.object(ps, "cmd_patterns") as patterns,
+            patch.object(ps, "cmd_bwin_scan") as scan,
+        ):
+            self.assertEqual(ps.main(command), 0)
+            by_rank, by_time = report.read_text().split("## Por hora de inicio")
+            self.assertLess(by_rank.index("Después de medianoche"), by_rank.index("Dentro de dos horas"))
+            self.assertLess(by_time.index("Dentro de dos horas"), by_time.index("Después de medianoche"))
+            self.assertIn("| 3 | 20/11/2026 21:00 CET | 120.0 |", by_rank)
+            self.assertIn("| 2 | 21/11/2026 00:30 CET |", by_rank)
+            self.assertNotIn("Dentro de una hora", by_rank)
+            self.assertNotIn("Ya empezó", by_rank)
+            self.assertNotIn("Sin vínculo", by_rank)
+            self.assertEqual(ps.main([*command, "--min-lead", "60", "--exclude-fixture-id", "1002"]), 0)
+            second = report.read_text()
+            self.assertIn("| 1 | 20/11/2026 20:00 CET | 60.0 |", second)
+            self.assertNotIn("Después de medianoche", second)
+            fetch.assert_not_called()
+            patterns.assert_not_called()
+            scan.assert_not_called()
+        self.assertEqual(artifacts_before, (pre_path.read_bytes(), rank_path.read_bytes()))
+
     def test_01_02_06_discover_reuse_and_filter_all_statuses(self) -> None:
         self._write_discovery()
         # Resume discover without hitting API
@@ -356,6 +512,15 @@ class TestPrematchSteps(unittest.TestCase):
         canonical_txt = self.root / "outputs/matches/777001/inputs/cuotas_bwin_777001.txt"
         self.assertTrue(canonical_txt.is_file())
         orig_bytes = canonical_txt.read_bytes()
+        first_capture = json.loads((self.eval_dir / "prospective_trial/captures/777001/capture_manifest.json").read_text(encoding="utf-8"))["captures"][0]
+        first_snapshot = Path(first_capture["snapshot_path"])
+        self.assertTrue(first_snapshot.is_relative_to((self.eval_dir / "prospective_trial/captures/777001").resolve()))
+        self.assertEqual(first_snapshot.read_bytes(), orig_bytes)
+
+        # La primera captura ya debe ser consumible; no puede exigir una segunda
+        # ejecución para moverla dentro del contrato inmutable del RUN.
+        rc = ps.main(["reasoning-package", "--root", str(self.root), "--eval-dir", str(self.eval_dir), "--asof", self.asof, "--fixture-id", "1001"])
+        self.assertEqual(rc, 0)
 
         # Second odds-capture with new file must NOT overwrite canonical_txt
         snap_src2 = self.eval_dir / "snap2.txt"
@@ -364,19 +529,21 @@ class TestPrematchSteps(unittest.TestCase):
             "Generado: 2026-11-20T12:05:00+00:00\n\nResultado del partido\n1\n2.20\nX\n3.30\n2\n3.30\n",
             encoding="utf-8",
         )
-        rc = ps.main(["odds-capture", "--root", str(self.root), "--eval-dir", str(self.eval_dir), "--asof", self.asof, "--fixture-id", "1001", "--snapshot-file", str(snap_src2)])
+        later_asof = "2026-11-20T12:05:00Z"
+        rc = ps.main(["odds-capture", "--root", str(self.root), "--eval-dir", str(self.eval_dir), "--asof", later_asof, "--fixture-id", "1001", "--snapshot-file", str(snap_src2)])
         self.assertEqual(rc, 0)
         self.assertEqual(canonical_txt.read_bytes(), orig_bytes)
+        self.assertEqual(first_snapshot.read_bytes(), orig_bytes)
 
         # Reasoning package for Codex (isolated under outputs/matches/777001)
-        rc = ps.main(["reasoning-package", "--root", str(self.root), "--eval-dir", str(self.eval_dir), "--asof", self.asof, "--fixture-id", "1001"])
+        rc = ps.main(["reasoning-package", "--root", str(self.root), "--eval-dir", str(self.eval_dir), "--asof", later_asof, "--fixture-id", "1001"])
         self.assertEqual(rc, 0)
         codex_md = self.root / "outputs/matches/777001/codex_reasoning_input.md"
         self.assertTrue(codex_md.is_file())
         self.assertIn("Arsenal – Chelsea", codex_md.read_text(encoding="utf-8"))
 
         # Model step (B0 operational + CAND_2B3B_V1 experimental)
-        rc = ps.main(["model", "--root", str(self.root), "--eval-dir", str(self.eval_dir), "--asof", self.asof, "--fixture-id", "1001"])
+        rc = ps.main(["model", "--root", str(self.root), "--eval-dir", str(self.eval_dir), "--asof", later_asof, "--fixture-id", "1001"])
         self.assertEqual(rc, 0)
         model_json = self.root / "outputs/matches/777001/model/model_report_777001.json"
         self.assertTrue(model_json.is_file())

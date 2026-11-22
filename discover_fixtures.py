@@ -121,6 +121,7 @@ def parse_fixture(raw: dict[str, Any]) -> dict[str, Any]:
         "away": away.get("name"),
         "away_id": away.get("id"),
         "status": status.get("short"),
+        "referee": fixture.get("referee"),
         "venue": stadium.get("name"),
         "city": stadium.get("city"),
         "coverage_status": "NOT_AUDITED",

@@ -17,6 +17,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Protocol
+from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 from bet_engine.context.research_parser import parse_research_identity_and_metadata
 
@@ -47,6 +48,163 @@ REQUIRED_HYPOTHESIS_FIELDS = (
 
 class EarlyScoutError(RuntimeError):
     """Error explícito de validación epistémica o temporal en EARLY_TACTICAL_SCOUT."""
+
+
+RESEARCH_PROVIDERS = ("gemini", "grok", "perplexity")
+RESEARCH_PLACEHOLDER = "<!-- PREMATCH: INFORME PENDIENTE -->"
+RESEARCH_WINDOWS = {"deep": (240, 360), "update": (15, 60)}
+
+
+def _canonical_source_url(value: str) -> str:
+    url = urlsplit(value)
+    query = sorted((k, v) for k, v in parse_qsl(url.query, keep_blank_values=True)
+                   if not k.lower().startswith("utm_") and k.lower() not in {"gclid", "fbclid"})
+    return urlunsplit((url.scheme.lower(), url.netloc.lower(), url.path.rstrip("/") or "/", urlencode(query), ""))
+
+
+def build_research_handoff(*, identity, asof_utc, phase, questions, sources=None, provider=None, context=None):
+    """Prepara una asignación manual y consolida referencias declaradas por fuente."""
+    kickoff = _parse_iso_utc(identity.get("kickoff_utc") or identity.get("kickoff_madrid"))
+    if kickoff is None or asof_utc.tzinfo is None:
+        raise EarlyScoutError("RESEARCH_REQUIRES_AWARE_TIMESTAMPS")
+    lead = (kickoff - asof_utc).total_seconds() / 60
+    if phase == "deep":
+        assigned = "gemini"
+    elif phase == "update" and provider in {"perplexity", "grok"}:
+        assigned = provider
+    else:
+        raise EarlyScoutError("RESEARCH_UPDATE_REQUIRES_ONE_PROVIDER")
+    minimum, maximum = RESEARCH_WINDOWS[phase]
+    if not minimum <= lead <= maximum:
+        raise EarlyScoutError(f"RESEARCH_OUTSIDE_WINDOW:{phase}:lead={lead:.2f}m:allowed={minimum}..{maximum}m")
+    questions = list(dict.fromkeys(q.strip() for q in questions if q.strip()))
+    if not questions:
+        raise EarlyScoutError("RESEARCH_REQUIRES_PENDING_QUESTIONS")
+
+    records = {}
+    if sources is not None:
+        if not isinstance(sources, dict) or any(str(sources.get(key)) != str(identity.get(key))
+                                               for key in ("fixture_id", "event_id")):
+            raise EarlyScoutError("RESEARCH_SOURCE_REGISTRY_IDENTITY_MISMATCH")
+        citations = sources.get("sources")
+        if not isinstance(citations, list):
+            raise EarlyScoutError("RESEARCH_SOURCE_REGISTRY_INVALID")
+        for item in citations:
+            if not isinstance(item, dict):
+                raise EarlyScoutError("RESEARCH_SOURCE_REGISTRY_INVALID")
+            url = urlsplit(str(item.get("url") or ""))
+            if url.scheme not in {"https", "http"} or not url.hostname or url.username or url.password:
+                raise EarlyScoutError("RESEARCH_SOURCE_URL_INVALID")
+            key = _canonical_source_url(str(item["url"]))
+            published = _parse_iso_utc(item.get("published_at_utc"))
+            available = _parse_iso_utc(item.get("available_at_utc"))
+            if any(stamp and stamp > asof_utc for stamp in (published, available)):
+                status = "AFTER_CUTOFF"
+            elif published is None or available is None or available < published:
+                status = "TEMPORALITY_UNVERIFIED"
+            else:
+                status = "DECLARED_AVAILABLE_AT_CUTOFF"
+            reference = {"url": str(item["url"]), "provider": item.get("provider"), "claim": item.get("claim"),
+                         "reference_fixture_id": item.get("reference_fixture_id"), "confidence": item.get("confidence"),
+                         "published_at_utc": published.isoformat() if published else None,
+                         "available_at_utc": available.isoformat() if available else None, "status": status}
+            citations_by_url = records.setdefault(key, [])
+            if reference not in citations_by_url:
+                citations_by_url.append(reference)
+
+    return {
+        "fixture_id": identity["fixture_id"], "event_id": identity.get("event_id"), "phase": phase,
+        "provider": assigned, "cutoff_utc": asof_utc.astimezone(timezone.utc).isoformat(),
+        "kickoff_utc": kickoff.isoformat(), "questions": questions,
+        "fixture_context": context or {},
+        "source_registry": [{"url": key, "citations": rows} for key, rows in sorted(records.items())],
+    }
+
+
+def build_research_handoff_prompt(identity, handoff):
+    task = ("Investiga los mecanismos tácticos pendientes con ejemplos fechados y contraevidencia."
+            if handoff["phase"] == "deep" else
+            "Busca novedades relevantes desde las referencias previas. Si no hay referencias previas, informa del estado actual con fuentes fechadas.")
+    scope = ("Revisa todos estos ámbitos para ambos equipos, además de las preguntas específicas."
+             if handoff["phase"] == "deep" else
+             "Usa estos ámbitos para detectar cambios materiales. Prioriza las preguntas específicas y evita repetir antecedentes.")
+    prior = []
+    for source in handoff["source_registry"]:
+        citations = [row for row in source["citations"] if row["status"] == "DECLARED_AVAILABLE_AT_CUTOFF"]
+        if citations:
+            prior.append({"url": source["url"], "citations": citations})
+    return "\n".join([
+        f"# Investigación · {identity['home']} vs {identity['away']} · {handoff['provider']}",
+        f"Fixture {handoff['fixture_id']} · Event ID {handoff['event_id']} · corte {handoff['cutoff_utc']}",
+        f"Competición {identity.get('league')} · inicio UTC {handoff['kickoff_utc']} · Madrid {identity.get('kickoff_madrid')}",
+        "", task,
+        "", "## Revisión cualitativa de ambos equipos",
+        scope,
+        "- Reportes de clubes y prensa local, declaraciones, bajas, sanciones, dudas, regresos y rumores. Distingue el origen de cada versión, su fecha y si sigue pendiente de corroboración.",
+        "- Entrenador actual, cambios recientes o interinatos, fecha de incorporación, primeros ajustes y adaptación de la plantilla. Separa lo observado en este equipo de antecedentes en otros clubes.",
+        "- Alineación oficial si ya se publicó, XI probable mientras tanto, variantes, suplentes relevantes, gestión de minutos y posibles rotaciones. Explica qué cambia si falla una pieza clave.",
+        "- Estrategias plausibles de local y visitante, cruces de roles, respuesta y contraajuste. Cita declaraciones o ejemplos fechados y señala qué observación debilitaría la hipótesis.",
+        "- Posición, puntos, partidos pendientes y situación competitiva de ambos al corte. Contrasta qué resultado les sirve, qué incentivos están documentados y cuáles son interpretaciones.",
+        "- Próximos compromisos de ambos equipos, con fecha y competición si están publicados. Valora descanso, viajes y prioridades solo cuando afecten al partido, con respaldo para las posibles rotaciones.",
+        "- Indica los ámbitos sin información acreditada y su efecto concreto en la lectura del partido.",
+        "",
+        "Reutiliza las referencias disponibles. Una publicación repetida cuenta como una sola fuente.",
+        "Para nuevas afirmaciones, devuelve URL, fecha de publicación, disponibilidad al corte, fixture de referencia y grado de certeza.",
+        "Si una pregunta pide cubrir un dato histórico ausente, devuelve una fila por partido con fecha, competición, local, visitante, dato literal y URL. Identifica los partidos que siguen sin dato.",
+        "Para goles por parte, documenta el marcador al descanso y al final reglamentario. Para el árbitro, acredita la designación por separado y documenta cada partido arbitrado y las tarjetas de cada equipo.",
+        "Distingue registros comprobables de inferencias tácticas. Conserva las discrepancias entre fuentes y evita contar dos veces el mismo partido.",
+        "Mantén separado el XI probable del oficial. No recalcules estadísticas API ni estimes probabilidades, precios o EV.",
+        "", *[f"- {q}" for q in handoff["questions"]], "",
+        "Contexto local disponible para contrastar (estadística descriptiva):",
+        json.dumps(handoff.get("fixture_context") or {}, ensure_ascii=False, indent=2), "",
+        "Devuelve Markdown con una sección de hallazgos y cabeceras de metadatos en líneas separadas:",
+        f"fixture_id: {handoff['fixture_id']}",
+        f"event_id: {handoff['event_id']}",
+        f"analysis_cutoff_utc: {handoff['cutoff_utc']}",
+        "generated_at_utc: <hora real de generación en ISO 8601 con offset>",
+        f"provider: {handoff['provider']}", "",
+        "Referencias disponibles según fechas declaradas (requieren cotejo documental):",
+        json.dumps(prior, ensure_ascii=False, indent=2),
+    ]) + "\n"
+
+
+def fixture_research_context(identity, pre_match, tactical_fx, phase, provider):
+    """Select the questions and local observations a manual researcher needs."""
+    pre_match = pre_match or {}
+    tactical_fx = tactical_fx or {}
+    signals = sorted(tactical_fx.get("signals") or [], key=lambda s: -(s.get("priority_score") or 0))
+    signals = [
+        {"team": identity.get(s.get("team_side")), "metric": s.get("metric"), "status": s.get("status"),
+         "production": {k: (s.get("own") or {}).get(k) for k in ("mean", "n")},
+         "opponent_conceded": {k: (s.get("opponent_conceded") or {}).get(k) for k in ("mean", "n")}}
+        for s in signals if s.get("metric")
+    ][:6]
+    contradictions = (tactical_fx.get("contradictions") or [])[:4]
+    coverage = {k: v.get("status") for k, v in (pre_match.get("family_evidence") or {}).items() if isinstance(v, dict)}
+    context = {"home": identity["home"], "away": identity["away"], "evidence_cutoff_utc": pre_match.get("analysis_cutoff_utc"),
+               "signals": signals, "contradictions": contradictions, "family_coverage": coverage,
+               "local_standings": {side: (pre_match.get(f"{side}_evidence") or {}).get("standings")
+                                   for side in ("home", "away")}}
+    teams = f"{identity['home']} y {identity['away']}"
+    if phase == "deep":
+        questions = [
+            f"¿Qué secuencias fechadas explican o contradicen la señal de {s['metric']} de {s['team'] or teams} "
+            f"con producción {s['production']} y concesión rival {s['opponent_conceded']}? ¿Qué ajuste rival la invalidaría?"
+            for s in signals[:2]
+        ]
+    elif provider == "perplexity":
+        questions = [f"¿Qué novedades oficiales de convocatoria, sanciones o disponibilidad de {teams} alteran la muestra local? Indica cambio, fuente primaria y fecha."]
+    else:
+        focus = ", ".join(dict.fromkeys(s["metric"] for s in signals[:3])) or "las llegadas y la salida bajo presión"
+        questions = [f"¿Qué declaraciones o cambios de rol recientes de {teams} afectan a {focus}? Señala la respuesta probable del rival y una explicación alternativa."]
+    if contradictions and (phase == "deep" or provider == "grok"):
+        questions.append(f"¿Qué evidencia contemporánea permite resolver esta contradicción registrada? {contradictions[0]}")
+    gaps = [name for name, state in coverage.items() if state not in {"SUFFICIENT", "COVERED", "STRONG"}][:3]
+    if gaps and (phase == "deep" or provider == "perplexity"):
+        questions.append(f"Para {', '.join(gaps)}, ¿qué evidencia primaria comparable de {teams} cubre la carencia y qué sigue indeterminado?")
+    if not questions:
+        questions.append(f"¿Qué antecedentes fechados de {teams} permiten contrastar entrenadores, esquemas y adaptación de plantilla en {identity.get('league')}? Indica un contraejemplo y qué no se pudo contrastar.")
+    return questions, context
 
 
 class EarlyScoutAnalystPort(Protocol):
@@ -97,8 +255,8 @@ def _extract_player_status_mentions(raw_text: str, *, source_name: str, report_d
     """Extrae menciones de disponibilidad por jugador (solo columna de estado) y contradicciones explícitas."""
     mentions: dict[str, list[dict[str, Any]]] = {}
     explicit_contradictions: list[dict[str, Any]] = []
-    out_kw = re.compile(r"\b(baja|lesion|lesionado|suspendid[oa]|fuera|ausencia|impedido|descartad[oa]|cirugia|rotura)\b", re.I)
-    in_kw = re.compile(r"\b(probable|titular|disponible|regresa|vuelve|incluido|habilitado|relacionado)\b", re.I)
+    out_kw = re.compile(r"\b(baja|lesion|lesionado|suspendid[oa]|fuera|ausencia|impedido|descartad[oa]|cirugia|rotura|out)\b", re.I)
+    in_kw = re.compile(r"\b(probable|titular|disponible|regresa|vuelve|incluido|habilitado|relacionado|available)\b", re.I)
 
     lines = raw_text.splitlines()
     for idx, line in enumerate(lines):
@@ -162,10 +320,12 @@ def evaluate_external_reports(
     home: str,
     away: str,
     kickoff_utc: datetime | None,
+    evidence_cutoff_utc: datetime | None = None,
 ) -> dict[str, Any]:
     """Valida identidad, temporalidad, XI probable/oficial y contradicciones en informes externos."""
     accepted: list[dict[str, Any]] = []
     rejected: list[dict[str, Any]] = []
+    ignored: list[dict[str, Any]] = []
     warnings: list[str] = []
     player_claims: dict[str, list[dict[str, Any]]] = {}
     explicit_contras: list[dict[str, Any]] = []
@@ -174,13 +334,31 @@ def evaluate_external_reports(
         source_name = str(rep.get("source") or "external_ai")
         path = rep.get("path")
         raw_text = rep.get("raw_text")
+        digest = None
         if raw_text is None and path:
-            raw_text = Path(path).read_text(encoding="utf-8", errors="replace")
+            try:
+                raw = Path(path).read_bytes()
+                digest = hashlib.sha256(raw).hexdigest()
+                raw_text = raw.decode("utf-8-sig")
+            except (OSError, UnicodeError):
+                rejected.append({"source": source_name, "path": str(path), "reason": "REPORT_UNREADABLE"})
+                continue
         raw_text = str(raw_text or "")
+        remainder = raw_text.replace(RESEARCH_PLACEHOLDER, "").strip()
+        if not remainder and (rep.get("discovered") or RESEARCH_PLACEHOLDER in raw_text):
+            ignored.append({"source": source_name, "path": str(path) if path else None, "reason": "PENDING_RESPONSE"})
+            continue
         if not raw_text.strip():
             rejected.append({"source": source_name, "path": str(path) if path else None, "reason": "EMPTY_REPORT"})
             warnings.append(f"EXTERNAL_REPORT_EMPTY:{source_name}")
             continue
+        if rep.get("discovered"):
+            body = re.sub(r"<!--.*?-->", "", remainder, flags=re.S)
+            body = re.sub(r"^[ \t]*(?:#{1,6}[ \t].*|(?:[-*] )?[\w`]+_\w*[`*]*:.*|provider:.*|\x60{3}.*)$",
+                          "", body, flags=re.M | re.I)
+            if not body.strip():
+                rejected.append({"source": source_name, "path": str(path) if path else None, "reason": "REPORT_WITHOUT_FINDINGS"})
+                continue
 
         parsed = parse_research_identity_and_metadata(raw_text, home=home, away=away)
         ev_found = parsed["event_ids_found"]
@@ -195,6 +373,12 @@ def evaluate_external_reports(
         if event_id and ev_found and str(event_id) not in ev_found:
             id_mismatch = True
         if not fix_found and not ev_found and not _teams_match_in_text(raw_text, home, away):
+            id_mismatch = True
+        if kickoff_utc is not None and any(
+            parsed.get(key) and parsed[key] != kickoff_utc for key in ("kickoff_utc", "kickoff_madrid")
+        ):
+            id_mismatch = True
+        if rep.get("discovered") and (not fix_found or (event_id and not ev_found)):
             id_mismatch = True
 
         if id_mismatch:
@@ -214,10 +398,18 @@ def evaluate_external_reports(
         declared_ts = gen_dt or cutoff_dt
         rep_warnings: list[str] = []
 
+        if evidence_cutoff_utc is not None and (
+            gen_dt is None or any(stamp and stamp > evidence_cutoff_utc for stamp in (gen_dt, cutoff_dt))
+            or (cutoff_dt and cutoff_dt > gen_dt)
+        ):
+            rejected.append({"source": source_name, "path": str(path) if path else None,
+                             "reason": "REPORT_TIME_NOT_COMPATIBLE_WITH_RESEARCH_CUTOFF"})
+            warnings.append(f"REPORT_TIME_NOT_COMPATIBLE_WITH_RESEARCH_CUTOFF:{source_name}")
+            continue
         if declared_ts is None:
             rep_warnings.append("MISSING_VERIFIABLE_TIMESTAMP")
             warnings.append(f"MISSING_VERIFIABLE_TIMESTAMP:{source_name}")
-        elif kickoff_utc is not None and declared_ts > kickoff_utc:
+        elif kickoff_utc is not None and any(stamp and stamp >= kickoff_utc for stamp in (gen_dt, cutoff_dt)):
             rejected.append({
                 "source": source_name,
                 "path": str(path) if path else None,
@@ -227,6 +419,10 @@ def evaluate_external_reports(
             })
             warnings.append(f"POST_KICKOFF_CONTAMINATION:{source_name}")
             continue
+
+        if parsed["invalid_citation_urls"]:
+            rep_warnings.append("INVALID_OR_PLACEHOLDER_CITATION")
+            warnings.append(f"INVALID_OR_PLACEHOLDER_CITATION:{source_name}")
 
         # 3. Lineup certainty guard (never promote PROBABLE to CONFIRMADO)
         lineup_summary: dict[str, Any] = {}
@@ -253,12 +449,16 @@ def evaluate_external_reports(
         accepted.append({
             "source": source_name,
             "path": str(path) if path else None,
-            "sha256": _sha256_text(raw_text),
+            "sha256": digest or _sha256_text(raw_text),
             "identity_binding": "EXACT_ID" if (fix_found or ev_found) else "PROBABLE_NAME_MATCH",
             "cutoff_utc": cutoff_dt.isoformat() if cutoff_dt else None,
             "generated_utc": gen_dt.isoformat() if gen_dt else None,
             "timestamp_status": "VERIFIED_PREMATCH" if declared_ts is not None else "NO_VERIFICADO",
+            "timestamp_provenance": "PROVIDER_DECLARED" if declared_ts else "MISSING",
             "has_source_registry": bool(parsed.get("has_source_registry")),
+            "citation_urls": parsed["citation_urls"],
+            "invalid_citation_urls": parsed["invalid_citation_urls"],
+            "citation_status": "DECLARED_UNVERIFIED" if parsed["citation_urls"] else "NO_VALID_CITATION_URLS",
             "lineups": lineup_summary,
             "warnings": rep_warnings,
             "raw_excerpt": raw_text[:16000],
@@ -297,11 +497,21 @@ def evaluate_external_reports(
             "resolution_status": "PENDIENTE_DE_RESOLUCION",
         })
 
+    providers_by_url: dict[str, set[str]] = {}
+    for report in accepted:
+        for url in report["citation_urls"]:
+            providers_by_url.setdefault(_canonical_source_url(url), set()).add(report["source"])
+    repeated_sources = [
+        {"url": url, "providers": sorted(providers), "independent_corroborations": 1}
+        for url, providers in sorted(providers_by_url.items()) if len(providers) > 1
+    ]
     return {
         "accepted": accepted,
         "rejected": rejected,
+        "ignored": ignored,
         "warnings": sorted(set(warnings)),
         "contradictions": contradictions,
+        "repeated_sources": repeated_sources,
     }
 
 
@@ -501,6 +711,7 @@ def build_early_scout_prompt(scout_input: dict[str, Any]) -> str:
         "- Un XI probable NUNCA debe presentarse como confirmado.",
         "- Un jugador visto en un XI histórico sin acreditación actual debe marcarse `NO_VERIFICADO` respecto a su pertenencia actual.",
         "- Las estadísticas sirven para contrastar mecanismos futbolísticos, no para inventar explicaciones.",
+        "- Para hipótesis sobre conteos de córners, añade `corner_target` con `scope` (HOME, AWAY o MATCH) y `period` (FT, H1 o H2). Usa una hipótesis por alcance y periodo respaldados.",
         "",
         "## Identidad y Control Temporal",
         f"- `fixture_id`: `{ident['fixture_id']}`",
@@ -565,6 +776,7 @@ def prepare_early_scout_package(
     tactical_fx: dict[str, Any] | None = None,
     external_reports: list[dict[str, Any]] | None = None,
     asof_utc: datetime | None = None,
+    enforce_report_cutoff: bool = False,
 ) -> dict[str, Any]:
     """Prepara el paquete de entrada validado y el prompt AI-FIRST aislado por partido."""
     fid = int(identity["fixture_id"])
@@ -588,6 +800,7 @@ def prepare_early_scout_package(
         home=home,
         away=away,
         kickoff_utc=ko_utc,
+        evidence_cutoff_utc=now_utc if enforce_report_cutoff else None,
     )
     stats_ctx = _sanitize_stats_without_odds(pre_match, tactical_fx)
     hist_guard = _extract_historical_players_guard(pre_match, ext_eval["accepted"])
@@ -662,6 +875,8 @@ def prepare_early_scout_package(
 def _validate_ai_analysis(analysis: dict[str, Any]) -> None:
     if not isinstance(analysis, dict):
         raise EarlyScoutError("AI_ANALYSIS_MUST_BE_JSON_OBJECT")
+    if any(analysis.get(key) is not None for key in ("decision", "final_decision", "pick", "no_bet", "no_bet_reasons")):
+        raise EarlyScoutError("PHASE1_FINAL_DECISION_RESERVED_FOR_FINAL_STAGE")
     forbidden = [k for k in ("p_model", "calibrated_p_model", "ev", "stake", "recommended_bet") if analysis.get(k) is not None]
     if forbidden or analysis.get("actionable_bet") is True:
         raise EarlyScoutError(f"PHASE1_BOUNDARY_VIOLATION_PROBABILITIES_OR_BET_FORBIDDEN:{forbidden}")

@@ -273,12 +273,12 @@ def prepare_one(root: Path, url: str, python: str, shared_file: Path,
                 api_minute: int, api_second: int, reuse_odds: bool = False) -> bool:
     event = identifier(url)
     if reuse_odds:
-        from prematch_single import load_context,freshness,validate_reuse_odds
+        from prematch_single import ensure_prematch,load_context,freshness,match_manifest,validate_reuse_odds
         from types import SimpleNamespace
         before=load_context(SimpleNamespace(root=root,selected=Path(reuse_odds),decision=None))
         if before['event_id']!=event or before['url']!=url:raise ValueError('REUSE_ODDS_SELECTION_IDENTITY_MISMATCH')
         freshness(before,min_lead=45)
-        validate_reuse_odds(before,max_age=120)
+        before_snapshot=validate_reuse_odds(before,max_age=120)
     location = event_dir(root,event)
     location.mkdir(parents=True, exist_ok=True)
     # Archive stale identity/context before preparation; never allow a failed API
@@ -305,7 +305,7 @@ def prepare_one(root: Path, url: str, python: str, shared_file: Path,
         ctx=load_context(SimpleNamespace(root=root,selected=Path(reuse_odds),decision=None))
         if ctx['event_id']!=event or ctx['url']!=url:raise ValueError('REUSE_ODDS_SELECTION_IDENTITY_MISMATCH')
         freshness(ctx,min_lead=45)
-        snap=validate_reuse_odds(ctx,max_age=120)
+        validate_reuse_odds(ctx,max_age=120)
         env['PREMATCH_TEMPORAL_IDENTITY_SELECTED']=str(ctx['selected_path'])
         odds_code=0
         state['odds_reused']=True
@@ -401,6 +401,24 @@ def prepare_one(root: Path, url: str, python: str, shared_file: Path,
                     state['kickoff_madrid'] = case_doc['kickoff_madrid']
         except (OSError, ValueError, TypeError, json.JSONDecodeError):
             pass
+    if reuse_odds and state['status'] == 'PREPARADO':
+        try:
+            ensure_prematch(before)
+            if not all(state['inputs'].get(kind) for kind in ('odds', 'context', 'context_json', 'identity')):
+                raise ValueError('PREPARE_CANONICAL_INPUTS_MISSING')
+            match_manifest(before, manifest=state)
+            for key in ('selected', 'decision'):
+                path = before[f'{key}_path']
+                if sha(path) != before[f'{key}_sha']:
+                    raise ValueError(f'PREPARE_{key.upper()}_CHANGED')
+            current = validate_reuse_odds(before, max_age=120)
+            if state['inputs']['odds']['sha256'] != before_snapshot['sha256'] or current['sha256'] != before_snapshot['sha256']:
+                raise ValueError('PREPARE_ODDS_CHANGED')
+            state['selected_match'] = {'path': str(before['selected_path']), 'sha256': before['selected_sha']}
+            state['selection_decision'] = {'path': str(before['decision_path']), 'sha256': before['decision_sha']}
+        except (OSError, ValueError, KeyError) as exc:
+            state['status'] = 'ERROR_ARCHIVOS'
+            state['error'] = str(exc)
     save_manifest(root,event,state)
     say(f'[{event}] PREPARACIÓN: {state["status"]}')
     return state['status'] in {'PREPARADO', 'PREPARADO_PROVISIONAL'}
@@ -427,8 +445,11 @@ def bind_identity(root: Path, event: str, state: dict) -> str:
 
 def finish_one(root: Path, event: str, python: str, override_report: str | None = None,
                allow_no_odds: bool = False, historical: bool = False,
-               shadow_mode: bool = False, lineup_cutoff_minutes: int = 15) -> bool:
+               shadow_mode: bool | None = None, lineup_cutoff_minutes: int = 15) -> bool:
     state = load_manifest(root,event)
+    shadow_mode = not historical if shadow_mode is None else shadow_mode
+    state.pop('shadow_evaluation', None)
+    state.pop('validation_artifact', None)
     if not historical:
         ensure_event_operation_window(root, event, state,
                                       min_lead=FINISH_MIN_LEAD_MINUTES, operation='finish')
@@ -533,13 +554,14 @@ def finish_one(root: Path, event: str, python: str, override_report: str | None 
         'reviews': len(reviews),
         'motor_allowed': valcode in (0, 1) and validated.get('status') != 'BLOQUEADO_PREPARTIDO',
     }
-    if valcode not in (0,1) or validated.get('status')=='BLOQUEADO_PREPARTIDO':
+    if blocks or valcode not in (0,1) or validated.get('status')=='BLOQUEADO_PREPARTIDO':
         state['status']='BLOQUEADO_VALIDACION';save_manifest(root,event,state)
         for item in blocks:
             say(f'[{event}] BLOCK {item.get("code", "SIN_CODIGO")}: {item.get("detail", "")[:300]}')
         say(f'[{event}] Validación bloqueada: {valdir / ("validacion_" + event + ".md")}')
         say(f'[{event}] Corrige la causa y reintenta finish SIN repetir prepare; no se omitirán los BLOCK.')
         return False
+    state['validation_artifact'] = {'path': str(valpath.resolve()), 'sha256': sha(valpath)}
     state['status']='VALIDADO';save_manifest(root,event,state)
     probdir=event_dir(root,event)/'probabilistic'
     engine=[python,'-u','motor_probabilistico.py','--context',inputs['context']['path'],
@@ -683,8 +705,8 @@ Produce `outputs/matches/{event}/analysis/analisis_{event}.md` exclusivamente pa
     save_manifest(root,event,state)
     if code == 0 and shadow_mode:
         try:
-            from bet_engine.orchestration import run_shadow_for_event_dir
-            sh_res = run_shadow_for_event_dir(
+            from bet_engine.orchestration.validated_shadow import run_validated_shadow
+            sh_res = run_validated_shadow(
                 root,
                 event,
                 historical=historical,
@@ -692,6 +714,14 @@ Produce `outputs/matches/{event}/analysis/analisis_{event}.md` exclusivamente pa
                 min_lead_minutes=(0 if historical else FINISH_MIN_LEAD_MINUTES),
                 lineup_cutoff_minutes=lineup_cutoff_minutes,
             )
+            state['shadow_evaluation'] = {'status': sh_res.get('status'), 'actionable_bet': False}
+            if sh_res.get('ok') and sh_res.get('path'):
+                report_path = Path(sh_res['path']).resolve()
+                state['shadow_evaluation'].update(path=str(report_path), sha256=sha(report_path),
+                                                  validation_sha256=state['validation_artifact']['sha256'])
+            else:
+                state['shadow_evaluation']['error'] = sh_res.get('error')
+            save_manifest(root,event,state)
             say(f'[{event}] SHADOW MODE ({sh_res.get("status", "ERR")}): {sh_res.get("path") or sh_res.get("error")} | {sh_res.get("elapsed_ms")} ms')
             prompt_path = event_dir(root, event) / f'CODEX_{event}.md'
             if not historical and sh_res.get('ok') and sh_res.get('path') and prompt_path.is_file():
@@ -708,11 +738,14 @@ Produce `outputs/matches/{event}/analysis/analisis_{event}.md` exclusivamente pa
                         f"(`{sh_doc.get('timestamp_granularity')}`)\n"
                         f"- Cierre del expediente (UTC): `{state.get('finish_completed_at')}`\n"
                         f"- Shadow summary: `{sh_res['path']}`\n"
+                        f"- Consulta `selection_evaluations` para probabilidad, calibración, incertidumbre, liquidación y precio. Salida Shadow diagnóstica.\n"
                     )
                     prompt_path.write_text(prompt_path.read_text(encoding='utf-8') + ts_block, encoding='utf-8')
                 except (OSError, ValueError, json.JSONDecodeError):
                     pass
         except Exception as exc:
+            state['shadow_evaluation'] = {'status': 'ERROR', 'actionable_bet': False, 'error': str(exc)}
+            save_manifest(root,event,state)
             say(f'[{event}] [SHADOW_WARN] fallo no bloqueante: {exc}')
     return code==0
 
@@ -945,7 +978,8 @@ def main(argv: list[str] | None = None) -> int:
     f.add_argument('--workers',type=int,default=2)
     f.add_argument('--allow-no-odds',action='store_true')
     f.add_argument('--historical',action='store_true',help='Auditoría retrospectiva de snapshots prepartido; nunca apuestas en vivo')
-    f.add_argument('--shadow-mode',action='store_true',help='Opt-in: ejecuta Bet Engine en Shadow Mode paralelo sin alterar salidas operativas')
+    f.add_argument('--shadow-mode',action=argparse.BooleanOptionalAction,default=None,
+                   help='Evaluación Shadow diagnóstica (por defecto en cierre PREMATCH)')
     f.add_argument('--lineup-cutoff-minutes',type=int,default=15,help='Corte prepartido para exigir 22 titulares confirmados (default 15)')
     s=sub.add_parser('status',help='Manifiestos multi, o el handoff diario con --date (sin manifest.json)')
     s.add_argument('--event-id',action='append')

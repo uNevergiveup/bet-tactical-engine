@@ -24,6 +24,47 @@ def _fx(fid: int, home: str, away: str, league: str, country: str, ko_madrid: st
 
 
 class TestBwinDiscoveryReconciliationFixes(unittest.TestCase):
+    def test_napoli_localized_alias_and_absolute_time_boundaries(self):
+        fixture = _fx(1550204, "Napoli", "Torino", "Serie A", "Italy", "2026-11-21T20:45:00+01:00", league_id=135)
+        catalog = [{
+            "bwin_event_id": "7911353",
+            "bwin_url": "https://www.bwin.es/es/sports/eventos/n%C3%A1poles-torino-2:7911353",
+            "text": "Nápoles Torino Hoy / 20:45 CA 4",
+            "text_observed_at_utc": "2026-11-21T01:33:41+00:00",
+        }]
+        hits = bd.match_catalog(fixture, catalog)
+        self.assertEqual(len(hits), 1)
+        self.assertEqual(hits[0]["bwin_event_id"], "7911353")
+        self.assertEqual(hits[0]["home_similarity"], 1.0)
+        self.assertEqual(hits[0]["away_similarity"], 1.0)
+        self.assertEqual(hits[0]["home_name_match_method"], "VERIFIED_ALIAS")
+        self.assertEqual(hits[0]["away_name_match_method"], "LITERAL")
+        self.assertEqual(hits[0]["name_match_status"], "VERIFIED_ALIAS_USED")
+        self.assertEqual(hits[0]["team_order_status"], "HOME_AWAY_ALIAS")
+
+        self.assertEqual(bd.absolute_kickoff_status(0), "TIME_VERIFIED")
+        self.assertEqual(bd.absolute_kickoff_status(90), "TIME_VERIFIED")
+        self.assertEqual(bd.absolute_kickoff_status(90.01), "TIME_REVIEW")
+        self.assertEqual(bd.absolute_kickoff_status(None), "TIME_UNVERIFIED")
+
+    def test_shared_institutional_prefix_uses_complete_alias_for_team_order(self):
+        fixture = _fx(
+            1575226,
+            "Borussia Mönchengladbach",
+            "Borussia Dortmund",
+            "Bundesliga",
+            "Germany",
+            "2026-11-21T15:30:00+01:00",
+        )
+        catalog = [{
+            "bwin_event_id": "7907990",
+            "bwin_url": "https://www.bwin.es/es/sports/eventos/borussia-m%C2%B4gladbach-borussia-dortmund-2:7907990",
+            "text": "Borussia M´gladbach Borussia Dortmund Hoy / 15:30 CA 3",
+        }]
+        hits = bd.match_catalog(fixture, catalog)
+        self.assertEqual(len(hits), 1)
+        self.assertEqual(hits[0]["team_order_status"], "HOME_AWAY_ALIAS")
+
     def test_1_and_2_bayern_and_koln_match_and_reject_wrong_colonia(self):
         fx_bayern = _fx(1575221, "Bayern München", "1. FC Köln", "Bundesliga", "Germany", "2026-11-20T20:30:00+01:00")
         catalog = [

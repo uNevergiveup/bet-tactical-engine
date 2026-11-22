@@ -281,12 +281,33 @@ class TestStage52CliIntegration(unittest.TestCase):
             summary = json.loads(sum_file.read_text(encoding="utf-8"))
             self.assertEqual(summary["mode"], "SHADOW_NON_INTRUSIVE")
             self.assertGreater(len(summary["shadow_report"]["market_comparisons"]), 0)
+            manifest = json.loads((match_dir / "manifest.json").read_text(encoding="utf-8"))
+            self.assertEqual(summary["validation_artifact"], manifest["validation_artifact"])
+            self.assertEqual(manifest["shadow_evaluation"]["validation_sha256"],
+                             summary["validation_artifact"]["sha256"])
+            self.assertFalse(summary["actionable_bet"])
+            evaluations = summary["selection_evaluations"]
+            self.assertEqual(len(evaluations), len(summary["shadow_report"]["market_comparisons"]))
+            for row, evaluation in zip(summary["shadow_report"]["market_comparisons"], evaluations):
+                self.assertEqual(evaluation["estimated_probability"], row["p_model"])
+                self.assertEqual(evaluation["calibration_status"], row["calibration_status"])
+                self.assertEqual(evaluation["uncertainty"]["p_low"], row["p_low"])
+                self.assertEqual(evaluation["settlement"]["settlement_rule"], row["settlement_rule"])
+                self.assertEqual(evaluation["price"]["ev_model"], row["ev_model"])
             self.assertGreaterEqual(sh_ms, 0.0)
             self.assertGreaterEqual(leg_ms, 0.0)
 
             # 3) Prueba Fail-Safe: si falla Shadow Mode (p.ej. faltase o se corrompiera la ruta),
             # finish debe seguir devolviendo exit 0 y preservar el motor anterior.
             from bet_engine.orchestration import run_shadow_for_event_dir
+
+            validation_path = Path(manifest["validation_artifact"]["path"])
+            validation_path.write_bytes(validation_path.read_bytes() + b"\n")
+            from bet_engine.orchestration.validated_shadow import run_validated_shadow
+
+            rejected = run_validated_shadow(tmp_root, "7903872", historical=True)
+            self.assertFalse(rejected["ok"])
+            self.assertIn("SHADOW_VALIDATION_REJECTED", rejected["error"])
 
             bad = run_shadow_for_event_dir(tmp_root, "0000000_NONEXISTENT")
             self.assertFalse(bad["ok"])

@@ -23,7 +23,7 @@ from pathlib import Path
 from typing import Any
 
 VERSION = '1.0-major-leagues'  # Esquema compatible con preselect_matches y trial
-FILTER_IMPLEMENTATION = '2.2-category-aware-scopes'
+FILTER_IMPLEMENTATION = '2.3-stable-top-tier-fallback'
 # allowlist EXPLÍCITA de primeras divisiones nacionales adultas.
 # No presume que API-Football marque el nivel de una liga con league.type.
 # Revisar este catálogo para cada liga nueva; IDs de API-Football, no Bwin.
@@ -349,9 +349,18 @@ def classify(row: dict[str,Any], policy: str='adult-open') -> tuple[str,str]:
         if lid in CATALOG_BY_COUNTRY.get(country, ()):
             return 'ELIGIBLE', 'CURATED_DOMESTIC_TOP_TIER'
         return 'REVIEW', 'TIER_UNKNOWN'
-    # No hay un campo universal de categoria de edad. La ausencia de indicios
-    # no demuestra la adultez; conservar esa limitacion en la politica.
-    return admission(row)
+    # adult-open conserva la admision season-scoped cuando existe, pero una
+    # temporada todavia no registrada no debe ocultar una primera division
+    # cuya identidad (pais + League ID) ya esta acreditada en el catalogo
+    # estable. Esta decision es exclusivamente deportiva: no afirma que el
+    # evento exista en Bwin ni vincula ningun Bwin Event ID.
+    admission_status, admission_reason = admission(row)
+    if (
+        admission_status == 'REVIEW'
+        and lid in CATALOG_BY_COUNTRY.get(country, ())
+    ):
+        return 'ELIGIBLE', 'CURATED_STABLE_DOMESTIC_TOP_TIER'
+    return admission_status, admission_reason
 
 
 def matching_eligibility(row:dict[str,Any]) -> tuple[str,str]:
@@ -392,11 +401,20 @@ def gender_for(row:dict[str,Any]) -> str:
     return 'UNKNOWN'
 
 
-def filter_document(data:dict[str,Any],source_bytes:bytes,policy:str='adult-open') -> dict[str,Any]:
+def filter_document(data:dict[str,Any],source_bytes:bytes,policy:str='adult-open', *,
+                    refresh_fixture_id:int|None=None, previous:dict[str,Any]|None=None) -> dict[str,Any]:
     if policy not in VALID_POLICIES:
         raise ValueError(f'Politica no admitida: {policy}')
     if data.get('schema_version')!='1.0-discovery' or not isinstance(data.get('fixtures'),list):
         raise ValueError('Entrada no es fixtures.json V1.0 valido')
+    policy_tier={'adult-open':'ADULT_OPEN','domestic-top-tier':'DOMESTIC_TOP_TIER','top-tier-and-senior-cups':'TOP_TIER_AND_SENIOR_CUPS'}[policy]
+    source_sha=hashlib.sha256(source_bytes).hexdigest()
+    prior_rows={}
+    if previous is not None:
+        if (refresh_fixture_id is None or previous.get('source_sha256')!=source_sha
+                or (previous.get('policy') or {}).get('competition_tier')!=policy_tier):
+            raise ValueError('SELECTIVE_FILTER_SOURCE_OR_POLICY_MISMATCH')
+        prior_rows={row['fixture_id']:row for key in ('fixtures','review','excluded') for row in previous.get(key,[])}
     ids:set[int]=set()
     included=[]; excluded=[]; review=[]
     for row in data['fixtures']:
@@ -405,6 +423,10 @@ def filter_document(data:dict[str,Any],source_bytes:bytes,policy:str='adult-open
         if not isinstance(fid,int) or isinstance(fid,bool) or fid <= 0 or fid in ids:
             raise ValueError('Fixture ID invalido/duplicado')
         ids.add(fid)
+        if fid != refresh_fixture_id and fid in prior_rows:
+            prior=prior_rows[fid]
+            {'ELIGIBLE':included,'REVIEW':review,'EXCLUDED':excluded}[prior['filter_status']].append(prior)
+            continue
         status,reason=classify(row,policy=policy)
         region=region_for(row.get('country') or '')
         explicit=explicit_competition_category(row)
@@ -430,11 +452,10 @@ def filter_document(data:dict[str,Any],source_bytes:bytes,policy:str='adult-open
         if status=='ELIGIBLE':included.append(enriched)
         elif status=='REVIEW':review.append(enriched)
         else:excluded.append(enriched)
-    policy_tier={'adult-open':'ADULT_OPEN','domestic-top-tier':'DOMESTIC_TOP_TIER','top-tier-and-senior-cups':'TOP_TIER_AND_SENIOR_CUPS'}[policy]
     return {'schema_version':VERSION,'filter_implementation':FILTER_IMPLEMENTATION,
       'generated_at_utc':datetime.now(timezone.utc).isoformat(),
       'source_discovery_generated_at_utc':data.get('generated_at_utc'),
-      'source_window':data.get('window'),'source_sha256':hashlib.sha256(source_bytes).hexdigest(),
+      'source_window':data.get('window'),'source_sha256':source_sha,
       'policy':{'competition_tier':policy_tier,
                 'age':'ADULT_EVIDENCE_REQUIRED','gender':['M','F','UNKNOWN'],
                 'cups':policy in ('adult-open','top-tier-and-senior-cups'),

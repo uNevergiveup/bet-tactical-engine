@@ -307,10 +307,16 @@ def select_verified_bwin(args, root, out, ranked, prepath, bwin_path):
     import subprocess
     from bwin_market_preflight import declared_capture_time
     if args.asof: raise ValueError('RETROSPECTIVE_RUN_CANNOT_SELECT_OPERATIONALLY')
+    prepare = getattr(args, 'prepare_selected', False)
+    if prepare:
+        from prematch_execution_control import require_external_confirmation
+        require_external_confirmation(getattr(args, 'confirm_external', False))
     eligible = [r for r in ranked if r.get('bwin',{}).get('status')=='VERIFIED' and
                 (not args.fixture_id or r['fixture_id']==args.fixture_id)]
     if not eligible: raise ValueError('NO_VERIFIED_BWIN_FIXTURE: conservar candidaturas; ver ranking.json')
     chosen = eligible[0];fid=chosen['fixture_id'];event=str(chosen['bwin']['event_id'])
+    if prepare and (root/'outputs'/'matches'/event/'manifest.json').exists():
+        raise ValueError('CANONICAL_MANIFEST_EXISTS: continuar con el expediente existente')
     folder=out/'fixtures'/str(fid)/'selection_pipeline';folder.mkdir(parents=True)
     def run(script, parameters, name):
         with (folder/name).open('w',encoding='utf-8') as log:
@@ -351,11 +357,19 @@ def select_verified_bwin(args, root, out, ranked, prepath, bwin_path):
     selected=folder/'selected_match.json'
     doc=trial.read(selected)
     if doc['fixture_id']!=fid or str(doc['bwin_event_id'])!=event:raise ValueError('SELECTOR_CHANGED_FIXTURE_OR_EVENT')
-    run('prematch_single.py',['--root',root,'--selected',selected,'check'],'check.log')
-    return {'status':'SELECTED_AND_CHECKED_FOR_RESEARCH','fixture_id':fid,'bwin_event_id':event,
+    single = ['--root', root, '--selected', selected, '--min-lead-minutes', args.min_lead,
+              '--max-odds-age-minutes', min(args.max_odds_age, 120)]
+    run('prematch_single.py', [*single, 'check', *(['--reuse-odds'] if prepare else [])], 'check.log')
+    result = {'status':'SELECTED_AND_CHECKED_FOR_RESEARCH','fixture_id':fid,'bwin_event_id':event,
         'selected_match':str(selected),'selection_decision':str(folder/'selection_decision.json'),
         'preflight':str(preflight.resolve()),'check_log':str(folder/'check.log'),'actionable_bet':False,
         'comparison_scope':'ONE_VERIFIED_FIXTURE_EXPLICIT_SINGLE_EVENT_PILOT'}
+    if prepare:
+        run('prematch_single.py', [*single, '--confirm-external', 'prepare', '--reuse-odds'], 'prepare.log')
+        manifest = root / 'outputs' / 'matches' / event / 'manifest.json'
+        result.update(status='PREPARED_FOR_RESEARCH', manifest=str(manifest),
+                      manifest_sha256=trial.sha(manifest), prepare_log=str(folder/'prepare.log'))
+    return result
 
 
 def operational_research(args, now=None):
@@ -942,6 +956,8 @@ def main(argv=None):
     parser.add_argument('--sync-bwin', action='store_true', help='Descubrimiento ligero Bwin sin cuotas profundas ni API-Football')
     parser.add_argument('--bwin-catalog', type=Path, help='Catálogo Bwin existente; conserva fecha y SHA')
     parser.add_argument('--select-verified', action='store_true', help='Tras ranking: un evento verificado -> preflight -> selector -> check, sin finish')
+    parser.add_argument('--prepare-selected', action='store_true',
+                        help='Con --rank --select-verified: prepara el expediente canónico reutilizando las cuotas verificadas')
     parser.add_argument('--end',type=trial.parse_clock)
     parser.add_argument('--evaluation-budget',type=int,default=0,help='0=todos; límite explícito con filas pendientes')
     parser.add_argument('--discovery-budget',type=int,default=0,help='0=todos; límite explícito con filas pendientes')
@@ -1003,6 +1019,8 @@ def main(argv=None):
     parser.add_argument('--next-odds-json', type=Path, help='Cuotas frescas JSON para el candidato de continuación automática')
     parser.add_argument('--next-manual-lineups', type=Path, help='XI manuales JSON para el candidato de continuación automática')
     args = parser.parse_args(argv)
+    if args.prepare_selected and not (args.rank and args.select_verified):
+        parser.error('--prepare-selected requiere --rank --select-verified')
     if args.dry_run and any((args.rank,args.prepare_fixture,args.sync_bwin,args.reconcile_schedule,
                             args.tactical_research,args.market_mapping_only,args.online,args.bind_bwin_url)):
         print(json.dumps({'status':'DRY_RUN_NO_EXTERNAL_EXECUTION','date':args.date,

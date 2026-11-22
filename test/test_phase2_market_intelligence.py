@@ -32,6 +32,90 @@ def _write_bwin_txt(path: Path, body: str, event_id: str = "7901446") -> Path:
 
 
 class TestPhase2MarketIntelligence(unittest.TestCase):
+    def test_bidirectional_corners_respect_side_period_and_contract_type(self):
+        with tempfile.TemporaryDirectory() as td:
+            txt = _write_bwin_txt(Path(td) / "corners.txt", "\n".join(
+                f"MERCADO: {header}\nMás de 4,5 : 1.80\nMenos de 4,5 : 2.00"
+                for header in (
+                    "Local FC - Total de córners | Tiempo reglamentario",
+                    "Local FC - Total de córners | 1ª parte",
+                    "Local FC - Total de córners | 2ª parte",
+                    "Visitante FC - Total de córners | 2ª parte",
+                    "Total de córners | 2ª parte",
+                    "Parte con más córners",
+                )
+            ))
+            catalog = extract_bwin_catalog(txt, home_name="Local FC", away_name="Visitante FC")
+        scout = {"identity": {"home": "Local FC", "away": "Visitante FC"}, "analysis": {"hypotheses": [
+            {"related_market_family": "córners local segunda mitad"},
+            {"corner_target": {"scope": "AWAY", "period": "H2"}},
+            {"related_market_family": "córners"},
+            {"related_market_family": "tiros"},
+        ]}}
+        result = match_hypotheses_to_catalog(scout_report=scout, bwin_catalog=catalog)
+        self.assertEqual([link["offered_bwin_lines_count"] for link in result["links"]], [2, 2, 0, 0])
+        self.assertEqual(result["links"][2]["mapping_issue"], "CORNER_SCOPE_UNRESOLVED")
+        self.assertEqual(result["selection_counts_by_tactical_status"], {
+            "NO_COMPATIBLE_HYPOTHESIS": 4, "DIRECT_TACTICAL_LINK": 4,
+            "INDIRECT_ONLY": 2, "MAPPING_UNRESOLVED": 2,
+        })
+        self.assertEqual(len(result["market_links"]), 6)
+        for idx in (1, 2):
+            forward = {e["selection_id"] for e in result["links"][idx - 1]["offered_bwin_lines"]}
+            reverse = {e["selection_id"] for e in result["selection_links"] if idx in e["hypothesis_indices"]["direct"]}
+            self.assertEqual(forward, reverse)
+
+    def test_frozen_bayern_scout_matches_only_own_ft_corners(self):
+        case = Path(__file__).resolve().parents[1] / "outputs/matches/7906958"
+        txt = case / "inputs/cuotas_bwin_7906958.txt"
+        scout_path = case / "market_phase2/20261120T185411Z/scout_adapter_7906958.json"
+        if not txt.is_file() or not scout_path.is_file():
+            self.skipTest("Local historical capture unavailable")
+        catalog = extract_bwin_catalog(txt, home_name="Bayern München", away_name="1. FC Köln")
+        result = match_hypotheses_to_catalog(scout_report=json.loads(scout_path.read_bytes()), bwin_catalog=catalog)
+        direct = [e for e in result["selection_links"] if e["tactical_status"] == "DIRECT_TACTICAL_LINK"]
+        self.assertEqual(len(result["selection_links"]), 862)
+        self.assertEqual(len(direct), 6)
+        self.assertTrue(all(e["hypothesis_indices"]["direct"] == [4] for e in direct))
+
+    def test_historical_troyes_capture_accounts_for_every_price_and_gap(self):
+        case = Path(__file__).resolve().parents[1] / "outputs/matches/7910807"
+        snapshot = case / "inputs/cuotas_bwin_7910807.txt"
+        diagnostics = case / "scraper/cuotas_bwin_7910807.json"
+        if not snapshot.is_file() or not diagnostics.is_file():
+            self.skipTest("Local historical capture unavailable")
+        cat = extract_bwin_catalog(snapshot, event_id="7910807", home_name="Estac Troyes",
+                                   away_name="Le Havre", diagnostics_path=diagnostics)
+        coverage = cat["capture_coverage"]
+        self.assertEqual(coverage["market_contexts"], 83)
+        self.assertEqual(coverage["parsed_selection_rows"], 893)
+        self.assertEqual(sum(f["priced_selections"] for f in cat["coverage_by_family"].values()), 893)
+        self.assertEqual(len({e["selection_id"] for e in cat["entries"]}), 893)
+        self.assertTrue(all(e["verdict"] for e in cat["entries"]))
+        self.assertEqual(coverage["gaps"]["unavailable_options"], 2)
+        self.assertEqual(coverage["gaps"]["empty_scraper_markets"], ["Recibe una tarjeta"])
+        self.assertEqual(coverage["gaps"]["recommendations_not_expanded"], 1)
+        with self.assertRaisesRegex(ValueError, "EVENT_ID_MISMATCH"):
+            extract_bwin_catalog(snapshot, event_id="7906958")
+
+    def test_contract_counts_separate_periods_and_preserve_price_conflicts(self):
+        with tempfile.TemporaryDirectory() as td:
+            txt = _write_bwin_txt(Path(td) / "b.txt", """MERCADO: Total de córners | Tiempo reglamentario
+Más de 4,5 : 1.82
+Más de 4,5 : 1.90
+MERCADO: Total de córners | 1ª parte
+Más de 4,5 : 1.66
+MERCADO: Total de córners | 2ª parte
+Más de 4,5 : 1.66
+MERCADO: Total de córners | Resto del partido
+Más de 4,5 : 2.00
+""")
+            result = extract_bwin_catalog(txt)
+            self.assertEqual(result["unique_resolved_contracts"], 2)
+            self.assertEqual(result["coverage_by_family"]["CORNERS"]["priced_selections"], 5)
+            self.assertEqual(result["coverage_by_family"]["CORNERS"]["by_verdict"]["CONFLICTING_CAPTURE_PRICES"], 2)
+            self.assertEqual(result["entries"][-1]["verdict"], "INAPPLICABLE_PREMATCH")
+
     def test_1_hypothesis_without_equivalent_market_is_unsupported(self):
         with tempfile.TemporaryDirectory() as td:
             txt = _write_bwin_txt(Path(td) / "b.txt", "MERCADO: Resultado del partido | Tiempo reglamentario\nSao Paulo : 2.10\nX : 3.20\nFluminense : 3.50\n")
@@ -71,6 +155,34 @@ class TestPhase2MarketIntelligence(unittest.TestCase):
             self.assertEqual(corners_ft[0]["commercial_coverage"], "OFFERED_AND_MODELED")
             corners_h1 = [e for e in cat["entries"] if e["canonical_key"] == "h1_over_4_5_corners"]
             self.assertEqual(corners_h1[0]["commercial_coverage"], "OFFERED_NOT_MODELED")
+
+    def test_all_markets_catalog_distinguishes_joint_and_inclusive_thresholds(self):
+        with tempfile.TemporaryDirectory() as td:
+            body = (
+                "MERCADO: Sao Paulo: Tiros\n18+ tiros : 1.25\n"
+                "MERCADO: Tiros a portería del partido\n10+ tiros a portería : 1.26\n"
+                "MERCADO: Ambos equipos X o más córners\n3+ · Sí : 1.53\n"
+                "MERCADO: Tarjeta roja - Sí/No\nSí : 5.00\n"
+                "MERCADO: Penalti - Sí/No\nNo : 1.40\n"
+                "MERCADO: Crack bwin NUEVO (5+)\nJugador observado : 2.10\n"
+            )
+            txt = _write_bwin_txt(Path(td) / "all_markets.txt", body)
+            cat = extract_bwin_catalog(txt, event_id="7901446", fixture_id=1492457, home_name="Sao Paulo", away_name="Fluminense")
+            offers = {entry["market_family"]: entry for entry in cat["entries"]}
+            self.assertEqual((offers["SHOTS_COLLECTIVE"]["target_scope"], offers["SHOTS_COLLECTIVE"]["direction"],
+                              offers["SHOTS_COLLECTIVE"]["line"]), ("HOME", "at_least", "18"))
+            self.assertEqual(offers["ON_TARGET_COLLECTIVE"]["target_scope"], "MATCH")
+            self.assertEqual(offers["ON_TARGET_COLLECTIVE"]["canonical_key"], "over_9_5_on_target")
+            self.assertEqual(offers["ON_TARGET_COLLECTIVE"]["contract_id"], "over_9_5_on_target")
+            self.assertEqual(offers["ON_TARGET_COLLECTIVE"]["settlement_status"], "VERIFIED_STANDARD")
+            self.assertEqual(offers["ON_TARGET_COLLECTIVE"]["settlement_provider"], "OPTA_STATS_PERFORM")
+            self.assertEqual(offers["ON_TARGET_COLLECTIVE"]["historical_evidence_provider"], "API_FOOTBALL")
+            self.assertEqual(offers["CORNERS_BOTH_TEAMS"]["line"], "3")
+            self.assertEqual(offers["CRACK_BWIN"]["target_scope"], "PLAYER")
+            self.assertIn("RED_CARD_YES_NO", offers)
+            self.assertIn("PENALTY_YES_NO", offers)
+            self.assertTrue(all(v["settlement_status"] == "SETTLEMENT_UNVERIFIED" and v["contract_id"] is None
+                                for key, v in offers.items() if key != "ON_TARGET_COLLECTIVE"))
 
     def test_4_commercial_duplicates_skipped(self):
         with tempfile.TemporaryDirectory() as td:
@@ -172,7 +284,7 @@ class TestPhase2MarketIntelligence(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as td:
             empty_txt = _write_bwin_txt(Path(td) / "empty.txt", "MERCADO: Total de goles | Tiempo reglamentario\n")
-            cat = extract_bwin_catalog(empty_txt, event_id="1", fixture_id=1)
+            cat = extract_bwin_catalog(empty_txt, event_id="7901446", fixture_id=1)
             self.assertEqual(cat["entries"][0]["commercial_coverage"], "PRICE_UNAVAILABLE")
 
     def test_11_18_20_23_comparator_validation_and_no_bet_ledger(self):

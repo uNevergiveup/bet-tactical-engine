@@ -11,12 +11,15 @@ from __future__ import annotations
 import hashlib
 import re
 import unicodedata
+import json
+from collections import Counter, defaultdict
 from dataclasses import asdict, dataclass
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Any
 
 from bet_engine.orchestration.shadow_pipeline import _expand_team_keys, _match_team_key
+from .market_equivalence import canonicalize_selection_key
 
 COMMERCIAL_STATES = frozenset({
     "OFFERED_AND_MODELED",
@@ -53,6 +56,29 @@ def _parse_ou_selection(sel_raw: str) -> tuple[str, Decimal] | None:
     if m:
         return "under", Decimal(m.group(2).replace(",", "."))
     return None
+
+
+COLLECTIVE_COUNT_METRICS = {
+    "SHOTS_COLLECTIVE": "shots",
+    "ON_TARGET_COLLECTIVE": "on_target",
+    "FOULS_COLLECTIVE": "fouls",
+    "OFFSIDES_COLLECTIVE": "offsides",
+}
+_COLLECTIVE_HEADERS = {
+    "tiros": "SHOTS_COLLECTIVE", "tiros a porteria": "ON_TARGET_COLLECTIVE",
+    "tiros a puerta": "ON_TARGET_COLLECTIVE", "remates a puerta": "ON_TARGET_COLLECTIVE",
+    "faltas": "FOULS_COLLECTIVE", "fueras de juego": "OFFSIDES_COLLECTIVE",
+}
+
+ON_TARGET_SETTLEMENT_POLICY = {
+    "policy_version": "bwin-opta-on-target-v1",
+    "settlement_provider": "OPTA_STATS_PERFORM",
+    "settlement_basis": "USER_CONFIRMED_2026-11-22",
+    "inclusive_threshold_rule": "N_PLUS_EQUALS_OVER_N_MINUS_0_5",
+    "historical_evidence_provider": "API_FOOTBALL",
+    "provider_reconciliation_status": "DEFINITION_ALIGNED_EMPIRICAL_RECONCILIATION_PENDING",
+    "post_event_correction_policy": "NOT_DOCUMENTED_LOCALLY_PREMATCH_SNAPSHOT_IMMUTABLE",
+}
 
 
 def _stable_selection_id(event_id: str | None, header: str, selection: str) -> str:
@@ -92,6 +118,11 @@ class BwinCatalogEntry:
     settlement_status: str  # VERIFIED_STANDARD | SETTLEMENT_UNVERIFIED
     commercial_coverage: str
     interpretation_status: str
+    settlement_provider: str | None = None
+    settlement_basis: str | None = None
+    historical_evidence_provider: str | None = None
+    provider_reconciliation_status: str | None = None
+    post_event_correction_policy: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -122,7 +153,102 @@ def is_default_modeled_key(canonical_key: str | None, market_family: str) -> boo
         return False
     if market_family in {"1X2", "DOUBLE_CHANCE", "DNB", "BTTS", "GOALS_FT", "GOALS_H1", "GOALS_TEAM", "CORNERS_TOTAL", "CORNERS_TEAM", "EXACT_SCORE"}:
         return True
+    if market_family == "ON_TARGET_COLLECTIVE":
+        return bool(_DYNAMIC_COUNT_KEY_RE.fullmatch(canonical_key)) and not canonical_key.startswith(("h1_", "h2_"))
     return False
+
+
+_DYNAMIC_COUNT_KEY_RE = re.compile(
+    r"(?:(?:h1|h2)_)?(?:(?:home|away)_)?(?:over|under)_\d+_\d+_(?:shots|on_target|fouls|offsides)"
+)
+
+
+def _count_contract_key(metric: str, direction: str, line: Decimal, side: str, period: str) -> str | None:
+    if side not in {"MATCH", "HOME", "AWAY"} or period not in {"FT", "H1", "H2"}:
+        return None
+    period_prefix = "" if period == "FT" else f"{period.lower()}_"
+    side_prefix = "" if side == "MATCH" else f"{side.lower()}_"
+    line_slug = str(line).replace(".", "_")
+    return f"{period_prefix}{side_prefix}{direction}_{line_slug}_{metric}"
+
+
+def _settlement_metadata(family: str, status: str) -> dict[str, str | None]:
+    policy = ON_TARGET_SETTLEMENT_POLICY if family == "ON_TARGET_COLLECTIVE" and status == "VERIFIED_STANDARD" else {}
+    return {
+        "settlement_provider": policy.get("settlement_provider"),
+        "settlement_basis": policy.get("settlement_basis"),
+        "historical_evidence_provider": policy.get("historical_evidence_provider"),
+        "provider_reconciliation_status": policy.get("provider_reconciliation_status"),
+        "post_event_correction_policy": policy.get("post_event_correction_policy"),
+    }
+
+
+def _coverage_family(header: str, family: str) -> str:
+    """Agrupa por tema comercial, incluso cuando falta un mapeo contractual."""
+    label = _norm(header)
+    if family.startswith("CORNERS") or "corner" in label:
+        return "CORNERS"
+    if family.startswith("CARDS") or "tarjeta" in label:
+        return "CARDS"
+    for token, group in (
+        ("fuera de juego", "OFFSIDES"), ("paradas", "SAVES"),
+        ("tiros a porteria", "ON_TARGET"), ("tiros", "SHOTS"),
+        ("falta", "FOULS"), ("asistencia", "ASSISTS"),
+        ("crack bwin", "BWIN_SPECIALS"),
+    ):
+        if token in label:
+            return group
+    if family == "COMBO_OR_HTFT" or " y " in label:
+        return "COMBINED"
+    if family.startswith(("GOALS", "BTTS", "PLAYER_SCORER", "FIRST_TO_SCORE")) or "gol" in label:
+        return "GOALS"
+    if family.startswith(("1X2", "DNB", "DOUBLE_CHANCE", "EXACT_SCORE", "EUROPEAN_HANDICAP")):
+        return "RESULT"
+    return "OTHER"
+
+
+def _capture_coverage(raw_text, parsed, sha256, diagnostics_path):
+    header = raw_text.split("MERCADO:", 1)[0]
+    declared = re.search(r"\|\s*Selecciones:\s*(\d+)", header)
+    widgets = re.search(r"Aviso de cobertura:\s*(\d+)\s+widget", header)
+    rows = sum(len(block["selections"]) for block in parsed["markets"])
+    expected = int(declared[1]) if declared else None
+    gaps = {}
+    if expected is not None and expected != rows:
+        gaps["selection_count_mismatch"] = {"declared": expected, "parsed": rows}
+    if widgets and int(widgets[1]):
+        gaps["recommendations_not_expanded"] = int(widgets[1])
+    empty = [block["market"] for block in parsed["markets"] if not block["selections"]]
+    if empty:
+        gaps["empty_txt_markets"] = empty
+    evidence = None
+    if diagnostics_path is not None:
+        path = Path(diagnostics_path)
+        doc = json.loads(path.read_bytes())
+        if (str(doc.get("event_id")) != parsed["event_id"] or doc.get("estado") != "correcto"
+                or doc.get("selecciones") != (expected if expected is not None else rows)
+                or (doc.get("snapshot_sha256") and doc["snapshot_sha256"] != sha256)):
+            raise ValueError("BWIN_CAPTURE_DIAGNOSTICS_MISMATCH")
+        evidence = {"path": str(path), "sha256": _sha256_file(path),
+                    "binding": "SNAPSHOT_SHA256" if doc.get("snapshot_sha256") else "LEGACY_EVENT_AND_COUNT_ONLY"}
+        if doc.get("ambos_equipos_tarjetas"):
+            evidence["both_teams_cards"] = doc["ambos_equipos_tarjetas"]
+        if doc.get("vista_todo"):
+            evidence["all_markets_view"] = doc["vista_todo"]
+        final = doc.get("final") or {}
+        for key, value in {
+            "extraction_errors": doc.get("errores"), "empty_scraper_markets": doc.get("vacios"),
+            "unavailable_options": doc.get("no_disponibles"), "closed_accordions": final.get("cerrados"),
+            "show_more_remaining": final.get("mostrar_mas"),
+            "recommendations_not_expanded": doc.get("recomendados_no_expandidos"),
+            "scroll_bottom_not_reached": final.get("fondo") is False,
+        }.items():
+            if value:
+                gaps[key] = value
+    return {"status": "GAPS_RECORDED" if gaps else "COMPLETENESS_NOT_CERTIFIED",
+            "declared_selection_rows": expected, "parsed_selection_rows": rows,
+            "market_contexts": len({block["market"] for block in parsed["markets"]}),
+            "diagnostics": evidence, "gaps": gaps}
 
 
 def extract_bwin_catalog(
@@ -136,6 +262,7 @@ def extract_bwin_catalog(
     away_aliases: tuple[str, ...] = (),
     captured_at_utc: str | None = None,
     modeled_keys: set[str] | frozenset[str] | None = None,
+    diagnostics_path: Path | None = None,
 ) -> dict[str, Any]:
     """Extrae el catálogo comercial completo desde un snapshot TXT Bwin sin inventar cuotas."""
     path = Path(bwin_txt_path)
@@ -145,10 +272,24 @@ def extract_bwin_catalog(
     from motor_probabilistico import parse_odds
 
     parsed = parse_odds(path)
+    if event_id is not None and str(event_id) != parsed["event_id"]:
+        raise ValueError("BWIN_CATALOG_EVENT_ID_MISMATCH")
+    event_id = parsed["event_id"]
     txt_sha256 = _sha256_file(path)
     raw_text = path.read_text(encoding="utf-8", errors="replace")
 
     # Try to extract capture timestamp from header if not provided
+    if captured_at_utc is None:
+        from datetime import datetime, timezone
+
+        capture = parsed.get("capture")
+        if capture:
+            try:
+                observed = datetime.fromisoformat(capture)
+                if observed.tzinfo is not None:
+                    captured_at_utc = observed.astimezone(timezone.utc).isoformat()
+            except ValueError:
+                pass
     if captured_at_utc is None:
         m_ts = re.search(r"(?:captured_at_utc|timestamp_utc|fecha_captura)\s*[:=]\s*(\S+)", raw_text[:1200], re.I)
         if m_ts:
@@ -158,7 +299,8 @@ def extract_bwin_catalog(
     away_keys = _expand_team_keys(away_name, away_aliases)
 
     entries: list[BwinCatalogEntry] = []
-    seen_ids: set[str] = set()
+    seen_quotes = set()
+    prices_by_selection = defaultdict(set)
     duplicate_count = 0
     unexpanded_blocks = 0
 
@@ -196,7 +338,9 @@ def extract_bwin_catalog(
             continue
 
         # Temporal scope
-        if "1a parte" in m_low or "1ª parte" in m_low or "primera parte" in m_low:
+        if re.search(r"\b(?:entre el|minuto|\d{2}:\d{2})", m_low):
+            t_scope = "UNKNOWN"
+        elif "1a parte" in m_low or "1ª parte" in m_low or "primera parte" in m_low:
             t_scope = "H1"
         elif "2a parte" in m_low or "2ª parte" in m_low or "segunda parte" in m_low:
             t_scope = "H2"
@@ -209,10 +353,11 @@ def extract_bwin_catalog(
             sel_lit = str(s.get("selection") or "").strip()
             odd_dec = _to_decimal(s.get("odd"))
             sid = _stable_selection_id(event_id, header_lit, sel_lit)
-            if sid in seen_ids:
+            if (sid, odd_dec) in seen_quotes:
                 duplicate_count += 1
                 continue
-            seen_ids.add(sid)
+            seen_quotes.add((sid, odd_dec))
+            prices_by_selection[sid].add(odd_dec)
 
             fam, ckey, direction, line_str, tgt_scope, tgt_ent, sett_avail, sett_status, interp = _classify_selection(
                 m_low=m_low,
@@ -227,6 +372,8 @@ def extract_bwin_catalog(
 
             if odd_dec is None:
                 comm_cov = "PRICE_UNAVAILABLE"
+            elif t_scope == "UNKNOWN":
+                comm_cov = "MAPPING_UNRESOLVED"
             elif fam == "UNMAPPED_COMMERCIAL_MARKET":
                 comm_cov = "MAPPING_UNRESOLVED"
             elif sett_status == "SETTLEMENT_UNVERIFIED":
@@ -257,6 +404,7 @@ def extract_bwin_catalog(
                     settlement_status=sett_status,
                     commercial_coverage=comm_cov,
                     interpretation_status=interp,
+                    **_settlement_metadata(fam, sett_status),
                 )
             )
 
@@ -284,6 +432,43 @@ def extract_bwin_catalog(
             bkt = "commercial_verified_not_modeled"
         settlement_audit[bkt][e.market_family] = settlement_audit[bkt].get(e.market_family, 0) + 1
 
+    coverage = _capture_coverage(raw_text, parsed, txt_sha256, diagnostics_path)
+    conflicts = sum(len(prices) > 1 for prices in prices_by_selection.values())
+    if conflicts:
+        coverage["gaps"]["selections_with_conflicting_prices"] = conflicts
+        coverage["status"] = "GAPS_RECORDED"
+    families = defaultdict(lambda: {"markets": set(), "priced": 0, "contracts": set(),
+                                    "unresolved": 0, "verdicts": Counter()})
+    catalog_rows = []
+    all_contracts = set()
+    for e in entries:
+        family = _coverage_family(e.market_header_literal, e.market_family)
+        summary = families[family]
+        summary["markets"].add(e.market_header_literal)
+        summary["priced"] += e.odd is not None
+        verdict = e.commercial_coverage
+        contract_id = None
+        if re.search(r"\b(live|resto del partido|marcador actual|en directo)\b", _norm(e.market_header_literal)):
+            verdict = "INAPPLICABLE_PREMATCH"
+        elif len(prices_by_selection[e.selection_id]) > 1:
+            verdict = "CONFLICTING_CAPTURE_PRICES"
+        elif e.odd is not None and e.settlement_rules_available and e.canonical_key and e.temporal_scope in {"FT", "H1", "H2"}:
+            contract = canonicalize_selection_key(e.canonical_key)
+            contract_id = contract.contract_id if contract and contract.period == e.temporal_scope else e.canonical_key
+            summary["contracts"].add(contract_id)
+            all_contracts.add(contract_id)
+        if e.odd is not None and contract_id is None:
+            summary["unresolved"] += 1
+        summary["verdicts"][verdict] += 1
+        row = e.to_dict()
+        if len(prices_by_selection[e.selection_id]) > 1:
+            row.update(selection_id=_stable_selection_id(e.event_id, e.market_header_literal, f"{e.selection_literal}|{e.odd}"),
+                       canonical_key=None)
+        if verdict in {"CONFLICTING_CAPTURE_PRICES", "INAPPLICABLE_PREMATCH", "MAPPING_UNRESOLVED"}:
+            row.update(canonical_key=None, commercial_coverage="MAPPING_UNRESOLVED")
+        catalog_rows.append({**row, "coverage_family": family, "contract_id": contract_id,
+                             "verdict": verdict, "commercial_reason": verdict if verdict != e.commercial_coverage else e.interpretation_status})
+
     return {
         "schema_version": "1.0-bwin-commercial-catalog",
         "event_id": event_id,
@@ -291,13 +476,23 @@ def extract_bwin_catalog(
         "captured_at_utc": captured_at_utc,
         "source_txt_path": str(path),
         "source_txt_sha256": txt_sha256,
+        "settlement_policies": {ON_TARGET_SETTLEMENT_POLICY["policy_version"]: ON_TARGET_SETTLEMENT_POLICY},
         "total_selections": len(entries),
         "duplicate_selections_skipped": duplicate_count,
         "unexpanded_blocks": unexpanded_blocks,
         "counts_by_commercial_coverage": by_cov,
         "counts_by_family": by_fam,
         "settlement_audit_summary": settlement_audit,
-        "entries": [e.to_dict() for e in entries],
+        "capture_coverage": coverage,
+        "unique_resolved_contracts": len(all_contracts),
+        "coverage_by_family": {
+            family: {"markets": len(s["markets"]), "priced_selections": s["priced"],
+                     "unique_resolved_contracts": len(s["contracts"]),
+                     "priced_without_resolved_contract": s["unresolved"],
+                     "by_verdict": dict(s["verdicts"])}
+            for family, s in sorted(families.items())
+        },
+        "entries": catalog_rows,
     }
 
 
@@ -340,6 +535,66 @@ def _classify_selection(
         return "PLAYER_SCORER", None, None, None, "PLAYER", sel_lit, False, "SETTLEMENT_UNVERIFIED", "PLAYER_SCORER_SETTLEMENT_UNVERIFIED"
 
     # 2. Cards (fixes 'Número de tarjetas en total' + 'Total de tarjetas' + team cards + Mas tarjetas)
+    joint = None
+    if re.match(r"^ambos equipos (?:recibiran|reciben|recibir) x o mas tarjetas\b", m_low):
+        joint = "CARDS_BOTH_TEAMS"
+    elif re.match(r"^ambos equipos x o mas corners\b", m_low):
+        joint = "CORNERS_BOTH_TEAMS"
+    if joint:
+        outcome = re.fullmatch(r"([1-9]\d*)\s*\+\s*·\s*(si|no)", sel_low)
+        if outcome:
+            threshold, direction = outcome.groups()
+            return (joint, None, "yes" if direction == "si" else "no", threshold,
+                    "MATCH", None, False, "SETTLEMENT_UNVERIFIED", "EACH_TEAM_AT_LEAST_THRESHOLD")
+        return joint, None, None, None, "MATCH", None, False, "SETTLEMENT_UNVERIFIED", "THRESHOLD_OR_OUTCOME_UNRESOLVED"
+
+    if re.match(r"^recibe una tarjeta(?:\s*\||\s*\(|$)", m_low):
+        return "PLAYER_CARDS", None, None, None, "PLAYER", sel_lit, False, "SETTLEMENT_UNVERIFIED", "PLAYER_CARD_SETTLEMENT_UNVERIFIED"
+    if m_low == "jugador marca o asiste":
+        return "PLAYER_GOAL_OR_ASSIST", None, None, None, "PLAYER", sel_lit, False, "SETTLEMENT_UNVERIFIED", "PLAYER_PROP_COMMERCIAL"
+    crack = re.fullmatch(r"crack bwin(?: nuevo)?\s*\(([1-9]\d*)\+\)", m_low)
+    if crack:
+        return "CRACK_BWIN", None, "at_least", crack[1], "PLAYER", sel_lit, False, "SETTLEMENT_UNVERIFIED", "PLAYER_POINTS_COMPOSITE"
+    for prefix, family in (("tarjeta roja - si/no", "RED_CARD_YES_NO"), ("penalti - si/no", "PENALTY_YES_NO")):
+        if m_low.split(" | ", 1)[0] == prefix:
+            direction = {"si": "yes", "no": "no"}.get(sel_low)
+            return family, None, direction, None, "MATCH", None, False, "SETTLEMENT_UNVERIFIED", "YES_NO_COMMERCIAL"
+
+    # Exact labels observed in the collective-count markets. Preserve X+ as
+    # an inclusive threshold without assuming a model or settlement equivalence.
+    base = m_low.split(" | ", 1)[0]
+    prefix, separator, label = base.partition(": ")
+    if not separator:
+        prefix, separator, label = base.partition(" - ")
+    metric_label = (label if separator else base).removeprefix("total de ").removesuffix(" del partido")
+    family = _COLLECTIVE_HEADERS.get(metric_label)
+    if family:
+        side, entity = ("MATCH", None)
+        if separator:
+            home_hit, away_hit = _match_team_key(prefix, home_keys), _match_team_key(prefix, away_keys)
+            if home_hit != away_hit:
+                side, entity = ("HOME", home_name) if home_hit else ("AWAY", away_name)
+            else:
+                side = "UNKNOWN"
+        plus = re.fullmatch(r"([1-9]\d*)\+\s*(.+)", sel_low)
+        if plus and _COLLECTIVE_HEADERS.get(plus[2]) == family:
+            if family == "ON_TARGET_COLLECTIVE":
+                commercial_threshold = int(plus[1])
+                model_line = Decimal(commercial_threshold) - Decimal("0.5")
+                key = _count_contract_key("on_target", "over", model_line, side, t_scope)
+                if key:
+                    return (family, key, "at_least", plus[1], side, entity, True, "VERIFIED_STANDARD",
+                            "OPTA_SETTLEMENT_USER_CONFIRMED_INCLUSIVE_THRESHOLD")
+            return family, None, "at_least", plus[1], side, entity, False, "SETTLEMENT_UNVERIFIED", "COUNT_THRESHOLD_COMMERCIAL"
+        if ou:
+            if family == "ON_TARGET_COLLECTIVE":
+                direction, line = ou
+                key = _count_contract_key("on_target", direction, line, side, t_scope)
+                if key:
+                    return (family, key, direction, str(line), side, entity, True, "VERIFIED_STANDARD",
+                            "OPTA_SETTLEMENT_USER_CONFIRMED_COUNT_OU")
+            return family, None, ou[0], str(ou[1]), side, entity, False, "SETTLEMENT_UNVERIFIED", "COUNT_OU_COMMERCIAL"
+
     if re.search(r"(?:n[uú]mero de tarjetas en total|total de tarjetas|total tarjetas|tarjetas en total)", m_low):
         is_team = " - " in m_low and not m_low.startswith(("numero de tarjetas", "número de tarjetas", "total de tarjetas"))
         side = None
@@ -350,7 +605,7 @@ def _classify_selection(
                 side, ent = "HOME", home_name
             elif _match_team_key(pref, away_keys):
                 side, ent = "AWAY", away_name
-        tgt_scope = side or "MATCH"
+        tgt_scope = side or ("UNKNOWN" if is_team else "MATCH")
         fam = f"CARDS_{t_scope}_{tgt_scope}" if is_team or t_scope != "FT" else "CARDS_TOTAL"
         if ou:
             d_str, line_dec = ou
@@ -369,7 +624,7 @@ def _classify_selection(
         fam = f"CORNERS_MOST_{t_scope}" if t_scope != "FT" else "CORNERS_MOST"
         return fam, None, None, None, "MATCH", None, True, "VERIFIED_STANDARD", "OK"
 
-    if "total de corners" in m_low or "total de córners" in m_low:
+    if re.fullmatch(r"(?:.+ - )?total de corners(?:\s*\|.*)?", m_low):
         is_team = " - total de c" in m_low
         side = None
         ent = None
@@ -380,6 +635,8 @@ def _classify_selection(
             elif _match_team_key(pref, away_keys):
                 side, ent = "AWAY", away_name
         tgt_scope = side or "MATCH"
+        if is_team and side is None:
+            return "CORNERS_TEAM", None, None, None, "UNKNOWN", None, False, "SETTLEMENT_UNVERIFIED", "TEAM_UNRESOLVED"
         fam = "CORNERS_TEAM" if side else "CORNERS_TOTAL"
         if t_scope == "H1":
             fam = f"{fam}_H1"
@@ -394,7 +651,7 @@ def _classify_selection(
             return fam, ckey, d_str, str(line_dec), tgt_scope, ent, True, "VERIFIED_STANDARD", "OK"
 
     # 4. Goals (match vs team, H1/H2 vs FT)
-    if "total de goles" in m_low and "ambos equipos" not in m_low and "resultado del partido" not in m_low:
+    if re.fullmatch(r"(?:.+ - )?total de goles(?:\s*\|.*)?", m_low):
         is_team = " - total de goles" in m_low
         side = None
         ent = None
@@ -405,6 +662,8 @@ def _classify_selection(
             elif _match_team_key(pref, away_keys):
                 side, ent = "AWAY", away_name
         tgt_scope = side or "MATCH"
+        if is_team and side is None:
+            return "GOALS_TEAM", None, None, None, "UNKNOWN", None, False, "SETTLEMENT_UNVERIFIED", "TEAM_UNRESOLVED"
         if side:
             fam = f"GOALS_TEAM_{t_scope}" if t_scope != "FT" else "GOALS_TEAM"
         else:

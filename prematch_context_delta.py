@@ -197,6 +197,8 @@ def _persist_differential_context_update(
         result.get('steps', {}).pop(step, None)
     result.pop('codex_prompt', None)
     result.pop('validation_state', None)
+    result.pop('validation_artifact', None)
+    result.pop('shadow_evaluation', None)
     result['invalidated_by_context_refresh'] = {
         'run': str(out.resolve()),
         'delta': delta,

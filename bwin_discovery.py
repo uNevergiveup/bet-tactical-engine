@@ -39,6 +39,7 @@ LIVE_RE = re.compile(r"(?:\blive(?:1t|2t|descanso)?\b|\ben\s+vivo\b|\bdescanso\b
 FEMALE_RE = re.compile(r"(?:\bwomen(?:'s)?\b|\bwomens\b|\bfemenin[oa]\b|\bfeminin[ea]\b|\bfrauen\b|\bfemminile\b|\bdamen\b|\(w\)|\sw\b|\(f\)|(?<=\s)f(?:hoy|ma[nñ]ana)?(?=\s|$))", re.I)
 NON_ADULT_RE = re.compile(r"(?:\b(?:u|sub)\s*[- ]?(?:1[0-9]|2[0-3])\b|\bunder\s*[- ]?(?:1[0-9]|2[0-3])\b|\byouth\b|\bjuvenil(?:es)?\b|\breserves?\b|\breservas?\b)", re.I)
 CHROME_ERRORS = ("ERR_CONNECTION", "DNS", "Access Denied", "Forbidden", "403", "CAPTCHA", "captcha")
+MAX_VERIFIED_ABSOLUTE_KICKOFF_DIFFERENCE_MINUTES = 90.0
 STOP_TOKENS = {
     "fc", "cf", "sc", "ac", "cd", "sd", "afc", "club", "football", "soccer",
     "de", "del", "el", "la", "los", "las", "the", "futbol", "futebol",
@@ -472,6 +473,25 @@ def team_similarity(team: str, evidence: str, *, national_context: bool = False)
     return max(_team_similarity_literal(q,evidence) for q in queries)
 
 
+def team_name_match_method(team: str, evidence: str, *, national_context: bool = False) -> str:
+    """Expose whether a passing name match was literal or used a verified alias."""
+    literal = _team_similarity_literal(team, evidence)
+    if literal >= 0.82:
+        return "LITERAL"
+    if team_similarity(team, evidence, national_context=national_context) >= 0.82:
+        return "VERIFIED_ALIAS"
+    return "NO_MATCH"
+
+
+def absolute_kickoff_status(difference_minutes: float | None) -> str:
+    """Classify an absolute API/Bwin kickoff difference without hiding uncertainty."""
+    if difference_minutes is None:
+        return "TIME_UNVERIFIED"
+    if difference_minutes <= MAX_VERIFIED_ABSOLUTE_KICKOFF_DIFFERENCE_MINUTES:
+        return "TIME_VERIFIED"
+    return "TIME_REVIEW"
+
+
 def team_order_status(home: str, away: str, evidence: str, *, national_context: bool = False) -> str:
     """Check home/away order only from observed Bwin text or URL slug."""
     observed = norm(evidence)
@@ -491,6 +511,11 @@ def team_order_status(home: str, away: str, evidence: str, *, national_context: 
     def variant_position(team: str):
         positions = []
         for variant in team_candidate_queries(team, national_context=national_context):
+            variant_norm = norm(variant)
+            phrase_position = observed.find(variant_norm)
+            if variant_norm and phrase_position >= 0:
+                positions.append(phrase_position)
+                continue
             words = team_tokens(variant)
             if not words:
                 continue
@@ -1226,6 +1251,18 @@ def match_catalog(fixture: dict, catalog: list[dict]) -> list[dict]:
         competition_score = competition_similarity(str(fixture.get("league") or ""), evidence,
             league_id=fixture.get('league_id'),country=fixture.get('country'),season=fixture.get('season')) if fixture.get("league") else None
         candidates.append({**e, "name_score": score, "home_similarity": home, "away_similarity": away,
+                           "home_name_match_method": team_name_match_method(
+                               fixture["home"], name_evidence, national_context=national_context),
+                           "away_name_match_method": team_name_match_method(
+                               fixture["away"], name_evidence, national_context=national_context),
+                           "name_match_status": (
+                               "VERIFIED_ALIAS_USED"
+                               if "VERIFIED_ALIAS" in {
+                                   team_name_match_method(fixture["home"], name_evidence, national_context=national_context),
+                                   team_name_match_method(fixture["away"], name_evidence, national_context=national_context),
+                               }
+                               else "LITERAL_NAMES"
+                           ),
                            "team_order_status": order_status,
                            "category_compatibility": category_status,
                            "competition_similarity": competition_score})
@@ -1262,7 +1299,10 @@ def pending_local_result(fixture: dict, possible: list[dict]) -> dict:
          'inspection':None,'discovery_diagnostic':'PENDING_CLASSIFICATION_LOCAL_CATALOG_ONLY'}
     if not possible:return out
     out['alternatives']=[{'event_id':row['bwin_event_id'],'url':row['bwin_url'],
-                          'score':row['name_score'],'text':row.get('text','')[:160]}
+                          'score':row['name_score'],'text':row.get('text','')[:160],
+                          'name_match_status':row.get('name_match_status'),
+                          'home_name_match_method':row.get('home_name_match_method'),
+                          'away_name_match_method':row.get('away_name_match_method')}
                          for row in possible[:5]]
     if len(possible)>1 and possible[0]['name_score']-possible[1]['name_score']<.05:
         out['status']='PENDING_CLASSIFICATION_AMBIGUOUS_LOCAL_CANDIDATES'
@@ -1301,7 +1341,9 @@ def visible_without_matching(fixture: dict, catalog: list[dict]) -> list[dict]:
         event_start=catalog_relative_kickoff(event)
         difference=(abs((fixture_start-event_start).total_seconds())/60
                     if fixture_start is not None and event_start is not None else None)
-        if difference is not None and difference>15:continue
+        if (difference is not None and
+                difference > MAX_VERIFIED_ABSOLUTE_KICKOFF_DIFFERENCE_MINUTES):
+            continue
         rows.append({'event_id':event.get('bwin_event_id'),'url':event.get('bwin_url'),
                      'home_similarity':home,'away_similarity':away,
                      'average_similarity':round((home+away)/2,4),'team_order_status':order,
@@ -1487,7 +1529,7 @@ def inspect_event(browser, result: dict, fixture: dict, navigation_timeout: int,
             observation["identity_status"] = "TITLE_MISMATCH_REVIEW"
             observation['time_verification_status'] = 'TIME_UNVERIFIED_EXPLORATORY_ONLY'
         elif observed_start is not None:
-            if observation["kickoff_difference_minutes"] is not None and observation["kickoff_difference_minutes"] <= 15:
+            if absolute_kickoff_status(observation["kickoff_difference_minutes"]) == "TIME_VERIFIED":
                 observation["identity_status"] = "NAME_AND_ABSOLUTE_TIME_MATCH"
                 observation['time_verification_status'] = 'TIME_VERIFIED'
             else:
@@ -1521,7 +1563,10 @@ def summarize(fixture: dict, possible: list[dict], browser, timeout: int, inspec
     if not possible:
         return out
     out["alternatives"] = [{"event_id": i["bwin_event_id"], "url": i["bwin_url"],
-                            "score": i["name_score"], "text": i["text"][:160]}
+                            "score": i["name_score"], "text": i["text"][:160],
+                            "name_match_status": i.get("name_match_status"),
+                            "home_name_match_method": i.get("home_name_match_method"),
+                            "away_name_match_method": i.get("away_name_match_method")}
                            for i in possible[:5]]
     if len(possible) > 1 and possible[0]["name_score"] - possible[1]["name_score"] < 0.05:
         out["status"] = "AMBIGUOUS_MULTIPLE_EVENTS"
@@ -1532,6 +1577,9 @@ def summarize(fixture: dict, possible: list[dict], browser, timeout: int, inspec
         return out
     out.update({"status": "POSSIBLE_EVENT_FOUND", "bwin_event_id": winner["bwin_event_id"],
                 "bwin_url": winner["bwin_url"], "name_match_score": winner["name_score"],
+                "name_match_status": winner.get("name_match_status"),
+                "home_name_match_method": winner.get("home_name_match_method"),
+                "away_name_match_method": winner.get("away_name_match_method"),
                 "team_order_status": winner.get("team_order_status"),
                 "category_compatibility": winner.get("category_compatibility"),
                 "competition_similarity": winner.get("competition_similarity")})

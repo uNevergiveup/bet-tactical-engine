@@ -1,15 +1,66 @@
 import json
 import tempfile
 import unittest
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from unittest.mock import patch
 
 from bet_engine.analytics.early_tactical_scout import (
     EarlyScoutError,
+    build_research_handoff,
     finalize_early_scout,
     prepare_early_scout_package,
     run_early_scout_with_analyst,
 )
+
+
+class ResearchHandoffTests(unittest.TestCase):
+    def test_cli_routes_bounded_research_and_reuses_sources(self):
+        import prematch_steps as steps
+
+        fixture = {**_base_identity(), "bwin_event_id": "7901446"}
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            registry = root / "sources.json"
+            entry = {"url": "https://club.example/previa", "claim": "Nota anterior",
+                     "published_at_utc": "2026-11-19T17:00:00Z", "available_at_utc": "2026-11-19T18:00:00Z"}
+            registry.write_text(json.dumps({
+                "fixture_id": 1492457, "event_id": "7901446",
+                "sources": [{**entry, "provider": "grok"}, {**entry, "provider": "perplexity",
+                             "url": entry["url"] + "?utm_source=news#intro"},
+                            {**entry, "url": "https://club.example/future", "claim": "EVIDENCIA_FUTURA",
+                             "available_at_utc": "2026-11-20T00:25:00Z"}],
+            }))
+            with patch.object(steps, "_resolve_eval_dir", return_value=(root, root, None, None)), patch.object(
+                steps, "_resolve_target_rec_from_eval", return_value=fixture
+            ) as resolver:
+                common = ["early-scout", "--fixture-id", "1492457", "--output-dir", tmp,
+                          "--research-question", "¿Cómo protege el carril central?"]
+                self.assertEqual(steps.main(common + ["--asof", "2026-11-19T19:30:00Z",
+                                                      "--research-phase", "deep", "--source-registry", str(registry)]), 0)
+                deep = next(root.glob("research_deep_*/research_handoff.json"))
+                handoff = json.loads(deep.read_bytes())
+                self.assertEqual((handoff["provider"], handoff["execution_mode"]), ("gemini", "REPLAY"))
+                self.assertEqual(len(handoff["source_registry"]), 2)
+                self.assertNotIn("EVIDENCIA_FUTURA", deep.with_name("research_gemini.md").read_text())
+                self.assertEqual(steps.main(common + ["--asof", "2026-11-20T00:10:00Z", "--research-phase",
+                                                      "update", "--research-provider", "grok", "--source-registry", str(deep)]), 0)
+                self.assertTrue(list(root.glob("research_update_*/research_grok.md")))
+                self.assertEqual(resolver.call_args.kwargs["min_lead_minutes"], 15)
+
+    def test_deep_window_and_registry_identity(self):
+        identity = _base_identity()
+        kickoff = datetime.fromisoformat(identity["kickoff_utc"])
+        for minutes in (240, 360):
+            handoff = build_research_handoff(identity=identity, asof_utc=kickoff-timedelta(minutes=minutes),
+                                             phase="deep", questions=["Presión"])
+            self.assertEqual(handoff["provider"], "gemini")
+        with self.assertRaisesRegex(EarlyScoutError, "OUTSIDE_WINDOW"):
+            build_research_handoff(identity=identity, asof_utc=kickoff-timedelta(minutes=239),
+                                   phase="deep", questions=["Presión"])
+        with self.assertRaisesRegex(EarlyScoutError, "IDENTITY_MISMATCH"):
+            build_research_handoff(identity=identity, asof_utc=kickoff-timedelta(hours=5),
+                                   phase="deep", questions=["Presión"], sources={"fixture_id": 999})
 
 
 def _base_identity(fid: int = 1492457, eid: str = "7901446") -> dict:

@@ -552,6 +552,7 @@
     {"provider":"API_FOOTBALL","league_id":456,"country":"Spain","names":["Tercera División RFEF - Group 18"],"gender":"M","season":2026,"type":"LEAGUE","national_tier":5,"level":"SENIOR","evidence":"filter_major_leagues.KNOWN_EXCLUDED_IDS + frozen exact API League ID/name"},
     {"provider":"API_FOOTBALL","league_id":138,"country":"Italy","names":["Serie C - Girone A"],"gender":"M","season":2026,"type":"LEAGUE","national_tier":3,"level":"SENIOR","evidence":"filter_major_leagues.KNOWN_EXCLUDED_IDS + frozen exact API League ID/name"},
     {"provider":"API_FOOTBALL","league_id":942,"country":"Italy","names":["Serie C - Girone B"],"gender":"M","season":2026,"type":"LEAGUE","national_tier":3,"level":"SENIOR","evidence":"filter_major_leagues.KNOWN_EXCLUDED_IDS + frozen exact API League ID/name"},
-    {"provider":"API_FOOTBALL","league_id":943,"country":"Italy","names":["Serie C - Girone C"],"gender":"M","season":2026,"type":"LEAGUE","national_tier":3,"level":"SENIOR","evidence":"filter_major_leagues.KNOWN_EXCLUDED_IDS + frozen exact API League ID/name"}
+    {"provider":"API_FOOTBALL","league_id":943,"country":"Italy","names":["Serie C - Girone C"],"gender":"M","season":2026,"type":"LEAGUE","national_tier":3,"level":"SENIOR","evidence":"filter_major_leagues.KNOWN_EXCLUDED_IDS + frozen exact API League ID/name"},
+    {"provider":"API_FOOTBALL","league_id":11,"country":"World","names":["CONMEBOL Sudamericana"],"gender":"M","season":2026,"type":"NATIONAL_OFFICIAL","national_tier":null,"level":"SENIOR","evidence":"CURATED_SENIOR_CONMEBOL_CLUB_COMPETITION"}
   ]
 }

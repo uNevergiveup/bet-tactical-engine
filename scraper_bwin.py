@@ -12,6 +12,7 @@ Opciones: --pausar (inspección visual), --intentos N, --sin-pestanas.
 No selecciona cuotas ni interactúa con el talón de apuestas.
 """
 import argparse
+import hashlib
 import json
 import os
 import re
@@ -19,7 +20,7 @@ import time
 import unicodedata
 from datetime import datetime
 from pathlib import Path
-from urllib.parse import unquote, urlsplit
+from urllib.parse import parse_qsl, unquote, urlencode, urlsplit
 
 from playwright.sync_api import sync_playwright
 from config.constants import (
@@ -51,7 +52,13 @@ def sanitizar_nombre_archivo(texto):
     return re.sub(r"_+", "_", re.sub(r"[^\w]+", "_", texto)).strip("_") or "evento"
 
 
-SCRAPER_PATCH_VERSION = '5.7.12-event-scoped-artifacts'
+def url_todos_mercados(url):
+    partes = urlsplit(url)
+    query = [(k, v) for k, v in parse_qsl(partes.query, keep_blank_values=True) if k != "market"]
+    return partes._replace(query=urlencode([*query, ("market", "-1")])).geturl()
+
+
+SCRAPER_PATCH_VERSION = '5.7.16-all-markets-canonical-redirect'
 
 JS_COMMON = r"""
 const root = document.querySelector('ms-event-details-main');
@@ -69,6 +76,8 @@ const inViewport = el => {
 };
 const normalizeTitle = s => clean(s).normalize('NFD').replace(/[\u0300-\u036f]/g, '')
     .toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
+const bothTeamsCards = s => /^ambos equipos (?:recibiran|reciben|recibir) x o mas tarjetas\b/.test(normalizeTitle(s));
+const bothTeamsCorners = s => /^ambos equipos x o mas corners\b/.test(normalizeTitle(s));
 const isRecommendationWidget = b => {
     const a = b.closest('ds-accordion');
     return !!a && normalizeTitle(title(a)) === 'crea tus apuestas recomendadas';
@@ -148,6 +157,48 @@ async function expandMore(scope) {
 """
 
 JS_EXTRACT = r"""
+function extractBothTeamsThreshold(accordion, add) {
+    const picks = [...accordion.querySelectorAll('ms-event-pick')].filter(p => p.closest('ds-accordion') === accordion);
+    const sides = [...new Set([...accordion.querySelectorAll(
+        'th, [role="columnheader"], .option-header-name, .option-header, .option-group-header .option-group-custom-header')]
+        .map(el => normalizeTitle(text(el))).filter(s => s === 'si' || s === 'no'))];
+    if (sides.length !== 2) return picks.length || 1;
+    const rowLabel = label => /^([1-9]\d*)(?:\s*(?:\+|o m[aá]s))?$/i.exec(label)?.[1];
+    const seen = new Set();
+    let added = 0;
+    function emit(threshold, cells) {
+        if (!threshold || cells.length !== 2 || cells.some(cell => cell.querySelectorAll('ms-event-pick').length !== 1)) return;
+        cells.forEach((cell, i) => {
+            const p = cell.querySelector('ms-event-pick');
+            if (!p || seen.has(p)) return;
+            seen.add(p);
+            add(p, threshold + '+ · ' + (sides[i] === 'si' ? 'Sí' : 'No'));
+            added++;
+        });
+    }
+    for (const row of accordion.querySelectorAll('tr, [role="row"]')) {
+        const cells = [...row.children];
+        const label = row.querySelector('th[scope="row"], [role="rowheader"], .attribute-key') || cells[0];
+        emit(rowLabel(text(label)), cells.filter(cell => cell !== label));
+    }
+    // Some Bwin grids render each threshold and its two choices as siblings.
+    const grids = new Set([...accordion.querySelectorAll('.attribute-key, [role="rowheader"]')].map(el => el.parentElement));
+    for (const grid of grids) {
+        let threshold = '', cells = [];
+        for (const cell of grid.children) {
+            if (cell.matches('.attribute-key, [role="rowheader"]')) {
+                emit(threshold, cells);
+                threshold = rowLabel(text(cell));
+                cells = [];
+            } else if (cell.matches('.option, [role="gridcell"], [role="cell"]')) {
+                cells.push(cell);
+            }
+        }
+        emit(threshold, cells);
+    }
+    return added ? picks.length - added : picks.length || 1;
+}
+
 function extract(scope) {
     const rows = [], errors = [], empty = [];
     let unavailable = 0;
@@ -171,14 +222,49 @@ function extract(scope) {
                 seleccion: selection, cuota: value,
                 mkt_id: p.getAttribute('data-test-option-id') || ''});
         }
+        if (bothTeamsCards(marketTitle) || bothTeamsCorners(marketTitle)) {
+            const rejected = extractBothTeamsThreshold(a, add);
+            if (rejected) errors.push('Umbral o columna Sí/No sin resolver: ' + market + ' / ' + rejected);
+            if (rows.length === start) empty.push(market);
+            continue;
+        }
         for (const g of a.querySelectorAll('ms-player-stats-option-group')) {
             if (g.closest('ds-accordion') !== a) continue;
             const players = [...g.querySelectorAll('.player-stats-option-group__player-name')].map(text);
             const headers = [...g.querySelectorAll('.player-stats-option-group__header')].map(text);
             const matrixRows = [...g.querySelectorAll('.player-stats-option-group__options')];
             if (!headers.length || players.length !== matrixRows.length) {
+                const picks = [...g.querySelectorAll('ms-event-pick')].filter(p => p.closest('ds-accordion') === a);
+                if (normalizeTitle(marketTitle) === 'recibe una tarjeta' && headers.length <= 1) {
+                    const candidates = new Map();
+                    let rejected = 0;
+                    for (const p of picks) {
+                        processed.add(p);
+                        const embedded = text(p.querySelector('.name'));
+                        const row = p.closest('.player-stats-option-group__options');
+                        const localNames = row ? [...row.querySelectorAll('.player-stats-option-group__player-name')].map(text) : [];
+                        const local = localNames.length === 1 ? localNames[0] : '';
+                        const player = embedded || local;
+                        if (!player || players.filter(name => name === player).length !== 1 ||
+                            (localNames.length && local !== player) ||
+                            (row && row.querySelectorAll('ms-event-pick').length !== 1)) {
+                            rejected++;
+                            continue;
+                        }
+                        if (!candidates.has(player)) candidates.set(player, []);
+                        candidates.get(player).push(p);
+                    }
+                    for (const [player, options] of candidates) {
+                        if (options.length === 1) add(options[0], player, headers[0]);
+                        else rejected += options.length;
+                    }
+                    if (rejected || !picks.length) {
+                        errors.push('Opciones de tarjeta sin asociación inequívoca: ' + market + ' / ' + rejected);
+                    }
+                    continue;
+                }
                 errors.push('Dimensiones de jugadores incoherentes: ' + market);
-                g.querySelectorAll('ms-event-pick').forEach(p => processed.add(p));
+                picks.forEach(p => processed.add(p));
                 continue;
             }
             matrixRows.forEach((row, r) => {
@@ -203,6 +289,7 @@ function extract(scope) {
         }
         for (const g of a.querySelectorAll('ms-goal-scorer-option-group .option-group-container')) {
             const headers = [...g.querySelectorAll('.option-header-name')].map(text);
+            const playerGoalOrAssist = !headers.length && normalizeTitle(marketTitle) === 'jugador marca o asiste';
             let player = '', col = 0;
             for (const cell of g.children) {
                 if (cell.matches('.attribute-key')) {
@@ -211,6 +298,7 @@ function extract(scope) {
                 } else if (cell.matches('.option')) {
                     const p = cell.querySelector('ms-event-pick');
                     if (p && headers[col]) add(p, player, headers[col]);
+                    else if (p && playerGoalOrAssist && col === 0 && player && text(p.querySelector('.name')) === player) add(p, player);
                     else if (p) { processed.add(p); errors.push('Columna de goleador desconocida: ' + market); }
                     col++;
                 }
@@ -369,6 +457,126 @@ def extraer_mercados_masivo(page, pestanas=True):
             if pos % 10 == 0 or pos == len(indices_con_pestanas) - 1:
                 print(f"  Subpestañas procesadas: {pos + 1}/{len(indices_con_pestanas)} (acordeón {index + 1}/{count})", flush=True)
     return result
+
+
+def localizar_categoria(page, nombre):
+    for role in ("tab", "button", "link"):
+        matches = page.get_by_role(role, name=nombre, exact=True)
+        if matches.count() == 1:
+            return matches
+    matches = page.locator("ms-event-details-main").get_by_text(nombre, exact=True)
+    if matches.count() == 1:
+        return matches
+    matches = page.get_by_text(nombre, exact=True)
+    return matches if matches.count() == 1 else None
+
+
+def _estado_categoria_dom(page, nombre, activar=False):
+    """Inspecciona/activa una categoría aunque Bwin no exponga roles ARIA estables."""
+    return page.evaluate(r"""({nombre, activar}) => {
+        const clean = value => (value || '').replace(/\u00a0/g, ' ').replace(/\s+/g, ' ').trim();
+        const root = document.querySelector('ms-event-details-main');
+        if (!root) return {found: false, selected: false, clicked: false};
+        const candidates = [...root.querySelectorAll('a, button, [role="tab"], [role="button"], span, div')]
+            .filter(el => clean(el.textContent) === nombre);
+        const leaves = candidates.filter(el => ![...el.children].some(child => clean(child.textContent) === nombre));
+        const source = leaves.length === 1 ? leaves[0] : (candidates.length === 1 ? candidates[0] : null);
+        if (!source) return {found: false, selected: false, clicked: false, matches: candidates.length};
+        const target = source.closest('[role="tab"], a, button, [role="button"]') || source;
+        const lineage = [target, target.parentElement, target.parentElement?.parentElement].filter(Boolean);
+        const selected = lineage.some(el =>
+            el.getAttribute('aria-selected') === 'true'
+            || ['true', 'page'].includes(el.getAttribute('aria-current'))
+            || [...el.classList].some(cls => /(?:^|[-_])(active|selected)(?:$|[-_])/i.test(cls))
+        );
+        if (activar && !selected) target.click();
+        return {found: true, selected, clicked: Boolean(activar && !selected), tag: target.tagName};
+    }""", {"nombre": nombre, "activar": activar})
+
+
+def asegurar_vista_todo(page):
+    """Activa Todo y recupera ``market=-1`` si un redirect canónico lo eliminó."""
+    from playwright.sync_api import TimeoutError as PlaywrightTimeout
+
+    clicked = False
+    selected = False
+    recovered_redirect = False
+
+    def activar_en_dom():
+        nonlocal clicked, selected
+        state = _estado_categoria_dom(page, "Todo")
+        if not state.get("found"):
+            return
+        selected = bool(state.get("selected"))
+        if not selected:
+            action = _estado_categoria_dom(page, "Todo", activar=True)
+            clicked = clicked or bool(action.get("clicked"))
+            page.wait_for_timeout(WAIT_BEFORE_EXTRACTION_MS)
+            page.locator("ms-event-details-main ds-accordion").first.wait_for(timeout=10000)
+            state = _estado_categoria_dom(page, "Todo")
+            selected = bool(state.get("selected"))
+
+    try:
+        activar_en_dom()
+    except PlaywrightTimeout:
+        pass
+
+    market = dict(parse_qsl(urlsplit(page.url).query)).get("market")
+    if not selected and market != "-1":
+        # Bwin normaliza algunos slugs (p. ej. Ajax) mediante un redirect que
+        # descarta el query string. Reaplicar market=-1 sobre la URL canónica.
+        canonical_all = url_todos_mercados(page.url)
+        try:
+            page.goto(canonical_all, wait_until="domcontentloaded", timeout=60000)
+            page.locator("ms-event-details-main ds-accordion").first.wait_for(timeout=45000)
+            recovered_redirect = True
+            activar_en_dom()
+        except PlaywrightTimeout:
+            pass
+
+    market = dict(parse_qsl(urlsplit(page.url).query)).get("market")
+    if not selected and market != "-1":
+        raise RuntimeError(f"VISTA_TODO_NO_CONFIRMADA:market={market}")
+    if selected:
+        status = "TODO_ACTIVO_EN_DOM"
+    elif recovered_redirect:
+        status = "TODO_RECUPERADO_TRAS_REDIRECT"
+    else:
+        status = "TODO_SOLICITADO_POR_URL"
+    return {"status": status, "clicked": clicked, "redirect_recovered": recovered_redirect,
+            "market_param": market, "url": page.url}
+
+
+def completar_ambos_reciben_tarjetas(page, info, extraidos):
+    """Busca el mercado también en la categoría Tarjetas si falta en Todo."""
+    def joint(rows):
+        return [r for r in rows if re.match(r"^ambos equipos (?:recibirán|reciben|recibir) x o más tarjetas\b",
+                                             r["mercado"], flags=re.I)]
+
+    from_todo = joint(extraidos["rows"])
+    if from_todo and not any("Umbral o columna Sí/No" in msg and "tarjetas" in msg for msg in extraidos["errors"]):
+        return {"status": "EXTRAIDO_EN_TODO", "selections": len(from_todo)}
+    tabs = localizar_categoria(page, "Tarjetas")
+    if tabs is None:
+        return {"status": "PESTANA_TARJETAS_NO_IDENTIFICADA", "selections": 0}
+    from playwright.sync_api import TimeoutError as PlaywrightTimeout
+
+    try:
+        tabs.click(timeout=5000)
+        page.wait_for_timeout(WAIT_BEFORE_EXTRACTION_MS)
+        page.locator("ms-event-details-main ds-accordion").first.wait_for(timeout=5000)
+    except PlaywrightTimeout:
+        return {"status": "PESTANA_TARJETAS_NO_CARGADA", "selections": 0}
+    verificar_partido(page, info)
+    scroll_completo(page)
+    expandir_mercados_masivo(page, info)
+    category = evaluate(page, "return extract(root);", extraction=True)
+    added = joint(category["rows"])
+    if added:
+        known = {(r["mercado"], r["seleccion"]) for r in from_todo}
+        extraidos["rows"].extend(r for r in added if (r["mercado"], r["seleccion"]) not in known)
+    extraidos["errors"].extend(msg for msg in category["errors"] if "Umbral o columna Sí/No" in msg and "tarjetas" in msg)
+    return {"status": "EXTRAIDO_EN_TARJETAS" if added else "MERCADO_NO_EXTRAIDO_EN_TARJETAS", "selections": len(added)}
 
 
 def deduplicar_resultados(resultados):
@@ -575,17 +783,19 @@ def main(argv=None):
     if args.browser_executable and not Path(args.browser_executable).is_file():
         parser.error('--browser-executable no existe')
     info = obtener_info_url(args.url)
+    info["url"] = url_todos_mercados(info["url"])
     inputs, diagnostics, failures = rutas_salida_evento(info)
     nombre = f"cuotas_bwin_{info['event_id']}"
     txt = inputs / f"{nombre}.txt"
-    print(f"BWIN | {info['partido']} | Event ID {info['event_id']}\n{args.url}", flush=True)
+    print(f"BWIN | {info['partido']} | Event ID {info['event_id']}\n{info['url']}", flush=True)
     print(f"Scraper patch: {SCRAPER_PATCH_VERSION}", flush=True)
     print(f"Destino cuotas: {txt}", flush=True)
     print(f"Destino diagnósticos: {diagnostics}", flush=True)
     with sync_playwright() as p:
         for intento in range(1, args.intentos + 1):
             browser = context = page = None
-            diagnostico = {"url_solicitada": args.url, "event_id": info['event_id'],
+            diagnostico = {"url_entrada": args.url, "url_solicitada": info["url"], "event_id": info['event_id'],
+                           "scraper_version": SCRAPER_PATCH_VERSION,
                            "destino_cuotas": str(txt), "intento": intento}
             try:
                 print(f"\nINTENTO {intento}/{args.intentos}", flush=True)
@@ -601,11 +811,13 @@ def main(argv=None):
                     else route.continue_()
                 )
                 page = context.new_page()
-                page.goto(args.url, wait_until='domcontentloaded', timeout=60000)
+                page.goto(info["url"], wait_until='domcontentloaded', timeout=60000)
                 page.locator('ms-event-details-main ds-accordion').first.wait_for(timeout=45000)
                 consent = page.locator('#onetrust-reject-all-handler')
                 if consent.is_visible():
                     consent.click()
+                verificar_partido(page, info)
+                diagnostico["vista_todo"] = asegurar_vista_todo(page)
                 verificar_partido(page, info)
                 diagnostico['inicial'] = evaluate(page, 'return stats();')
                 print(f"Inicial: {diagnostico['inicial']}", flush=True)
@@ -619,7 +831,6 @@ def main(argv=None):
                     raise RuntimeError('Scroll/expansión no convergen')
                 page.wait_for_timeout(WAIT_BEFORE_EXTRACTION_MS)
                 extraidos = extraer_mercados_masivo(page, not args.sin_pestanas)
-                resultados = deduplicar_resultados(extraidos['rows'])
                 estado = evaluate(page, 'return stats();')
                 # Volver a confirmar la cabecera al cerrar. Una SPA puede
                 # reemplazar el contenedor o navegar mientras abre mercados.
@@ -630,15 +841,19 @@ def main(argv=None):
                         'mostrar_mas_ordinarios': estado['mostrar_mas'],
                         'recomendaciones_no_expandidas': estado.get('recomendaciones_sin_expandir', 0),
                     }, ensure_ascii=False))
+                ambos_tarjetas = completar_ambos_reciben_tarjetas(page, info, extraidos)
+                resultados = deduplicar_resultados(extraidos['rows'])
                 diagnostico.update(final=estado, errores=extraidos['errors'],
                                    vacios=extraidos['empty'], no_disponibles=extraidos['unavailable'],
                                    selecciones=len(resultados), url_final=page.url,
                                    recomendados_no_expandidos=estado.get('recomendaciones_sin_expandir', 0),
+                                   ambos_equipos_tarjetas=ambos_tarjetas,
                                    nota_cobertura='Los widgets de recomendaciones no se expanden; pueden contener propuestas adicionales.')
                 if not resultados:
                     raise RuntimeError('Extracción fallida (0 cuotas): ' + json.dumps(diagnostico, ensure_ascii=False))
 
                 guardar_txt(resultados, txt, info, estado)
+                diagnostico['snapshot_sha256'] = hashlib.sha256(txt.read_bytes()).hexdigest()
                 diagnostico['estado'] = 'correcto'
                 (diagnostics / f'{nombre}.json').write_text(json.dumps(diagnostico, ensure_ascii=False, indent=2), encoding='utf-8')
                 print(f"\nCORRECTO: {estado['total']} acordeones abiertos; {len(resultados)} selecciones; "

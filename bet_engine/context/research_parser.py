@@ -12,6 +12,7 @@ import re
 import unicodedata
 from datetime import datetime, timezone
 from typing import Any
+from urllib.parse import unquote, urlsplit
 
 _ISO_RE = re.compile(
     r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(?::\d{2}(?:\.\d+)?)?(?:Z|[+-]\d{2}:\d{2})"
@@ -50,6 +51,7 @@ _CUTOFF_ALIASES = {
     "corte_analitico_utc",
 }
 _GENERATED_ALIASES = {
+    "generated_at_utc",
     "report_generated_utc",
     "report_completed_madrid",
     "report_completed_utc",
@@ -256,6 +258,7 @@ def parse_research_identity_and_metadata(
 
     # Autoría y hashes fuente preservados en el cuerpo
     sources_attributed = {
+        "gemini": bool(re.search(r"\bgemini\b", raw, re.I)),
         "grok": bool(re.search(r"\bgrok\b", raw, re.I)),
         "perplexity": bool(re.search(r"\bperplexity\b", raw, re.I)),
         "codex_consolidation": bool(re.search(r"\bconsolidado\b|\bcodex\b", raw, re.I)),
@@ -275,6 +278,22 @@ def parse_research_identity_and_metadata(
     kickoff_madrid = _parse_iso_dt(fields.get("kickoff_madrid"))
     cutoff_dt = _parse_iso_dt(fields.get("analysis_cutoff_utc"))
     generated_dt = _parse_iso_dt(fields.get("report_generated_utc"))
+    citations = sorted(set(re.findall(
+        r"(?:\]\(\s*<?|(?m:^\[[^\]\n]+\]:\s*<?))(https?://[^\s)>]+)",
+        raw, re.I,
+    )))
+    placeholder_urls = []
+    for url in citations:
+        try:
+            parts = urlsplit(url)
+            placeholder = not parts.hostname or bool(re.search(
+                r"(?:^|[/=_-])(?:unknown[_-]url|placeholder)(?:$|[/&#?])",
+                unquote(parts.path + "?" + parts.query), re.I,
+            ))
+        except ValueError:
+            placeholder = True
+        if placeholder:
+            placeholder_urls.append(url)
 
     return {
         "event_ids_found": event_ids,
@@ -291,6 +310,8 @@ def parse_research_identity_and_metadata(
         "sources_attributed": sources_attributed,
         "sha256_references": sha_refs,
         "parallel_xi": parallel_xi,
+        "citation_urls": [url for url in citations if url not in placeholder_urls],
+        "invalid_citation_urls": placeholder_urls,
         "has_source_registry": bool(
             re.search(
                 r"registro de fuentes|registro documental de fuentes|fuentes y enlaces|fuentes consultadas|fuentes relevantes|referencias [úu]tiles y procedencia",

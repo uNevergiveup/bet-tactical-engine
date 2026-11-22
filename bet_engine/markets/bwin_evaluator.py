@@ -246,6 +246,7 @@ def _classify_option(
     is_over_line: bool = False,
     lineups_confirmed_complete: bool = False,
     lineup_status: str = "LINEUPS_PENDING",
+    market_requires_official_xi: bool = True,
     calibration_accredited: bool = False,
     calibration_status: str = "JOINT_MATCH_CALIBRATION_NOT_ACCREDITED",
 ) -> tuple[str, str, tuple[str, ...], tuple[str, ...]]:
@@ -283,7 +284,7 @@ def _classify_option(
     )
 
     if (
-        lineups_confirmed_complete
+        (lineups_confirmed_complete or not market_requires_official_xi)
         and calibration_accredited
         and ev_lo > 0.0
         and not insufficient_evidence
@@ -300,7 +301,7 @@ def _classify_option(
             dec_cat = "NO_BET_POR_EVIDENCIA"
         else:
             dec_cat = "CANDIDATO_CONDICIONAL"
-            if not lineups_confirmed_complete:
+            if not lineups_confirmed_complete and market_requires_official_xi:
                 pending.append(f"BLOQUEADO_ACCIONABLE_SIN_22_TITULARES:{lineup_status}")
             if not calibration_accredited:
                 pending.append(f"CALIBRACION_NO_ACREDITADA:{calibration_status}")
@@ -311,7 +312,7 @@ def _classify_option(
                     pending.append(f"MUESTRA_CORTA_O_RIESGO_HISTORICO_NO_ACCIONABLE(n={sample_n})")
             else:
                 pending.append("EV_CENTRAL_POSITIVO_CON_BANDA_INFERIOR_NEGATIVA_PENDIENTE_CALIBRACION")
-            pending.append("REQUIERE_CONTRASTE_CUALITATIVO_Y_XI")
+            pending.append("REQUIERE_CONTRASTE_CUALITATIVO_Y_XI" if market_requires_official_xi else "REQUIERE_CONTRASTE_CUALITATIVO")
     else:
         cls_label = "NO_EDGE_OR_HIGH_UNCERTAINTY"
         dec_cat = "NO_BET_POR_EVIDENCIA" if insufficient_evidence else "NO_BET_POR_PRECIO"
@@ -386,6 +387,7 @@ class BwinMarketEvaluator:
         analytics_result: AnalyticsEngineResult | None = None,
         lineups_confirmed_complete: bool | None = None,
         lineup_status: str | None = None,
+        lineup_independent_keys: frozenset[str] = frozenset(),
         calibration_accredited_families: set[str] | frozenset[str] = frozenset(),
     ) -> list[EvaluatedMarketOption]:
         if lineups_confirmed_complete is None or lineup_status is None:
@@ -395,11 +397,12 @@ class BwinMarketEvaluator:
             if lineup_status is None:
                 lineup_status = str(le.get("status") or "LINEUPS_PENDING")
 
-        def _classify_for_match(fam_name: str, **kw: Any) -> tuple[str, str, tuple[str, ...], tuple[str, ...], str]:
+        def _classify_for_match(fam_name: str, selection_key: str, **kw: Any) -> tuple[str, str, tuple[str, ...], tuple[str, ...], str]:
             cal_ok, cal_status = _family_calibration_info(fam_name, calibration_accredited_families)
             cls_l, dec_c, pend, r_fl = _classify_option(
                 lineups_confirmed_complete=bool(lineups_confirmed_complete),
                 lineup_status=str(lineup_status),
+                market_requires_official_xi=selection_key not in lineup_independent_keys,
                 calibration_accredited=cal_ok,
                 calibration_status=cal_status,
                 **kw,
@@ -450,7 +453,7 @@ class BwinMarketEvaluator:
             else:
                 be = ev_m = ev_lo = None
             cls_label, dec_cat, pending, r_flags, cal_st = _classify_for_match(
-                fam,
+                fam, sel_key,
                 odd=odd,
                 p_mod=p_mod,
                 ev_m=ev_m,
@@ -548,7 +551,7 @@ class BwinMarketEvaluator:
             else:
                 be = ev_m = ev_lo = None
             cls_label, dec_cat, pending, r_flags, cal_st = _classify_for_match(
-                "DRAW_NO_BET",
+                "DRAW_NO_BET", sel_key,
                 odd=odd,
                 p_mod=p_cond,
                 ev_m=ev_m,
@@ -636,7 +639,7 @@ class BwinMarketEvaluator:
             )
             eff_w_n = _effective_n_for_family(fdist, scope)
             cls_label, dec_cat, pending, r_flags, cal_st = _classify_for_match(
-                fam,
+                fam, sel_key,
                 odd=odd,
                 p_mod=p_mod,
                 ev_m=ev_m,
@@ -721,7 +724,7 @@ class BwinMarketEvaluator:
                 ev_m = round(p_mod * odd - 1.0, 4)
                 ev_lo = round(p_lo * odd - 1.0, 4)
             cls_label, dec_cat, pending, r_flags, cal_st = _classify_for_match(
-                fam,
+                fam, skey,
                 odd=odd,
                 p_mod=p_mod,
                 ev_m=ev_m,

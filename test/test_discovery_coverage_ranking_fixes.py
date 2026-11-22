@@ -54,6 +54,42 @@ def _make_obs(fid_base: int, team_id: int, n: int, now: datetime, *, goals: floa
 
 
 class TestDiscoveryCoverageRankingFixes(unittest.TestCase):
+    def test_00_adult_open_keeps_stable_european_top_tiers_without_season_entry(self) -> None:
+        base = {
+            "season": 2026,
+            "status": "NS",
+            "kickoff_madrid": "2026-11-21T20:45:00+01:00",
+        }
+        cases = (
+            ({**base, "fixture_id": 1, "country": "France", "league": "Ligue 1", "league_id": 61,
+              "home": "Lens", "away": "Toulouse"}, "M"),
+            ({**base, "fixture_id": 2, "country": "Germany", "league": "Bundesliga", "league_id": 78,
+              "home": "Union Berlin", "away": "RB Leipzig"}, "M"),
+            ({**base, "fixture_id": 3, "country": "Italy", "league": "Serie A", "league_id": 135,
+              "home": "Napoli", "away": "Torino"}, "M"),
+        )
+        document = {
+            "schema_version": "1.0-discovery",
+            "generated_at_utc": "2026-11-21T00:00:00+00:00",
+            "fixtures": [row for row, _ in cases],
+        }
+        result = fml.filter_document(document, json.dumps(document).encode(), policy="adult-open")
+        self.assertEqual(result["counts"]["eligible"], 3)
+        self.assertEqual(result["counts"]["review"], 0)
+        by_id = {row["fixture_id"]: row for row in result["fixtures"]}
+        for row, expected_gender in cases:
+            admitted = by_id[row["fixture_id"]]
+            self.assertEqual(admitted["filter_reason"], "CURATED_STABLE_DOMESTIC_TOP_TIER")
+            self.assertEqual(admitted["competition_category"], "SENIOR_MALE_TOP_TIER")
+            self.assertEqual(admitted["gender"], expected_gender)
+            self.assertEqual(admitted["matching_eligibility"], "ELIGIBLE")
+
+        # La precedencia de los bloqueos de categoria no cambia.
+        reserve = {**cases[1][0], "fixture_id": 4, "home": "Bayern München II"}
+        youth = {**cases[2][0], "fixture_id": 5, "league": "Serie A U20"}
+        self.assertEqual(fml.classify(reserve, policy="adult-open"), ("EXCLUDED", "RESERVE_TEAM"))
+        self.assertEqual(fml.classify(youth, policy="adult-open"), ("EXCLUDED", "YOUTH_COMPETITION"))
+
     def test_01_replay_18_nov_98_fixtures_categories_and_scopes(self) -> None:
         fx_path = REAL_18_EVAL / "fixtures.json"
         if not fx_path.is_file():

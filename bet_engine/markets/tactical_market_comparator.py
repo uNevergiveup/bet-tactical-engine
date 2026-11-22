@@ -8,6 +8,7 @@ ganadores ni calcular EV ficticio cuando no existe probabilidad predictiva acred
 from __future__ import annotations
 
 import json
+import re
 from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 from pathlib import Path
@@ -83,12 +84,12 @@ def evaluate_price_validity(
     cap_dt = _parse_dt(captured_at_utc)
     if cap_dt is None:
         return {"status": "PRICE_UNVERIFIED", "age_minutes": None, "reason": "MISSING_CAPTURE_TIMESTAMP"}
-    if kickoff_utc is not None and cap_dt > kickoff_utc:
-        return {"status": "PRICE_INVALID_POST_KICKOFF", "age_minutes": None, "reason": "CAPTURED_AFTER_KICKOFF"}
+    if kickoff_utc is not None and cap_dt >= kickoff_utc:
+        return {"status": "PRICE_INVALID_POST_KICKOFF", "age_minutes": None, "reason": "CAPTURED_AT_OR_AFTER_KICKOFF"}
     age_min = round((asof_utc - cap_dt).total_seconds() / 60.0, 2)
-    if age_min < 0:
+    if cap_dt > asof_utc:
         return {"status": "PRICE_UNVERIFIED", "age_minutes": age_min, "reason": "CAPTURE_IN_FUTURE_VS_ASOF"}
-    if age_min > max_age_minutes:
+    if (asof_utc - cap_dt).total_seconds() > max_age_minutes * 60:
         return {"status": "PRICE_EXPIRED", "age_minutes": age_min, "reason": f"CAPTURE_OLDER_THAN_{max_age_minutes}M"}
     return {"status": "VALID_PREMATCH", "age_minutes": age_min, "reason": "OK"}
 
@@ -213,9 +214,9 @@ def evaluate_prematch_temporal_policy(
         formal_blocks.append("PRICE_CAPTURED_AT_OR_AFTER_KICKOFF")
     else:
         age_min = round((dec_dt - cap_dt).total_seconds() / 60.0, 2)
-        if age_min < 0:
+        if cap_dt > dec_dt:
             formal_blocks.append("PRICE_CAPTURE_AFTER_DECISION")
-        elif age_min > max_formal_price_age_minutes:
+        elif (dec_dt - cap_dt).total_seconds() > max_formal_price_age_minutes * 60:
             formal_blocks.append(f"PRICE_STALE_FOR_FORMAL_BET({age_min}m>{max_formal_price_age_minutes}m)")
 
     xi_confirmed = lineup_status in {"LINEUPS_API_CONFIRMED", "LINEUPS_EXTERNAL_CONFIRMED", "LINEUPS_MANUAL_VERIFIED"}
@@ -250,7 +251,7 @@ def build_temporal_control_audit(
     execution_utc: datetime,
     captured_at_utc: str | None,
     kickoff_utc: datetime | None,
-    lineup_status: str = "PROBABLE",
+    lineup_status: str = "LINEUPS_PENDING",
 ) -> dict[str, Any]:
     """Documenta la interacción temporal PREMATCH y evalúa la política compuesta junto a T-45."""
     lead_minutes = round((kickoff_utc - execution_utc).total_seconds() / 60.0, 2) if kickoff_utc else None
@@ -327,40 +328,56 @@ def refresh_expedient_with_lineups(
         now_utc=now_dt,
     )
 
+    from bet_engine.context.evidence_aggregator import _norm_name
+
     # Extract verified starter/sub sets when API lineups are valid
-    starters_by_name: dict[str, dict[str, Any]] = {}
-    subs_by_name: dict[str, dict[str, Any]] = {}
-    if isinstance(api_lineups_response, list):
-        for blk in api_lineups_response:
+    roster: list[dict[str, Any]] = []
+    formations = {}
+    api_verified = lineup_eval.get("status") == "LINEUPS_API_CONFIRMED"
+    roster_source = (api_lineups_response if api_verified else
+                     (manual_lineup.get("api_like_payload") or {}).get("response") if manual_lineup else None)
+    if official_confirmed := is_confirmed_complete(lineup_eval.get("status")):
+        for blk in roster_source or []:
             tid = (blk.get("team") or {}).get("id")
             if tid not in (home_id, away_id):
                 continue
             side = "home" if tid == home_id else "away"
-            for entry in blk.get("startXI") or []:
-                p = entry.get("player") or {}
-                nm = str(p.get("name") or "").strip().lower()
-                if nm:
-                    starters_by_name[nm] = {"player_id": p.get("id"), "name": p.get("name"), "side": side, "pos": p.get("pos"), "grid": p.get("grid")}
-            for entry in blk.get("substitutes") or []:
-                p = entry.get("player") or {}
-                nm = str(p.get("name") or "").strip().lower()
-                if nm:
-                    subs_by_name[nm] = {"player_id": p.get("id"), "name": p.get("name"), "side": side, "pos": p.get("pos")}
+            formations[side] = blk.get("formation")
+            for key, role in (("startXI", "TITULAR"), ("substitutes", "SUPLENTE")):
+                for entry in blk.get(key) or []:
+                    # Los XI externos validados admiten suplentes como nombres
+                    # simples; API-Football los entrega como {player: {...}}.
+                    if isinstance(entry, str):
+                        p = {"name": entry}
+                    elif isinstance(entry, dict):
+                        p = entry.get("player") or entry
+                    else:
+                        p = {}
+                    if p.get("name"):
+                        roster.append({"role": role, "player_id": p.get("id"), "name": p["name"],
+                                       "side": side, "pos": p.get("pos"), "grid": p.get("grid")})
 
-    official_confirmed = is_confirmed_complete(lineup_eval.get("status"))
     player_exposure_roles: list[dict[str, Any]] = []
     for wp in watch_players or []:
-        w_low = wp.strip().lower()
-        if not official_confirmed:
-            player_exposure_roles.append({"player": wp, "role": "EXPOSICION_INCIERTA", "source_status": lineup_eval.get("status")})
-        elif any(w_low in k for k in starters_by_name):
-            info = next(v for k, v in starters_by_name.items() if w_low in k)
-            player_exposure_roles.append({"player": wp, "role": "TITULAR", **info})
-        elif any(w_low in k for k in subs_by_name):
-            info = next(v for k, v in subs_by_name.items() if w_low in k)
-            player_exposure_roles.append({"player": wp, "role": "SUPLENTE", **info})
+        watched = wp.strip()
+        target = re.findall(r"\w+", _norm_name(watched))
+        matches = []
+        for player in roster:
+            actual = re.findall(r"\w+", _norm_name(player["name"]))
+            same_id = watched.isdecimal() and watched == str(player["player_id"])
+            exact = len(target) >= 2 and target == actual
+            abbreviated = (
+                len(target) == len(actual) and len(target) >= 2 and target[1:] == actual[1:]
+                and target[0][0] == actual[0][0] and min(len(target[0]), len(actual[0])) == 1
+            )
+            if same_id or exact or abbreviated:
+                matches.append(player)
+        if len(matches) == 1:
+            player_exposure_roles.append({"player": wp, **matches[0]})
         else:
-            player_exposure_roles.append({"player": wp, "role": "AUSENTE", "source_status": lineup_eval.get("status")})
+            player_exposure_roles.append({"player": wp, "role": "EXPOSICION_INCIERTA",
+                                          "source_status": lineup_eval.get("status"),
+                                          "reason": "AMBIGUOUS_PLAYER" if matches else "PLAYER_NOT_RESOLVED"})
 
     initial_hyps = (scout_report.get("analysis") or {}).get("hypotheses") or []
     lineup_changes: list[str] = []
@@ -368,24 +385,32 @@ def refresh_expedient_with_lineups(
     new_conditions: list[str] = []
 
     if not official_confirmed:
-        new_conditions.append(f"XI aún no confirmado oficialmente ({lineup_eval.get('status')}); mantener como hipótesis temprana.")
+        new_conditions.append(f"XI completo aún sin verificar ({lineup_eval.get('status')}); mantener como hipótesis temprana.")
     else:
         for idx, h in enumerate(initial_hyps, start=1):
             tp = str(h.get("team_and_players") or "").lower()
             absent_hit = [r["player"] for r in player_exposure_roles if r["role"] in ("AUSENTE", "SUPLENTE") and r["player"].lower() in tp]
             if absent_hit:
-                discarded_hyps.append({"hypothesis_index": idx, "reason": f"Jugador clave no titular tras XI oficial: {absent_hit}"})
+                discarded_hyps.append({"hypothesis_index": idx, "reason": f"Jugador clave identificado como suplente: {absent_hit}"})
                 lineup_changes.append(f"Hipotesis {idx} afectada por ausencia/suplencia de {absent_hit}")
             else:
-                new_conditions.append(f"Hipotesis {idx} compatible con XI oficial verificado ({lineup_eval.get('source_origin')}).")
+                new_conditions.append(f"Hipotesis {idx} pendiente de reevaluación táctica con el XI ({lineup_eval.get('source_origin')}).")
 
+    lineup_gate_passed = lineup_eval.pop("eligible_for_actionable_pick", False)
     return {
         "schema_version": "1.0-lineup-refresh-audit",
         "refreshed_at_utc": now_dt.isoformat(),
         "fixture_id": fixture_id,
         "event_id": event_id,
+        "home_id": home_id,
+        "away_id": away_id,
+        "kickoff_utc": ko_dt.isoformat(),
         "lineup_status": lineup_eval.get("status"),
         "official_confirmed_22": official_confirmed,
+        "confirmed_complete_22": official_confirmed,
+        "lineup_gate_passed": lineup_gate_passed,
+        "formations": formations,
+        "api_roster": roster,
         "lineup_evaluation": lineup_eval,
         "initial_hypotheses_count": len(initial_hyps),
         "initial_hypotheses_preserved": initial_hyps,
@@ -409,6 +434,7 @@ def build_market_comparison_prompt(comp_input: dict[str, Any]) -> str:
         "",
         "## Reglas Obligatorias",
         "- Modo: `EXPERIMENTAL_SHADOW` (Fase 2). **NO recibes ranking previo del motor; no autorizas BET.**",
+        "- Entrega evidencia, contraevidencia y mercados pendientes. Reserva PICK y NO BET para la decisión final.",
         "- Distingue probabilidad implícita bruta (`1 / cuota`) de probabilidad real del evento.",
         "- Si `predictive_probability_status == PREDICTIVE_PROBABILITY_NOT_ACCREDITED`, **NO inventes `p_model` ni EV**.",
         "- Si `settlement_status == SETTLEMENT_UNVERIFIED`, **NO asumas equivalencia con contadores de API-Football**.",
@@ -417,6 +443,10 @@ def build_market_comparison_prompt(comp_input: dict[str, Any]) -> str:
         "## Identidad y Control Temporal",
         f"- `fixture_id`: `{ident['fixture_id']}` | `event_id`: `{ident.get('event_id')}`",
         f"- Kickoff UTC: `{ident.get('kickoff_utc')}` | Captura Bwin: `{comp_input['temporal_audit'].get('bwin_captured_at_utc')}`",
+        f"- Estado de alineaciones: `{comp_input['temporal_audit']['lineup_status']}`",
+        f"- Vigencia de cuota (exploratoria / formal): `{comp_input['price_validity']['exploratory_price_status']}` / `{comp_input['price_validity']['formal_price_status']}`",
+        "- Reevalúa las hipótesis con el refresco de XI cuando esté disponible.",
+        json.dumps(comp_input.get("lineup_refresh"), ensure_ascii=False),
         "",
         "## Preguntas Clave que Debe Responder la Comparación",
         "1. ¿Qué línea representa mejor el mecanismo futbolístico identificado en el scouting?",
@@ -444,6 +474,9 @@ def build_market_comparison_prompt(comp_input: dict[str, Any]) -> str:
         "## Formato JSON Esperado de Respuesta",
         "Devuelve un objeto JSON con: `comparisons` (lista de comparaciones con `pair_label`, `preferred_option_or_indeterminate`, `football_mechanism_fit`, `price_vs_requirement_analysis`, `counter_arguments`, `missing_data`), `exploratory_candidates` (lista con `selection_id`, `canonical_key`, `state` en `COMPARISON_STATES`, `hypothesis_index`, `rationale`, `critical_uncertainties`, `no_bet_category`), y `overall_conclusion`.",
     ]
+    if comp_input.get("lineup_refresh"):
+        stamp = comp_input["lineup_refresh"]["refreshed_at_utc"]
+        lines.append(f"- Incluye `lineup_refreshed_at_utc` con el valor exacto `{stamp}` tras revisar ese XI.")
     return "\n".join(lines)
 
 
@@ -456,6 +489,7 @@ def prepare_market_comparison_package(
     output_dir: Path,
     asof_utc: datetime | None = None,
     max_price_age_minutes: int = 180,
+    lineup_refresh: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Etapa A de Tarea E: prepara contexto y prompt de comparación de mercados sin ranking previo."""
     ident = scout_report.get("identity") or {}
@@ -470,12 +504,24 @@ def prepare_market_comparison_package(
         kickoff_utc=ko_dt,
         max_age_minutes=max_price_age_minutes,
     )
+    formal_price = evaluate_price_validity(
+        captured_at_utc=cap_ts, asof_utc=now_utc, kickoff_utc=ko_dt, max_age_minutes=20,
+    )
+    price_val["exploratory_price_status"] = price_val["status"]
+    price_val["formal_price_status"] = formal_price["status"]
+
+    if lineup_refresh:
+        refresh_time = _parse_dt(lineup_refresh.get("refreshed_at_utc"))
+        if (any(str(lineup_refresh.get(key)) != str(ident.get(key)) for key in ("fixture_id", "event_id"))
+            or ko_dt is None or _parse_dt(lineup_refresh.get("kickoff_utc")) != ko_dt
+            or refresh_time is None or refresh_time > now_utc or refresh_time >= ko_dt):
+            raise MarketComparisonError("LINEUP_REFRESH_IDENTITY_OR_TEMPORAL_MISMATCH")
 
     # Collect unique offered + nearby lines from matcher links
     seen_sids: set[str] = set()
     candidate_options: list[dict[str, Any]] = []
     for link in matcher_result.get("links") or []:
-        for e in (link.get("offered_bwin_lines") or []) + (link.get("nearby_alternatives") or []):
+        for e in (link.get("offered_bwin_lines") or []) + (link.get("nearby_alternatives") or [])[:25]:
             sid = str(e.get("selection_id") or "")
             if sid and sid in seen_sids:
                 continue
@@ -555,6 +601,7 @@ def prepare_market_comparison_package(
         execution_utc=now_utc,
         captured_at_utc=cap_ts,
         kickoff_utc=ko_dt,
+        lineup_status=lineup_refresh["lineup_status"] if lineup_refresh else "LINEUPS_PENDING",
     )
 
     comp_input = {
@@ -564,6 +611,7 @@ def prepare_market_comparison_package(
         "identity": ident,
         "temporal_audit": temporal_audit,
         "price_validity": price_val,
+        "lineup_refresh": lineup_refresh,
         "matcher_summary": [
             {
                 "hypothesis_index": l["hypothesis_index"],
@@ -598,6 +646,8 @@ def prepare_market_comparison_package(
 def _validate_comparison_ai(ai_doc: dict[str, Any]) -> None:
     if not isinstance(ai_doc, dict):
         raise MarketComparisonError("COMPARISON_AI_OUTPUT_MUST_BE_OBJECT")
+    if any(ai_doc.get(key) is not None for key in ("decision", "final_decision", "pick", "no_bet", "no_bet_reasons")):
+        raise MarketComparisonError("PHASE2_FINAL_DECISION_RESERVED_FOR_FINAL_STAGE")
     if ai_doc.get("actionable_bet") is True or ai_doc.get("bet_authorized") is True:
         raise MarketComparisonError("PHASE2_CANNOT_AUTHORIZE_BET")
     for k in ("p_model", "calibrated_p_model", "ev", "stake"):
@@ -634,27 +684,22 @@ def build_no_bet_ledger(
     if pv in ("PRICE_UNVERIFIED", "PRICE_EXPIRED", "PRICE_INVALID_POST_KICKOFF"):
         counts["CUOTA_NO_DISPONIBLE"] += 1
 
+    state_categories = {
+        "LINEUP_DEPENDENCY_PENDING": "ALINEACION_PENDIENTE",
+        "PREDICTIVE_CALIBRATION_PENDING": "CALIBRACION_PREDICTIVA_PENDIENTE",
+        "CONTRADICTED_HYPOTHESIS": "HIPOTESIS_TACTICA_CONTRADICHA",
+        "PRICE_UNVERIFIED": "CUOTA_NO_DISPONIBLE",
+        "INSUFFICIENT_EVIDENCE": "FALTA_COBERTURA_HISTORICA",
+        "UNSUPPORTED_MARKET": "REGLA_COMERCIAL_NO_CONCILIADA",
+    }
     exploratory_count = 0
     for c in cands:
         st = c.get("state")
         if st == "EXPLORATORY_CANDIDATE":
             exploratory_count += 1
-        elif st == "LINEUP_DEPENDENCY_PENDING":
-            counts["ALINEACION_PENDIENTE"] += 1
-        elif st == "PREDICTIVE_CALIBRATION_PENDING":
-            counts["CALIBRACION_PREDICTIVA_PENDIENTE"] += 1
-        elif st == "CONTRADICTED_HYPOTHESIS":
-            counts["HIPOTESIS_TACTICA_CONTRADICHA"] += 1
-        elif st == "PRICE_UNVERIFIED":
-            counts["CUOTA_NO_DISPONIBLE"] += 1
-        elif st == "INSUFFICIENT_EVIDENCE":
-            counts["FALTA_COBERTURA_HISTORICA"] += 1
-        elif st == "UNSUPPORTED_MARKET":
-            counts["REGLA_COMERCIAL_NO_CONCILIADA"] += 1
-
-        nb_cat = c.get("no_bet_category")
-        if nb_cat in counts:
-            counts[nb_cat] += 1
+        for category in {state_categories.get(st), c.get("no_bet_category")}:
+            if category in counts:
+                counts[category] += 1
 
     counts["DECISION_FORMAL_SIN_BET_AUTORIZADO"] += 1
 
@@ -676,6 +721,9 @@ def finalize_market_comparison(
     output_dir: Path,
 ) -> dict[str, Any]:
     """Etapa B de Tarea E: valida la evaluación de IA, genera estados y persiste JSON + Markdown."""
+    refresh = comp_input.get("lineup_refresh")
+    if refresh and ai_evaluation.get("lineup_refreshed_at_utc") != refresh["refreshed_at_utc"]:
+        raise MarketComparisonError("COMPARISON_REQUIRES_EVALUATION_WITH_CURRENT_LINEUP_REFRESH")
     _validate_comparison_ai(ai_evaluation)
     ident = comp_input["identity"]
     dossier_id = ident.get("dossier_id") or str(ident.get("event_id") or f"research_fixture_{ident.get('fixture_id')}")
@@ -689,6 +737,7 @@ def finalize_market_comparison(
         "formal_bet_authorized": False,
         "temporal_audit": comp_input["temporal_audit"],
         "price_validity": comp_input["price_validity"],
+        "lineup_refresh": comp_input.get("lineup_refresh"),
         "no_bet_and_operational_ledger": ledger,
         "evaluation": ai_evaluation,
     }

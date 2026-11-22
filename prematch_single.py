@@ -210,10 +210,11 @@ def resolve_qualitative_report_path(
     return candidates[0]
 
 
-def match_manifest(ctx, *, check_files=True):
+def match_manifest(ctx, *, check_files=True, manifest=None):
     mpath=ctx['directory']/'manifest.json'
-    if not mpath.is_file():raise ValueError('No existe manifest.json del evento; ejecuta prepare')
-    manifest=read_json(mpath)
+    if manifest is None:
+        if not mpath.is_file():raise ValueError('No existe manifest.json del evento; ejecuta prepare')
+        manifest=read_json(mpath)
     if str(manifest.get('event_id'))!=ctx['event_id'] or manifest.get('url')!=ctx['url']:
         raise ValueError('Manifest Event ID / URL distinto a la selección')
     inp=manifest.get('inputs') or {}
@@ -645,6 +646,8 @@ def cmd_refresh(ctx,args):
             m.get('steps', {}).pop(step, None)
         m.pop('codex_prompt',None)
         m.pop('validation_state',None)
+        m.pop('validation_artifact',None)
+        m.pop('shadow_evaluation',None)
         # Invalidate stale Shadow summary and Codex handoff (already archived above)
         stale_shadow = ctx['directory'] / 'shadow' / f'shadow_summary_{ctx["event_id"]}.json'
         if stale_shadow.is_file():
@@ -959,7 +962,9 @@ def cmd_finish(ctx,args):
     cmd=[sys.executable,str(multi),'--root',str(ctx['root']),'finish','--event-id',ctx['event_id'],
          '--report',str(report),'--workers','1','--lineup-cutoff-minutes',str(cutoff_min)]
     if args.historical:cmd.append('--historical')
-    if getattr(args,'shadow_mode',False):cmd.append('--shadow-mode')
+    shadow_mode = getattr(args, 'shadow_mode', None)
+    if shadow_mode is not None:
+        cmd.append('--shadow-mode' if shadow_mode else '--no-shadow-mode')
     code=run(cmd,ctx['root'])
     if code:raise ValueError(f'finish devolvió {code}; revisa logs/validacion.log y logs/motor.log')
     m=match_manifest(ctx)
@@ -1344,7 +1349,11 @@ def cmd_close(ctx, args):
         if mat_json_path.is_file():
             artifacts['matriz_json'] = {'path': str(mat_json_path), 'sha256': sha(mat_json_path)}
         sh_json_path = ctx['directory'] / 'shadow' / f'shadow_summary_{ctx["event_id"]}.json'
-        if sh_json_path.is_file():
+        shadow_ref = m_final.get('shadow_evaluation') or {}
+        if (shadow_ref.get('path') and sh_json_path.is_file()
+                and Path(shadow_ref['path']).resolve() == sh_json_path.resolve()
+                and shadow_ref.get('sha256') == sha(sh_json_path)
+                and shadow_ref.get('validation_sha256') == (artifacts.get('validation_json') or {}).get('sha256')):
             artifacts['shadow_summary_json'] = {'path': str(sh_json_path), 'sha256': sha(sh_json_path)}
         if m_final.get('codex_prompt') and Path(m_final['codex_prompt']).is_file():
             cp = Path(m_final['codex_prompt'])
@@ -1453,13 +1462,13 @@ def main(argv=None):
     ff=s.add_parser('finish',help='Informe -> validador -> motor; genera prompt único Codex')
     ff.add_argument('--report',type=Path,help='Reporte cualitativo del seleccionado')
     ff.add_argument('--historical',action='store_true',help='Solo auditoría posterior al inicio: nunca Codex accionable')
-    ff.add_argument('--shadow-mode',action='store_true',help='Opt-in: ejecuta Bet Engine en Shadow Mode paralelo sin alterar el flujo anterior')
+    ff.add_argument('--shadow-mode',action=argparse.BooleanOptionalAction,default=None)
     ff_lu=ff.add_mutually_exclusive_group()
     ff_lu.add_argument('--require-confirmed-lineups',action='store_true',help='Falla cerrado si faltan 22 titulares confirmados')
     ff_lu.add_argument('--allow-unconfirmed-lineups',action='store_true',help='Permite investigación sin 22 titulares confirmados (no accionable)')
     cl=s.add_parser('close',help='Coordinación segura PREMATCH: precheck -> refresh-odds -> finish')
     cl.add_argument('--report',type=Path,help='Reporte cualitativo del seleccionado')
-    cl.add_argument('--shadow-mode',action='store_true',help='Opt-in: ejecuta Bet Engine en Shadow Mode paralelo')
+    cl.add_argument('--shadow-mode',action=argparse.BooleanOptionalAction,default=None)
     cl_lu=cl.add_mutually_exclusive_group()
     cl_lu.add_argument('--require-confirmed-lineups',action='store_true',default=True,help='Falla cerrado si faltan 22 titulares confirmados (default)')
     cl_lu.add_argument('--allow-unconfirmed-lineups',action='store_true',help='Permite cierre de investigación sin 22 titulares confirmados (no accionable)')
