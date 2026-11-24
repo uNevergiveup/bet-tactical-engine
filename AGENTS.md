@@ -2,7 +2,7 @@
 
 ## 0. Alcance y precedencia
 
-- El flujo operativo usa discovery y lotes horarios según `docs/PREMATCH_STEPS_RUNBOOK.md`. Para analizar un evento por separado dentro de un lote, lee primero el `revision_final_codex_argon.md` indicado en `instruccion_agente_local.txt` y el `cierre.json` de ese mismo refresco. Limita el análisis al fixture y Event ID solicitados, y usa las rutas verificadas del cierre.
+- El flujo operativo usa discovery y lotes horarios según `docs/PREMATCH_STEPS_RUNBOOK.md`. Para cerrar un evento lee `refresh/<REFRESH_ID>/<FIXTURE_ID>/instruccion_cierre_llm_<FIXTURE_ID>.txt` (o `instruccion_agente_local.txt` en paquetes anteriores) y su `revision_final_codex_argon.md`. Formula primero el análisis independiente con las fuentes del evento. Después contrasta Shadow y la entrada del evento en el `cierre.json` común. Usa solo el Fixture ID, Event ID y rutas verificadas del encargo.
 - **Nunca** uses `config/constants.py` para elegir o sustituir el encuentro cuando existe un Event ID explícito. No busques ni incorpores archivos de otros partidos, aunque aparezcan citados como antecedentes o en directorios compartidos.
 - Usa únicamente los **snapshots locales** ya generados: Bwin, contexto API-Football TXT/JSON, reporte cualitativo fusionado (Grok/Gemini, u otra fuente), validación y resultados del motor. La auditoría de fusión, si existe, puede servir para revisar contradicciones, pero no reemplaza al informe canónico.
 - **Sin navegación web ni búsquedas externas.** No ejecutes de nuevo scraper, API-Football, `prematch_multi.py`, generador, validador ni motor. Se permiten lecturas y cálculos **locales, selectivos, de solo lectura**, sin introducir datos de terceros.
@@ -57,7 +57,8 @@
 
 ## 6. Archivo final y modo de ejecución
 
-- Escribe el análisis **exclusivamente** en el `resultado_final.md` indicado en el encargo del refresco del lote (o en una versión con sufijo si existe y no debe sobrescribirse). En una auditoría usa un archivo nuevo y conserva el corte temporal original.
+- Escribe el análisis **exclusivamente** en el `resultado_cierre_llm.md` individual (o `resultado_final.md` en paquetes anteriores), tal como indique el encargo. Si ya existe, usa un sufijo. En una auditoría usa un archivo nuevo y conserva el corte temporal original.
+- Presenta la tesis futbolística, la evidencia financiera y el estado operativo por candidato. Si el único impedimento es técnico, registra la causa exacta y deja la decisión financiera sin evaluar. La salida de Shadow sirve como contraste, con distinción explícita entre mercado evaluado y mercado fuera de evaluación. La ausencia de un informe externo solo reduce cobertura cualitativa.
 - Estructura: `DECISIÓN` al inicio; ficha e integridad/temporalidad; XI y entrenadores; riesgo estructural; hipótesis tácticas y contraescenarios; inventario/resumen de familias Bwin y motivos; análisis de hasta tres finalistas; una selección principal o NO BET; limitaciones, cotejo de cuota y doble conclusión (mejor hipótesis vs valor financiero demostrado/no demostrado).
 - Si no se pudieron verificar los 22 titulares, no afirmes que se examinaron 22. Si un archivo requerido falta, documenta exactamente cuál y el impacto; no reemplaces sus datos con internet o con otros eventos.
 - Realiza todo **en una única sesión de Codex** con lectura selectiva y cálculos locales de solo lectura. Evita reejecuciones redundantes, resúmenes enormes de cuotas y conclusiones no verificables.

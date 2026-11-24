@@ -66,7 +66,7 @@ Si la cola contiene un vínculo pendiente y se conoce el Event ID observado, se 
 ### Pasada comercial por hora y cierre de prefinalistas
 
 Usa el mismo `RUN` con vínculos Bwin verificados e histórico. `--hour 14:00`
-abarca los kickoffs de 14:00 a 14:59 en Europe/Madrid, dentro de la ventana
+abarca los kickoffs de 14:00 a 15:59 en Europe/Madrid, dentro de la ventana
 original. La fecha se obtiene del RUN. Si la hora se repite en una ventana de
 varios días, indica `--date YYYY-MM-DD`. Si un fixture verificado aún carece de
 histórico, la pasada lo deja identificado. Añade ese histórico con
@@ -76,12 +76,30 @@ histórico, la pasada lo deja identificado. Añade ese histórico con
 "$PY" prematch_steps.py hour-batch-prepare --eval-dir "$RUN" --hour 14:00 --confirm-external
 ```
 
+`--hour` crea un tramo de dos horas civiles hasta las 22:59. Los lotes que
+empiezan a las 23:00, 00:00, 01:00 o 02:00 cubren el resto de la ventana
+original hasta las 03:00, con límite final exclusivo. Esto permite iniciar una
+sola pasada nocturna a las 23:00 y capturar todos los partidos restantes.
+
+- `--hour 14:00`: 14:00–15:59.
+- `--hour 16:00`: 16:00–17:59.
+- `--hour 21:00`: 21:00–22:59.
+- `--hour 22:00`: 22:00–23:59.
+- `--hour 23:00`: 23:00–02:59.
+- `--hour 00:00`: 00:00–02:59 del día civil siguiente.
+- `--hour 01:00`: 01:00–02:59.
+- `--hour 02:00`: 02:00–02:59.
+
+El paquete registra `hour_madrid` y `batch_end_madrid`. Al cruzar medianoche,
+la fecha se resuelve desde la ventana del RUN; usa `--date` únicamente si una
+ventana excepcional hace ambigua la misma hora civil.
+
 Esta acción toma una captura por fixture con margen suficiente, conserva los
 manifiestos y continúa si un evento falla. Una nueva ejecución reutiliza las
 capturas válidas y vuelve a intentar los pendientes. `--confirm-external`
 autoriza la adquisición Bwin. Si se omite, la pasada usa las capturas existentes.
 El directorio `hour_batches/<fecha_hora>/packets/<id>/` guarda el inventario de
-cada evento, el cruce comercial y el Markdown `encargo_codex_argon.md`. El
+cada evento, el cruce comercial y el Markdown `encargo_analista_codex_argon.md`. El
 ranking estadístico de fase 1 sigue disponible por separado.
 
 Si el lote incluye capturas anteriores al cambio de navegación de Bwin, usa
@@ -96,7 +114,7 @@ Para Gemini en web, añade `--export-gemini`. Abre `encargo_gemini.md` y
 adjunta `mercados_gemini.json`. Este inventario contiene todas las selecciones
 capturadas y la evidencia resumida del lote. Guarda el bloque JSON de
 prefinalistas que devuelva Gemini en `prefinalistas_json`. En un agente con
-acceso al proyecto basta el `instruccion_agente_local.txt`.
+acceso al proyecto basta `instruccion_analista_cuotas.txt`.
 
 Para volver a capturar y preparar solo un partido, ejecuta primero
 `odds-capture --eval-dir "$RUN" --fixture-id "$FID" --confirm-external` y
@@ -139,7 +157,8 @@ auditoría posterior.
 
 Abre Codex, Argon o Grok CLI en la raíz del repositorio con acceso de lectura
 al RUN y permiso de escritura en la carpeta del lote. Pásale el contenido de
-`instruccion_agente_local.txt`, guardado junto a `encargo_codex_argon.md`.
+`instruccion_analista_cuotas.txt`, guardado junto a `encargo_analista_codex_argon.md`.
+Los nombres anteriores del encargo y del TXT se conservan como alias.
 La misma instrucción queda al comienzo del encargo y en la última línea de
 la salida del comando. El agente abre el
 Markdown en disco, lee `lote.json` y consulta directamente los TXT de cuotas,
@@ -153,13 +172,13 @@ como diagnóstico exploratorio.
 ### Investigación cualitativa dinámica por finalista
 
 Después de recibir `prefinalistas.json`, la investigación externa es opcional.
-Para generar un encargo Gemini DeepSearch por cada partido finalista ejecuta:
+Para generar un encargo breve de Gemini para un partido finalista ejecuta:
 
 ```bash
 PREFINALISTAS="/ruta/completa/al/paquete/prefinalistas.json"
 
 "$PY" prematch_steps.py hour-batch-research --eval-dir "$RUN" --hour 14:00 \
-  --shortlist "$PREFINALISTAS" --provider gemini --research-mode deep
+  --shortlist "$PREFINALISTAS" --fixture-id "$FID" --provider gemini --research-mode focused
 ```
 
 La variable debe contener la ruta completa del archivo JSON. Si está vacía,
@@ -169,24 +188,32 @@ el shell la convierte en el directorio actual y el CLI lo rechaza con
 Para limitarla a un partido añade `--fixture-id "$FID"`. El comando crea por
 evento:
 
-- `events/<FID>/research/requests/encargo_gemini_<EID>_deep.md`
-- `events/<FID>/research/requests/insumos_gemini_<EID>_deep.json`
-- `events/<FID>/research/responses/gemini_<EID>_deep.md`
+- `events/<FID>/research/requests/encargo_gemini_<EID>_focused.md`
+- `events/<FID>/research/requests/insumos_gemini_<EID>_focused.json`
+- `events/<FID>/research/responses/gemini_<EID>_focused.md`
 
 El prompt incorpora identidad, kickoff, mercado, cuota capturada, tesis,
 condiciones de XI, contradicciones, política de liquidación y preguntas
 específicas. Adjunta el prompt y el JSON en Gemini. Copia su respuesta al
 archivo de `responses`. Una reejecución actualiza el encargo y conserva la
-respuesta existente. Para una comprobación breve posterior usa
-`--research-mode update`. Esta crea `gemini_<EID>_update.md` y conserva el
-DeepSearch anterior. El cierre detecta automáticamente las respuestas
-completa. El marcador pendiente y los archivos vacíos se ignoran.
+respuesta existente. `focused` es el modo predeterminado. Pide una consulta
+normal o búsqueda breve, hasta cuatro fuentes y solo preguntas que cambien
+una tesis. `deep` conserva la búsqueda amplia opcional. `update` se concentra
+en novedades desde el último informe aceptado o, si falta, en las últimas
+24 horas. La interfaz del proveedor controla la duración. El CLI permite
+generar encargos antes del kickoff sin esperar a un informe externo.
+
+El lote prepara receptáculos vacíos o marcados para Gemini, Grok y Perplexity.
+El cierre detecta sus respuestas e ignora los receptáculos pendientes y archivos
+vacíos. Los informes deben traer `fixture_id`, `event_id`, fecha de generación
+y un corte prepartido compatible. `auditoria_informes.json` registra aceptación,
+rechazo, SHA-256, fechas declaradas, contradicciones y fuentes repetidas.
 
 Si no hay tiempo para Gemini, omite `hour-batch-research`. La ruta rápida
 continúa con Python, Shadow y la revisión final local. La ausencia de Gemini
 reduce cobertura cualitativa y no decide por sí sola `NO BET`.
 
-La primera ejecución de Codex o Argon sobre `encargo_codex_argon.md` ya debe
+La primera ejecución de Codex o Argon sobre `encargo_analista_codex_argon.md` ya debe
 clasificar cada prefinalista mediante `requires_confirmed_xi`. No hace falta
 una segunda ejecución intermedia para crear una lista temprana. Los futuros
 `prefinalistas.json` sirven para ambas modalidades. Las listas antiguas sin
@@ -206,7 +233,7 @@ solo los fixtures de esa lista. `xi-confirmado` es la modalidad predeterminada.
 Dentro de T−75 consulta los XI por fixture a
 API-Football cuando falta una alineación completa. Un XI estructurado del
 proveedor conserva su procedencia. Si ambos XI están completos, busca una
-captura posterior al registro de alineaciones y a la primera captura. La
+captura reciente posterior a la primera. La
 comparación muestra el cambio de cuota del mismo contrato. Si desaparece la
 selección original, lista las líneas vecinas como alternativas por revisar.
 `--confirm-external` autoriza tanto la consulta API como una nueva captura Bwin
@@ -229,10 +256,10 @@ como `LINEUPS_EXTERNAL_CONFIRMED` y evita consultar API-Football. La hora de
 recepción no demuestra la hora de publicación del proveedor; los nombres sin
 ID quedan como transcripción visual. Una captura Bwin reciente del mismo
 contrato puede preceder a los XI, con vigencia máxima de 20 minutos.
-La captura inicial del lote exige T−45. La captura de cierre admite T−30,
-también después de recibir XI completos, y debe terminar con tiempo para
-ejecutar Shadow antes de T−30. Su precio caduca a los 20 minutos. Si el
-proceso cruza T−30, se registra un cierre operativo sin pick ejecutable.
+La captura inicial del lote exige T−45. En `sin-xi`, la captura de cierre y
+Shadow requieren T−30. En `xi-confirmado` el margen es T−5. Al agotarse el
+margen se registra un cierre operativo. Una captura anterior sigue disponible
+para análisis y auditoría, con precio pendiente de verificación.
 
 Para revisar el mismo paquete sin esperar los XI, ejecuta:
 
@@ -252,13 +279,40 @@ primera y también al XI si ya hay uno completo registrado en `sin-xi`. En
 su modalidad en `cierre.json` y genera un encargo final independiente. Puedes
 ejecutar `xi-confirmado` después con el mismo `PREFINALISTAS`.
 
-Cuando `sin-xi` devuelve `LISTO_REVISION_FINAL`, pasa al agente la nueva
-`instruccion_agente_local`. Esa segunda ejecución local realiza el razonamiento
-final `BET / NO BET` temprano. Cuando `xi-confirmado` alcanza el mismo estado,
-su nueva instrucción realiza el cierre final con alineaciones. Cada candidato
-puede seguir una modalidad distinta. Una decisión temprana ya ejecutada no se
-duplica como apuesta nueva al repetir el cierre con XI. La segunda ejecución
-sirve para candidatos pendientes o para auditar el cambio de tesis y precio.
+Si el paquete contiene varios partidos y no sabes cuáles tienen ya los dos XI,
+usa la modalidad automática:
+
+```bash
+"$PY" prematch_steps.py hour-batch-refresh --eval-dir "$RUN" --hour 22:00 \
+  --shortlist "$PREFINALISTAS" --fixture-id 1492466 --fixture-id 1639807 \
+  --lineup-mode auto --confirm-external
+```
+
+`auto` consulta cada fixture de forma independiente dentro de la ventana de XI.
+Cuando acredita 11+11 aplica `xi-confirmado` y admite sus candidatos; cuando no,
+aplica `sin-xi` y conserva únicamente candidatos colectivos con
+`requires_confirmed_xi: false`. La terminal imprime `modo=xi-confirmado` o
+`modo=sin-xi` para cada fixture y `estado.json` registra
+`requested_lineup_mode` y `effective_lineup_mode`. Un XI ausente o un fallo
+aislado de su consulta no bloquea los otros partidos del comando.
+
+Cuando `sin-xi` devuelve `LISTO_REVISION_FINAL`, pasa al agente el contenido
+de `instruccion_cierre_llm_<FID>.txt` del fixture concreto. El refresco indica
+las siguientes rutas por partido:
+
+- `refresh/<REFRESH_ID>/<FID>/revision_final_codex_argon.md`
+- `refresh/<REFRESH_ID>/<FID>/instruccion_cierre_llm_<FID>.txt`
+- `refresh/<REFRESH_ID>/<FID>/resultado_cierre_llm.md` (destino del informe que escribe el agente)
+
+La instrucción limita al agente al Fixture ID y Event ID del directorio y
+detecta solamente los informes cualitativos de ese evento. Así, un refresco
+con varios partidos no mezcla Gemini, cuotas, XI ni decisiones. La ejecución
+local realiza el razonamiento final `BET / NO BET` temprano. Cuando
+`xi-confirmado` alcanza el mismo estado, el nuevo directorio de refresco crea
+otro encargo individual para el cierre con alineaciones. Una decisión temprana
+ya ejecutada no se duplica como apuesta nueva al repetir el cierre con XI. La
+segunda ejecución sirve para candidatos pendientes o para auditar el cambio de
+tesis y precio.
 
 - **T−45** es el margen mínimo para iniciar una captura desde el lote.
 - **T−30** es el margen del modelo para `sin-xi` y para `model` independiente.
@@ -267,16 +321,23 @@ sirve para candidatos pendientes o para auditar el cambio de tesis y precio.
 - Si un XI o el precio siguen pendientes, consulta el estado impreso y repite
   el refresco mientras quede margen. Si el tiempo se agota, el cierre registra
   el bloqueo operativo por separado de la decisión del modelo.
-- Cuando aparezca `LISTO_REVISION_FINAL`, pasa al agente el nuevo
-  `instruccion_agente_local.txt` de la carpeta de refresco. Lee desde el proyecto el cierre y las fuentes
-  del lote, y escribe `resultado_final.md` en la ruta impresa.
+- Si aparece un pendiente técnico, el encargo permite registrar la causa y
+  revisar la tesis con la evidencia disponible. La falta de una captura,
+  liquidación o modelo aplicable no constituye por sí sola un `NO BET`.
 
 ## 4. Entrega al analista final
 
-En `LISTO_REVISION_FINAL`, usa el `instruccion_agente_local.txt` que generó
-ese refresco. El agente lee el paquete y escribe `resultado_final.md` en la
-ruta indicada por el encargo. Si un informe cualitativo termina después del
-refresco, añade su ruta al encargo antes de pasárselo al agente.
+En `LISTO_REVISION_FINAL`, usa `instruccion_cierre_llm_<FID>.txt`, anunciado como
+`archivo_instruccion_cierre_llm` en la terminal, en
+ese refresco **dentro de la carpeta del fixture**. El agente lee el paquete y
+escribe `resultado_cierre_llm.md` en la ruta indicada. `instruccion_agente_local.txt`
+queda como alias en los nuevos paquetes y los cierres antiguos se conservan.
+El agente formula su tesis y verifica el contrato, muestra y precio antes de
+leer Shadow. Cada candidato indica si Shadow lo evaluó y, si no, el motivo.
+Si un informe
+cualitativo termina después de generar el refresco, repite el mismo comando
+`hour-batch-refresh` para crear un encargo nuevo que lo detecte automáticamente;
+no edites a mano el prompt anterior.
 
 ## 5. Márgenes efectivos, cierre y auditoría
 

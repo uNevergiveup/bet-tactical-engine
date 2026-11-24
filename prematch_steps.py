@@ -2042,7 +2042,11 @@ def cmd_model(args: argparse.Namespace) -> int:
 
     odds = _resolve_odds_snapshot(eval_dir, target_rec, now_utc, explicit=args.odds_file)
     odds_path = Path(odds["path"]) if odds else None
-    odds_map = parse_bwin_odds_txt(odds_path, home_name=target_rec["home"], away_name=target_rec["away"], gender=target_rec.get("gender")) if odds_path else {}
+    odds_map = getattr(args, "verified_catalog_odds", None)
+    uses_verified_catalog = odds_map is not None
+    if odds_map is None:
+        odds_map = parse_bwin_odds_txt(odds_path, home_name=target_rec["home"],
+                                     away_name=target_rec["away"], gender=target_rec.get("gender"))
     lineup_path = root / "outputs/matches" / eid / "market_phase2" / f"lineup_refresh_{eid}.json"
     lineup_refresh = _load_current_lineup_refresh(lineup_path, eval_dir, target_rec, now_utc)
     lineup_kwargs = {}
@@ -2070,6 +2074,7 @@ def cmd_model(args: argparse.Namespace) -> int:
     report_dict["execution"] = {
         "mode": "REPLAY" if args.asof else "PREMATCH", "evaluated_at_utc": now_utc.isoformat(),
         "eval_dir": str(eval_dir), "fixture_id": fid, "event_id": eid, "snapshot": odds,
+        "odds_input": "VERIFIED_BATCH_CATALOG" if uses_verified_catalog else "BWIN_SNAPSHOT_PARSER",
         "price_status": "PRECIO_PENDIENTE_DE_VERIFICACION",
         "operational_status": "REPLAY_NOT_EXECUTABLE" if args.asof else "MODEL_COMPLETED",
     }
@@ -2085,7 +2090,7 @@ def cmd_model(args: argparse.Namespace) -> int:
         f"- Fixture: `{fid}` ({target_rec['home']} – {target_rec['away']})",
         f"- Ejecución: `{report_dict['execution']['operational_status']}` | margen mínimo: {args.min_lead} min.",
         f"- Snapshot: `{odds_path or 'sin captura'}` · precio `PRECIO_PENDIENTE_DE_VERIFICACION`.",
-        f"- Decisión: **{report.decision}** (`{report.decision_classification}`)",
+        f"- Diagnóstico Shadow: **{report.decision}** (`{report.decision_classification}`)",
         f"- Estado Shadow: `{report.status}` | Versión modelo: `{report.model_version}`",
         f"- Razones NO BET: {list(report.no_bet_reasons)}",
         f"- Desglose formal: `{report.formal_decision_breakdown_counts}`",
@@ -2107,7 +2112,8 @@ def cmd_model(args: argparse.Namespace) -> int:
         "model_md": str(model_md),
     }
     step_json, step_md = _write_step_artifacts(eval_dir, "model", payload, md_lines)
-    _print_step_summary("model", report.status, report.decision_classification, counts,
+    console_counts = {"market_comparisons": counts["market_comparisons"], "shadow_decision": report.decision}
+    _print_step_summary("model", report.status, report.decision_classification, console_counts,
                         {"model_json": model_json, "model_md": model_md, "step_json": step_json, "snapshot": odds_path})
     return 0
 
@@ -2206,15 +2212,16 @@ def build_parser() -> argparse.ArgumentParser:
         batch = sub.add_parser(command, help=help_text)
         batch.add_argument("--root", type=Path, default=Path(__file__).resolve().parent)
         batch.add_argument("--eval-dir", required=True, type=Path, help="Corrida existente")
-        batch.add_argument("--hour", required=True, type=df.parse_hour, help="Hora de inicio del lote Madrid en formato HH:00")
+        batch.add_argument("--hour", required=True, type=df.parse_hour,
+                           help="Inicio Madrid: dos horas; desde 23:00 cubre el resto de la ventana hasta su cierre")
         batch.add_argument("--date", help="Fecha Madrid del lote si hace falta desambiguar")
         batch.add_argument("--confirm-external", action="store_true", help="Autorizar capturas Bwin y, en el cierre, consulta de XI")
         if command == "hour-batch-refresh":
             batch.add_argument("--shortlist", required=True, type=Path, help="JSON de prefinalistas devuelto por Codex o Argon")
             batch.add_argument("--manual-lineups-json", type=Path,
                                help="XI confirmados externos del fixture, con fuente, capturas y hora verificables")
-            batch.add_argument("--lineup-mode", choices=("sin-xi", "xi-confirmado"), default="xi-confirmado",
-                               help="Cerrar candidatos independientes del XI o exigir ambas alineaciones completas")
+            batch.add_argument("--lineup-mode", choices=("sin-xi", "xi-confirmado", "auto"), default="xi-confirmado",
+                               help="sin-xi ignora XI; xi-confirmado los exige; auto consulta cada fixture y usa la vía disponible")
             batch.add_argument("--fixture-id", type=int, action="append", default=[],
                                help="Cerrar solo estos fixtures de la lista; opción repetible")
         else:
@@ -2229,11 +2236,13 @@ def build_parser() -> argparse.ArgumentParser:
     batch_research = sub.add_parser("hour-batch-research", help="Preparar investigación cualitativa por finalista del lote")
     batch_research.add_argument("--root", type=Path, default=Path(__file__).resolve().parent)
     batch_research.add_argument("--eval-dir", required=True, type=Path, help="Corrida existente")
-    batch_research.add_argument("--hour", required=True, type=df.parse_hour, help="Hora de inicio del lote Madrid en formato HH:00")
+    batch_research.add_argument("--hour", required=True, type=df.parse_hour,
+                                help="Hora inicial del paquete en Europe/Madrid")
     batch_research.add_argument("--date", help="Fecha Madrid del lote si hace falta desambiguar")
     batch_research.add_argument("--shortlist", required=True, type=Path, help="JSON de prefinalistas devuelto por Codex o Argon")
     batch_research.add_argument("--provider", choices=("gemini", "grok", "perplexity"), default="gemini")
-    batch_research.add_argument("--research-mode", choices=("deep", "update"), default="deep")
+    batch_research.add_argument("--research-mode", choices=("focused", "deep", "update"), default="focused",
+                                help="focused: preguntas prioritarias; deep: investigación amplia; update: novedades")
     batch_research.add_argument("--fixture-id", type=int, action="append", default=[], help="Limitar a fixtures concretos; se puede repetir")
     batch_research.set_defaults(func=cmd_hour_batch, start=None, end=None, window=None, asof=None,
                                 confirm_external=False, refresh_todo=False)
@@ -2687,6 +2696,41 @@ def cmd_fixture_update(args):
     return 0
 
 
+def _batch_audit_files(eval_dir, fid, eid, kickoff):
+    references, recorded = {}, {}
+    for lot_path in sorted(eval_dir.glob("hour_batches/*/packets/*/lote.json")):
+        lot = _read_json(lot_path)
+        if lot.get("eval_dir") != str(eval_dir) or not any(
+            row.get("fixture_id") == fid and str(row.get("bwin_event_id")) == str(eid) for row in lot.get("fixtures", [])
+        ):
+            continue
+        packet = lot_path.parent
+        event_dir = packet / "events" / str(fid)
+        paths = [lot_path, event_dir / "catalogo.json", packet / "prefinalistas.json"]
+        paths.extend(sorted((event_dir / "research" / "responses").glob("*.md")))
+        for close_path in sorted(packet.glob("refresh/*/cierre.json")):
+            close = _read_json(close_path)
+            if close.get("packet_id") != lot.get("packet_id") or not any(
+                row.get("fixture_id") == fid and str(row.get("bwin_event_id")) == str(eid) for row in close.get("fixtures", [])
+            ):
+                continue
+            event = close_path.parent / str(fid)
+            named = event / f"instruccion_cierre_llm_{fid}.txt"
+            paths.extend([close_path, event / "estado.json", event / "revision_final_codex_argon.md",
+                          named if named.is_file() else event / "instruccion_agente_local.txt",
+                          event / ("resultado_cierre_llm.md" if named.is_file() else "resultado_final.md")])
+            paths.extend(path for path in (event / "catalogo_cierre.json", event / "auditoria_informes.json",
+                                          event / "model" / f"model_report_{eid}.json") if path.is_file())
+            shortlist = Path(close["shortlist_path"]) if close.get("shortlist_path") else packet / "prefinalistas.json"
+            if shortlist.is_relative_to(eval_dir):
+                paths.append(shortlist)
+                if close.get("evaluated_at_utc") and _now_utc(close["evaluated_at_utc"]) < kickoff:
+                    recorded[(shortlist, close.get("shortlist_sha256"))] = str(close_path)
+        for path in paths:
+            references[str(path.relative_to(eval_dir))] = path
+    return references, recorded
+
+
 def cmd_audit_event(args):
     from bet_engine.analytics.early_tactical_scout import RESEARCH_PLACEHOLDER, RESEARCH_PROVIDERS
 
@@ -2743,6 +2787,8 @@ def cmd_audit_event(args):
                     references["diagnóstico de captura"] = Path(odds["diagnostics_path"])
     else:
         alerts.append(f"BWIN_IDENTITY_{target['identity_state']}:{target['identity_reason']}")
+    batch_files, recorded_shortlists = _batch_audit_files(eval_dir, fid, eid, kickoff)
+    references.update(batch_files)
     for path in sorted((capture_dir / "manifests").glob("capture_manifest_*.json")):
         references[f"manifiesto anterior {path.stem}"] = path
     for folder, suffixes in (
@@ -2781,7 +2827,11 @@ def cmd_audit_event(args):
         elif digest and label in RESEARCH_PROVIDERS and not path.read_text(encoding="utf-8-sig", errors="replace").replace(RESEARCH_PLACEHOLDER, "").strip():
             state = "PENDIENTE"
         entry = {"label": label, "path": str(path), "state": state, "sha256": digest}
-        if digest and (path.parent.name == "analysis" or path.name.startswith(("market_comparison", "model_report"))):
+        if digest and (record := recorded_shortlists.get((path, digest))):
+            entry.update(candidate_provenance="PREFINALISTA_REGISTRADO_PREKICKOFF", inventory_record=record)
+        elif digest and path.name.startswith("prefinalistas"):
+            entry["candidate_provenance"] = "DOCUMENTO_EXISTENTE_PREKICKOFF_NO_ACREDITADO"
+        elif digest and (path.parent.name == "analysis" or path.name.startswith(("market_comparison", "model_report", "resultado_final", "resultado_cierre_llm"))):
             metadata = _read_json(path) if path.suffix == ".json" else {}
             execution = metadata.get("execution") or {}
             provenance = pre_records.get((str(path), digest))

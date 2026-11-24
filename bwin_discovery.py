@@ -166,6 +166,12 @@ SENIOR_COMPETITION_IDENTITIES = {
     5: "uefa nations league",
     143: "copa del rey",
 }
+# Equivalencias nominales observadas en páginas Bwin, siempre acotadas por
+# league_id y país. No sustituyen las comprobaciones de Event ID, hora, orden
+# local/visitante ni categoría.
+VERIFIED_COMPETITION_LABEL_ALIASES = {
+    (344, "bolivia"): ("division profesional", "división profesional"),
+}
 
 
 def verified_candidate_aliases() -> tuple[tuple[str, tuple[str, ...]], ...]:
@@ -572,6 +578,10 @@ def competition_similarity(competition: str, evidence: str, *, league_id=None,
     expected, observed = norm(competition), norm(evidence)
     if not expected or not observed:
         return 0.0
+    aliases = VERIFIED_COMPETITION_LABEL_ALIASES.get((league_id, norm(country)))
+    if aliases and any(re.search(rf'(?<![a-z0-9]){re.escape(norm(alias))}(?![a-z0-9])', observed)
+                       for alias in aliases):
+        return 1.0
     # API 10 identifies international friendlies, not club friendlies (667).
     # This is competition evidence only; it supplies no gender/age evidence.
     if league_id==10 and norm(country) in {'world','international','mundo'} and expected=='friendlies':

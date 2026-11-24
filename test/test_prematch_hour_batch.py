@@ -93,6 +93,48 @@ class HourBatchTests(TestCase):
         path = next(self.folder.glob("packets/*/lote.json"))
         return path.parent, steps._read_json(path)
 
+    def test_interval_prices_stay_out_of_regulation_and_conflicts_are_not_overwritten(self):
+        from bet_engine.orchestration.shadow_pipeline import parse_bwin_odds_txt
+
+        path = self.root / "odds_brentford.txt"
+        path.write_text(
+            "Event ID: 7912808\n"
+            "MERCADO: Brentford - Total de goles | Tiempo reglamentario\nMás de 0,5 : 1.22\n"
+            "MERCADO: Everton - Total de goles | Tiempo reglamentario\nMás de 0,5 : 1.35\n"
+            "MERCADO: Brentford - Total de goles entre el 15:01 y el 30:00\nMás de 0,5 : 4.60\n"
+            "MERCADO: Everton - Total de goles entre el 00:00 y el 15:00\nMás de 0,5 : 5.75\n"
+            "MERCADO: Brentford - Total de goles | 1ª parte\nMás de 0,5 : 2.05\n"
+            "MERCADO: Brentford - Total de córners | 2ª parte\nMás de 4,5 : 4.20\n"
+            "MERCADO: Total de goles | Tiempo reglamentario\nMás de 2,5 : 2.03\nMás de 2,5 : 2.07\n",
+            encoding="utf-8",
+        )
+        names = {"home_name": "Brentford", "away_name": "Everton"}
+        expected = {"home_over_0_5_goals": 1.22, "away_over_0_5_goals": 1.35, "h1_home_over_0_5_goals": 2.05}
+        self.assertEqual(parse_bwin_odds_txt(path, **names), expected)
+        catalog = batch.extract_bwin_catalog(path, **names)
+        prices, conflicts = batch._verified_catalog_prices(catalog["entries"])
+        self.assertEqual(prices, {**expected, "h2_home_over_4_5_corners": 4.2})
+        self.assertFalse(conflicts)
+        intervals = [row for row in catalog["entries"] if "entre el" in row["market_header_literal"]]
+        self.assertEqual(len(intervals), 2)
+        self.assertTrue(all(row["contract_id"] is None for row in intervals))
+
+    def test_research_defaults_to_focused_and_keeps_previous_response_for_update(self):
+        directory, shortlist = self.initial_shortlist()
+        research = directory / "events" / str(self.fid) / "research"
+        self.assertIn("gemini focused", self.cli("hour-batch-research", "--shortlist", str(shortlist)))
+        prompt = research / "requests" / f"encargo_gemini_{self.eid}_focused.md"
+        response = research / "responses" / f"gemini_{self.eid}_focused.md"
+        self.assertIn("hasta 4 fuentes", prompt.read_text())
+        body = (f"fixture_id: {self.fid}\nevent_id: {self.eid}\ngenerated_at_utc: {self.now.isoformat()}\n"
+                "\nHallazgo documentado del partido.")
+        response.write_text(body, encoding="utf-8")
+        self.cli("hour-batch-research", "--shortlist", str(shortlist))
+        self.assertEqual(response.read_text(), body)
+        out = self.cli("hour-batch-research", "--shortlist", str(shortlist), "--research-mode", "update")
+        self.assertIn(f"research_previous_report: {response}", out)
+        self.assertIn(f"gemini_{self.eid}_update.md", out)
+
     def test_players_join_exact_ft_market_and_export_exploratory_sample(self):
         pre_path = self.run / "prospective_trial/enriched/preselection.json"
         pre = steps._read_json(pre_path)
@@ -162,6 +204,12 @@ class HourBatchTests(TestCase):
             out = self.cli("hour-batch-refresh", "--shortlist", str(shortlist), "--confirm-external")
             self.assertIn("LIQUIDACION_PENDIENTE", out)
             model.assert_not_called()
+        close = next(payload for path in directory.glob("refresh/*/cierre.json")
+                     if (payload := steps._read_json(path))["fixtures"][0]["status"] == "LIQUIDACION_PENDIENTE")
+        row = close["fixtures"][0]
+        self.assertNotIn("model_decision", row)
+        self.assertEqual(row["comparisons"][0]["shadow_evaluation"], {
+            "status": "NOT_EVALUATED", "reason": "SETTLEMENT_UNVERIFIED"})
         closing = steps._read_json(next(directory.glob("refresh/*/cierre.json")))["fixtures"][0]
         [comparison] = closing["comparisons"]
         self.assertEqual(comparison["player_lineup_context"], lineup["api_roster"][1])
@@ -195,9 +243,9 @@ class HourBatchTests(TestCase):
             self.cli("hour-batch-prepare", "--confirm-external")
             first_path, first = self.packet()
             self.assertEqual({r["fixture_id"]: r["status"] for r in first["fixtures"]},
-                             {self.fid: "ERROR_REINTENTABLE", 202: "REVISABLE"})
+                             {self.fid: "ERROR_REINTENTABLE", 202: "REVISABLE", 303: "REVISABLE"})
             final_stdout = self.cli("hour-batch-prepare", "--confirm-external")
-        self.assertEqual(seen, [self.fid, 202, self.fid])
+        self.assertEqual(seen, [self.fid, 202, 303, self.fid])
         self.assertEqual(self.rank_path.read_bytes(), rank)
         second = next(p for p in self.folder.glob("packets/*/lote.json") if p.parent != first_path)
         row = next(r for r in steps._read_json(second)["fixtures"] if r["fixture_id"] == self.fid)
@@ -206,7 +254,7 @@ class HourBatchTests(TestCase):
         self.assertEqual(price["odd"], "2.1")
         self.assertTrue(price["signals"])
         self.assertIsNone(price["accredited_p_model"])
-        prompt = second.parent / "encargo_codex_argon.md"
+        prompt = second.parent / "encargo_analista_codex_argon.md"
         instructions = prompt.read_text()
         self.assertIn("mejor explicación", instructions)
         for path in (second, row["catalog"], row["snapshot"]["path"],
@@ -214,10 +262,11 @@ class HourBatchTests(TestCase):
             self.assertIn(str(path), instructions)
         self.assertIn(f'Lee "{prompt}"', final_stdout)
         self.assertIn(f'guarda el resultado directamente en "{second.parent / "prefinalistas.json"}"', final_stdout)
-        instruction_file = prompt.with_name("instruccion_agente_local.txt")
+        instruction_file = prompt.with_name("instruccion_analista_cuotas.txt")
         instruction = instruction_file.read_text().strip()
-        self.assertIn(f"archivo_instruccion_agente_local: {instruction_file}", final_stdout)
-        self.assertIn(f"instruccion_agente_local: {instruction}", final_stdout)
+        self.assertEqual(instruction_file.read_bytes(), prompt.with_name("instruccion_agente_local.txt").read_bytes())
+        self.assertIn(f"archivo_instruccion_analista_cuotas: {instruction_file}", final_stdout)
+        self.assertIn(f"instruccion_analista_cuotas: {instruction}", final_stdout)
         self.assertIn(f"## Instrucción para enviar al agente local\n\n```text\n{instruction}", instructions)
 
     def test_refresh_waits_for_lineups_then_compares_the_same_selection(self):
@@ -244,8 +293,8 @@ class HourBatchTests(TestCase):
                 patch.object(batch, "_capture", side_effect=lambda *a, **kw: refresh_capture(*a)) as capture:
             out = self.cli("hour-batch-refresh", "--shortlist", str(shortlist), "--confirm-external")
             self.assertIn("LISTO_REVISION_FINAL", out)
-            self.assertIn("instruccion_agente_local", out)
-            self.assertIn("resultado_final.md", out)
+            self.assertIn(f"archivo_instruccion_cierre_llm [{self.fid}]", out)
+            self.assertIn(f"{self.fid}/resultado_cierre_llm.md", out)
             self.cli("hour-batch-refresh", "--shortlist", str(shortlist), "--confirm-external")
             fetch.assert_called_once_with(self.fid)
             capture.assert_called_once()
@@ -255,15 +304,23 @@ class HourBatchTests(TestCase):
         self.assertEqual(ready["comparisons"][0]["price"]["odd_delta"], "-0.15")
         self.assertTrue(Path(ready["model_json"]).is_file())
         self.assertEqual(len(refreshed), 3)
-        final_path = next(p for p in directory.glob("refresh/*/revision_final_codex_argon.md")
+        final_path = next(p for p in directory.glob(f"refresh/*/{self.fid}/revision_final_codex_argon.md")
                           if ready["model_json"] in p.read_text())
         final = final_path.read_text()
         for path in (directory / "lote.json", ready["catalog"], ready["snapshot"]["path"],
                      ready["lineup"]["artifact_path"]):
             self.assertIn(str(path), final)
-        instruction = final_path.with_name("instruccion_agente_local.txt").read_text().strip()
+        instruction = final_path.with_name(f"instruccion_cierre_llm_{self.fid}.txt").read_text().strip()
+        self.assertEqual(instruction, final_path.with_name("instruccion_agente_local.txt").read_text().strip())
         self.assertIn(instruction, final)
-        self.assertIn(str(final_path.with_name("resultado_final.md")), instruction)
+        self.assertIn(str(final_path.with_name("resultado_cierre_llm.md")), instruction)
+        self.assertEqual(ready["comparisons"][0]["shadow_evaluation"]["status"], "EVALUATED")
+        self.assertNotIn(str(ready["model_classification"]), final)
+        self.assertLess(final.index("Evaluación independiente"), final.index(ready["model_json"]))
+        kickoff = steps._now_utc(self.fixtures[0]["kickoff_utc"])
+        files, recorded = steps._batch_audit_files(self.run, self.fid, self.eid, kickoff)
+        self.assertIn(final_path.with_name("resultado_cierre_llm.md"), files.values())
+        self.assertIn((shortlist, steps._sha256_file(shortlist)), recorded)
 
     def test_early_refresh_reuses_packet_and_limits_shadow_to_independent_selection(self):
         extra = "\nMERCADO: Total de goles | Tiempo reglamentario\nMenos de 2,5 : 1.75\n"
@@ -298,10 +355,16 @@ class HourBatchTests(TestCase):
         research_input = steps._read_json(inventory)
         self.assertEqual(research_input["fixture"]["fixture_id"], self.fid)
         self.assertEqual(len(research_input["candidates"]), 2)
-        response.write_text("# Informe Gemini\n\nHallazgo fechado y fuente.\n", encoding="utf-8")
+        report_body = (f"fixture_id: {self.fid}\nevent_id: {self.eid}\n"
+                       f"analysis_cutoff_utc: {self.now.isoformat()}\ngenerated_at_utc: {self.now.isoformat()}\n\n"
+                       "Hallazgo fechado y [fuente](https://club.example/news).\n")
+        response.write_text(report_body, encoding="utf-8")
         self.cli("hour-batch-research", "--shortlist", str(shortlist), "--provider", "gemini",
                  "--research-mode", "deep", "--fixture-id", str(self.fid))
         self.assertIn("Hallazgo fechado", response.read_text())
+        responses = research_dir / "responses"
+        (responses / f"grok_{self.eid}.md").write_text(report_body, encoding="utf-8")
+        (responses / f"perplexity_{self.eid}.md").write_text(" \n", encoding="utf-8")
         with patch.object(batch, "_fetch_lineups") as fetch, \
                 patch.object(batch, "_capture_final", side_effect=lambda _, root, run, target: self.local_capture(target, extra=extra)) as capture:
             self.assertIn("LISTO_REVISION_FINAL", self.cli("hour-batch-refresh", *command))
@@ -321,8 +384,43 @@ class HourBatchTests(TestCase):
         self.assertFalse(any(reason.startswith("LINEUPS_NOT_CONFIRMED") for reason in report["no_bet_reasons"]))
         self.assertEqual({o["selection_key"] for o in report["market_comparisons"] if o["odd"] is not None},
                          {comparison["canonical_key"]})
-        final_prompts = [path.read_text() for path in directory.glob("refresh/*/revision_final_codex_argon.md")]
-        self.assertTrue(any(str(response) in text for text in final_prompts))
+        audit = steps._read_json(Path(row["research"]["audit_path"]))
+        self.assertEqual({(r["source"], r["path"]) for r in audit["accepted"]}, {
+            ("gemini", str(response)), ("grok", str(responses / f"grok_{self.eid}.md"))})
+        self.assertEqual(len(audit["ignored"]), 2)
+        self.assertEqual(audit["repeated_sources"][0]["independent_corroborations"], 1)
+
+    def test_auto_mode_uses_confirmed_xi_when_available(self):
+        directory, shortlist = self.initial_shortlist()
+        self.now = self.now.replace(hour=13)
+        raw = {"response": [
+            {"team": {"id": team}, "formation": "4-3-3", "startXI": [
+                {"player": {"id": offset + i, "name": f"Jugador {offset + i}"}} for i in range(1, 12)
+            ]}
+            for team, offset in ((529, 100), (533, 200))
+        ], "_acquired_at_utc": self.now.isoformat()}
+        with patch.object(batch, "_fetch_lineups", return_value=raw), \
+                patch.object(batch, "_capture", side_effect=lambda _, root, run, target, **kw: self.local_capture(target, price="1.95")):
+            out = self.cli("hour-batch-refresh", "--shortlist", str(shortlist), "--lineup-mode", "auto",
+                           "--confirm-external")
+        self.assertIn("modo=xi-confirmado", out)
+        closing = steps._read_json(next(directory.glob("refresh/*/cierre.json")))
+        self.assertEqual(closing["fixtures"][0]["effective_lineup_mode"], "xi-confirmado")
+
+    def test_auto_mode_falls_back_to_independent_candidates_without_xi(self):
+        directory, shortlist = self.initial_shortlist()
+        doc = steps._read_json(shortlist)
+        doc["candidates"][0]["requires_confirmed_xi"] = False
+        steps._atomic_json(shortlist, doc)
+        self.now = self.now.replace(hour=13)
+        raw = {"response": [], "_acquired_at_utc": self.now.isoformat()}
+        with patch.object(batch, "_fetch_lineups", return_value=raw), \
+                patch.object(batch, "_capture_final", side_effect=lambda _, root, run, target: self.local_capture(target, price="1.95")):
+            out = self.cli("hour-batch-refresh", "--shortlist", str(shortlist), "--lineup-mode", "auto",
+                           "--confirm-external")
+        self.assertIn("modo=sin-xi", out)
+        closing = steps._read_json(next(directory.glob("refresh/*/cierre.json")))
+        self.assertEqual(closing["fixtures"][0]["effective_lineup_mode"], "sin-xi")
 
     def test_refresh_marks_removed_line_and_time_close(self):
         directory, shortlist = self.initial_shortlist()
@@ -345,6 +443,8 @@ class HourBatchTests(TestCase):
         self.now = self.now.replace(minute=56)
         with patch.object(batch, "_capture") as capture, patch.object(batch, "_fetch_lineups") as fetch:
             self.assertIn("CIERRE_OPERATIVO", self.cli("hour-batch-refresh", "--shortlist", str(shortlist), "--confirm-external"))
+            self.assertIn("CIERRE_OPERATIVO", self.cli("hour-batch-refresh", "--shortlist", str(shortlist),
+                                                     "--lineup-mode", "auto", "--confirm-external"))
             capture.assert_not_called()
             fetch.assert_not_called()
 
@@ -367,6 +467,37 @@ class HourBatchTests(TestCase):
         _, _, slot, folder = batch._scope(args, steps, self.now)
         self.assertEqual(slot.isoformat(), "2026-11-23T01:00:00+01:00")
         self.assertEqual(folder.name, "2026-11-23_0100")
+        self.assertEqual(batch._batch_end(self.run, steps, slot).isoformat(), "2026-11-23T03:00:00+01:00")
+
+        args_23 = steps.build_parser().parse_args([
+            "hour-batch-prepare", "--root", str(self.root), "--eval-dir", str(self.run), "--hour", "23:00",
+        ])
+        _, _, slot_23, _ = batch._scope(args_23, steps, self.now)
+        self.assertEqual(batch._batch_end(self.run, steps, slot_23).isoformat(), "2026-11-23T03:00:00+01:00")
+
+        args_00 = steps.build_parser().parse_args([
+            "hour-batch-prepare", "--root", str(self.root), "--eval-dir", str(self.run), "--hour", "00:00",
+        ])
+        _, _, slot_00, _ = batch._scope(args_00, steps, self.now)
+        self.assertEqual(batch._batch_end(self.run, steps, slot_00).isoformat(), "2026-11-23T03:00:00+01:00")
+
+        args_02 = steps.build_parser().parse_args([
+            "hour-batch-prepare", "--root", str(self.root), "--eval-dir", str(self.run), "--hour", "02:00",
+        ])
+        _, _, slot_02, _ = batch._scope(args_02, steps, self.now)
+        self.assertEqual(batch._batch_end(self.run, steps, slot_02).isoformat(), "2026-11-23T03:00:00+01:00")
+
+        args_22 = steps.build_parser().parse_args([
+            "hour-batch-prepare", "--root", str(self.root), "--eval-dir", str(self.run), "--hour", "22:00",
+        ])
+        _, _, slot_22, _ = batch._scope(args_22, steps, self.now)
+        self.assertEqual(batch._batch_end(self.run, steps, slot_22).isoformat(), "2026-11-23T00:00:00+01:00")
+
+        args_21 = steps.build_parser().parse_args([
+            "hour-batch-prepare", "--root", str(self.root), "--eval-dir", str(self.run), "--hour", "21:00",
+        ])
+        _, _, slot_21, _ = batch._scope(args_21, steps, self.now)
+        self.assertEqual(batch._batch_end(self.run, steps, slot_21).isoformat(), "2026-11-22T23:00:00+01:00")
 
     def test_refresh_todo_renews_only_legacy_captures_and_exports_complete_catalog(self):
         initial, _ = self.initial_shortlist()
@@ -383,13 +514,13 @@ class HourBatchTests(TestCase):
 
         with patch.object(batch, "_todo_view", side_effect=view), patch.object(batch, "_capture", side_effect=capture) as scrape:
             out = self.cli("hour-batch-prepare", "--confirm-external", "--refresh-todo", "--export-gemini")
-        self.assertEqual([call.args[-1]["fixture_id"] for call in scrape.call_args_list], [202])
+        self.assertEqual([call.args[-1]["fixture_id"] for call in scrape.call_args_list], [202, 303])
         portable = next(self.folder.glob("packets/*/mercados_gemini.json"))
         self.assertNotEqual(portable.parent, initial)
         self.assertIn("inventario_gemini", out)
         export = steps._read_json(portable)
         rows = {row["fixture_id"]: row for row in export["fixtures"]}
-        self.assertEqual(len(rows), 2)
+        self.assertEqual(len(rows), 3)
         family_column = export["quote_columns"].index("market_family")
         self.assertIn("PENALTY_YES_NO", {q[family_column] for q in rows[202]["quotes"]})
         self.assertNotIn("PENALTY_YES_NO", {q["market_family"] for q in rows[202]["priced_and_linked_options"]})
@@ -456,7 +587,11 @@ class HourBatchTests(TestCase):
             self.assertEqual(capture.call_args.args[0].min_lead, 5)
             model.assert_not_called()
         result = steps._read_json(next(directory.glob("refresh/*/cierre.json")))["fixtures"][0]
-        self.assertEqual(result["reason"], "CAPTURE_TEST_SENTINEL")
+        self.assertEqual(result["reason"], "FINAL_ODDS_CAPTURE_FAILED")
+        self.assertEqual(result["capture_error"], "CAPTURE_TEST_SENTINEL")
+        self.assertEqual(result["price_status"], "SNAPSHOT_ONLY")
+        self.assertTrue(Path(result["catalog"]).is_file())
+        self.assertTrue(result["comparisons"])
         self.assertNotIn("model_decision", result)
 
     def test_confirmed_xi_at_t19_reuses_recent_pre_xi_capture(self):

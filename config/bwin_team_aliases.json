@@ -77,6 +77,9 @@
     {"canonical": "Olympiakos Piraeus", "variants": ["Olympiacos"], "scope": "CLUB", "status": "VERIFIED_REPOSITORY", "evidence": "outputs/discovery/2026-11-22_1400_0300_fase1_20261122T005303966107Z/prospective_trial/bwin/catalog_observed.json Event ID 7915421"},
     {"canonical": "Iraklis 1908", "variants": ["POT Iraklis"], "scope": "CLUB", "status": "VERIFIED_REPOSITORY", "evidence": "outputs/discovery/2026-11-22_1400_0300_fase1_20261122T005303966107Z/prospective_trial/bwin/catalog_observed.json Event ID 7915421"},
     {"canonical": "Gimnasia M.", "variants": ["Gimnasia y Esgrima Mendoza"], "scope": "CLUB", "status": "VERIFIED_REPOSITORY", "evidence": "outputs/discovery/2026-11-22_1400_0300_fase1_20261122T005303966107Z/prospective_trial/bwin/catalog_observed.json Event ID 7915452"},
-    {"canonical": "U. Catolica", "variants": ["Universidad Católica CHI"], "scope": "CLUB", "status": "VERIFIED_REPOSITORY", "evidence": "outputs/discovery/2026-11-22_1400_0300_fase1_20261122T005303966107Z/prospective_trial/bwin/catalog_observed.json Event ID 7915989"}
+    {"canonical": "U. Catolica", "variants": ["Universidad Católica CHI"], "scope": "CLUB", "status": "VERIFIED_REPOSITORY", "evidence": "outputs/discovery/2026-11-22_1400_0300_fase1_20261122T005303966107Z/prospective_trial/bwin/catalog_observed.json Event ID 7915989"},
+    {"canonical": "Gimnasia L.P.", "variants": ["Gimnasia y Esgrima La Plata", "Gimnasia Y Esgrima La Plata"], "scope": "CLUB", "status": "VERIFIED_REPOSITORY", "evidence": "RUN 2026-11-23 fixture 1649567 Event ID 7916495; same kickoff and home-away order"},
+    {"canonical": "Newells Old Boys", "variants": ["Newell's Old Boys", "Newell´s Old Boys", "Newells"], "scope": "CLUB", "status": "VERIFIED_REPOSITORY", "evidence": "RUN 2026-11-23 fixture 1649567 Event ID 7916495; same kickoff and home-away order"},
+    {"canonical": "Gualberto Villarroel SJ", "variants": ["CD Gualberto Villarroel San José", "Gualberto Villarroel San Jose", "CD Gualberto Villarroel SJ"], "scope": "CLUB", "status": "VERIFIED_REPOSITORY", "evidence": "RUN 2026-11-23 fixture 1645549 Event ID 7916528; same kickoff and home-away order"}
   ]
 }

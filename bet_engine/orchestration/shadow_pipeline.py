@@ -132,33 +132,44 @@ def parse_bwin_odds_txt(
     from motor_probabilistico import parse_odds
 
     parsed = parse_odds(Path(bwin_txt_path))
-    odds: dict[str, float] = {}
+    quotes: dict[str, set[float]] = {}
+
+    def record(key: str, odd: float) -> None:
+        if odd > 1.0:
+            quotes.setdefault(key, set()).add(odd)
+
     home_keys = _expand_team_keys(home_name, home_aliases, gender=gender)
     away_keys = _expand_team_keys(away_name, away_aliases, gender=gender)
 
     for block in parsed.get("markets", []):
-        mname = str(block.get("market") or "").strip().lower()
+        base, _, period = str(block.get("market") or "").strip().lower().partition("|")
+        base, period = base.strip(), period.strip()
+        mname = f"{base} | {period}" if period else base
         sels = block.get("selections") or []
 
         # Excluir props individuales de jugador, goleadores, especiales/combinadas y 2ª mitad
         if mname.startswith(("jugador", "goleadores", "crack bwin", "crea tu")):
             continue
-        if "2ª parte" in mname or "segunda parte" in mname:
+        if re.search(r"\b(?:live|en directo|resto del partido|marcador actual|entre el|minutos?|\d{1,2}:\d{2})\b", mname):
             continue
 
-        is_h1 = "1ª parte" in mname or "primera parte" in mname
-        is_reg = ("tiempo reglamentario" in mname) or (not is_h1 and "|" not in mname)
+        is_h1 = period in {"1ª parte", "primera parte"}
+        is_reg = period in {"", "tiempo reglamentario"}
+        if not (is_reg or is_h1):
+            continue
+        if is_h1:
+            mname = f"{base} | 1ª parte"
 
         if is_reg and (mname.startswith("resultado del partido | tiempo reglamentario") or mname == "resultado del partido"):
             for s in sels:
                 sel = str(s.get("selection") or "").strip().lower()
                 odd = float(s["odd"])
                 if sel == "x":
-                    odds["draw"] = odd
+                    record("draw", odd)
                 elif _match_team_key(sel, home_keys):
-                    odds["home_win"] = odd
+                    record("home_win", odd)
                 elif _match_team_key(sel, away_keys):
-                    odds["away_win"] = odd
+                    record("away_win", odd)
         elif is_reg and (mname.startswith("doble oportunidad | tiempo reglamentario") or mname == "doble oportunidad"):
             for s in sels:
                 sel = str(s.get("selection") or "").strip().lower()
@@ -169,88 +180,89 @@ def parse_bwin_odds_txt(
                     has_h = any(_match_team_key(p, home_keys) for p in parts if p != "x")
                     has_a = any(_match_team_key(p, away_keys) for p in parts if p != "x")
                     if has_h and has_x:
-                        odds["double_chance_1x"] = odd
+                        record("double_chance_1x", odd)
                     elif has_a and has_x:
-                        odds["double_chance_x2"] = odd
+                        record("double_chance_x2", odd)
                     elif has_h and has_a:
-                        odds["double_chance_12"] = odd
+                        record("double_chance_12", odd)
         elif is_reg and (mname.startswith("ganador sin empate | tiempo reglamentario") or mname == "ganador sin empate"):
             for s in sels:
                 sel = str(s.get("selection") or "").strip().lower()
                 odd = float(s["odd"])
                 if _match_team_key(sel, home_keys):
-                    odds["dnb_home"] = odd
+                    record("dnb_home", odd)
                 elif _match_team_key(sel, away_keys):
-                    odds["dnb_away"] = odd
+                    record("dnb_away", odd)
         elif is_reg and (mname.startswith("ambos equipos marcan | tiempo reglamentario") or mname == "ambos equipos marcan"):
             for s in sels:
                 sel = str(s.get("selection") or "").strip().lower()
                 if sel in ("sí", "si", "yes"):
-                    odds["btts_yes"] = float(s["odd"])
+                    record("btts_yes", float(s["odd"]))
                 elif sel == "no":
-                    odds["btts_no"] = float(s["odd"])
+                    record("btts_no", float(s["odd"]))
         elif is_reg and (mname.startswith("total de goles | tiempo reglamentario") or mname == "total de goles"):
             for s in sels:
                 parsed_line = _parse_ou_line(str(s.get("selection") or ""))
                 if parsed_line:
                     d_str, l_slug = parsed_line
-                    odds[f"{d_str}_{l_slug}_goals"] = float(s["odd"])
+                    record(f"{d_str}_{l_slug}_goals", float(s["odd"]))
         elif is_h1 and mname.startswith("total de goles | 1ª parte"):
             for s in sels:
                 parsed_line = _parse_ou_line(str(s.get("selection") or ""))
                 if parsed_line:
                     d_str, l_slug = parsed_line
-                    odds[f"h1_{d_str}_{l_slug}_goals"] = float(s["odd"])
-        elif " - total de goles" in mname and (is_reg or is_h1):
+                    record(f"h1_{d_str}_{l_slug}_goals", float(s["odd"]))
+        elif re.fullmatch(r".+ - total de goles", base):
             prefix_team = mname.split(" - total de goles", 1)[0].strip()
             is_h = _match_team_key(prefix_team, home_keys)
             is_a = _match_team_key(prefix_team, away_keys)
-            side = "home" if is_h else "away" if is_a else None
+            side = ("home" if is_h else "away") if is_h != is_a else None
             if side:
                 h1_pref = "h1_" if is_h1 else ""
                 for s in sels:
                     parsed_line = _parse_ou_line(str(s.get("selection") or ""))
                     if parsed_line:
                         d_str, l_slug = parsed_line
-                        odds[f"{h1_pref}{side}_{d_str}_{l_slug}_goals"] = float(s["odd"])
+                        record(f"{h1_pref}{side}_{d_str}_{l_slug}_goals", float(s["odd"]))
         elif is_reg and (mname.startswith("total de córners | tiempo reglamentario") or mname in ("total de córners", "total de corners")):
             for s in sels:
                 parsed_line = _parse_ou_line(str(s.get("selection") or ""))
                 if parsed_line:
                     d_str, l_slug = parsed_line
-                    odds[f"{d_str}_{l_slug}_corners"] = float(s["odd"])
-        elif is_reg and (" - total de córners" in mname or " - total de corners" in mname):
+                    record(f"{d_str}_{l_slug}_corners", float(s["odd"]))
+        elif is_reg and re.fullmatch(r".+ - total de c[oó]rners", base):
             prefix_team = re.split(r" - total de c[oó]rners", mname, maxsplit=1)[0].strip()
-            side = "home" if _match_team_key(prefix_team, home_keys) else "away" if _match_team_key(prefix_team, away_keys) else None
+            is_h, is_a = _match_team_key(prefix_team, home_keys), _match_team_key(prefix_team, away_keys)
+            side = ("home" if is_h else "away") if is_h != is_a else None
             if side:
                 for s in sels:
                     parsed_line = _parse_ou_line(str(s.get("selection") or ""))
                     if parsed_line:
                         d_str, l_slug = parsed_line
-                        odds[f"{side}_{d_str}_{l_slug}_corners"] = float(s["odd"])
-        elif is_reg and mname.startswith("total de tarjetas"):
+                        record(f"{side}_{d_str}_{l_slug}_corners", float(s["odd"]))
+        elif is_reg and base == "total de tarjetas":
             for s in sels:
                 parsed_line = _parse_ou_line(str(s.get("selection") or ""))
                 if parsed_line:
                     d_str, l_slug = parsed_line
-                    odds[f"{d_str}_{l_slug}_cards"] = float(s["odd"])
-        elif (is_reg or is_h1) and mname.startswith("marcador exacto"):
+                    record(f"{d_str}_{l_slug}_cards", float(s["odd"]))
+        elif base == "marcador exacto":
             pref = "h1_" if is_h1 else ""
             for s in sels:
                 sel = str(s.get("selection") or "").strip()
                 m_sc = re.fullmatch(r"(\d+)\s*[-:]\s*(\d+)", sel)
                 if m_sc:
-                    odds[f"{pref}exact_score_{int(m_sc.group(1))}_{int(m_sc.group(2))}"] = float(s["odd"])
+                    record(f"{pref}exact_score_{int(m_sc.group(1))}_{int(m_sc.group(2))}", float(s["odd"]))
         elif is_h1 and mname.startswith("resultado del partido | 1ª parte"):
             for s in sels:
                 sel = str(s.get("selection") or "").strip().lower()
                 odd = float(s["odd"])
                 if sel == "x":
-                    odds["h1_draw"] = odd
+                    record("h1_draw", odd)
                 elif _match_team_key(sel, home_keys):
-                    odds["h1_home_win"] = odd
+                    record("h1_home_win", odd)
                 elif _match_team_key(sel, away_keys):
-                    odds["h1_away_win"] = odd
+                    record("h1_away_win", odd)
         elif is_h1 and mname.startswith("doble oportunidad | 1ª parte"):
             for s in sels:
                 sel = str(s.get("selection") or "").strip().lower()
@@ -261,26 +273,26 @@ def parse_bwin_odds_txt(
                     has_h = any(_match_team_key(p, home_keys) for p in parts if p != "x")
                     has_a = any(_match_team_key(p, away_keys) for p in parts if p != "x")
                     if has_h and has_x:
-                        odds["h1_double_chance_1x"] = odd
+                        record("h1_double_chance_1x", odd)
                     elif has_a and has_x:
-                        odds["h1_double_chance_x2"] = odd
+                        record("h1_double_chance_x2", odd)
                     elif has_h and has_a:
-                        odds["h1_double_chance_12"] = odd
+                        record("h1_double_chance_12", odd)
         elif is_h1 and mname.startswith("ganador sin empate | 1ª parte"):
             for s in sels:
                 sel = str(s.get("selection") or "").strip().lower()
                 odd = float(s["odd"])
                 if _match_team_key(sel, home_keys):
-                    odds["h1_dnb_home"] = odd
+                    record("h1_dnb_home", odd)
                 elif _match_team_key(sel, away_keys):
-                    odds["h1_dnb_away"] = odd
+                    record("h1_dnb_away", odd)
         elif is_h1 and mname.startswith("ambos equipos marcan | 1ª parte"):
             for s in sels:
                 sel = str(s.get("selection") or "").strip().lower()
                 if sel in ("sí", "si", "yes"):
-                    odds["h1_btts_yes"] = float(s["odd"])
+                    record("h1_btts_yes", float(s["odd"]))
                 elif sel == "no":
-                    odds["h1_btts_no"] = float(s["odd"])
+                    record("h1_btts_no", float(s["odd"]))
         elif is_reg and mname.startswith("hándicap 1x2"):
             m_h = re.search(r"\(([+-]?\d+)\)", mname)
             if m_h:
@@ -290,53 +302,53 @@ def parse_bwin_odds_txt(
                     sel = str(s.get("selection") or "").strip().lower()
                     odd = float(s["odd"])
                     if "empate" in sel or sel == "x":
-                        odds[f"eh_{tag}_draw"] = odd
+                        record(f"eh_{tag}_draw", odd)
                     elif _match_team_key(re.sub(r"\s+[+-]?\d+$", "", sel), home_keys):
-                        odds[f"eh_{tag}_home"] = odd
+                        record(f"eh_{tag}_home", odd)
                     elif _match_team_key(re.sub(r"\s+[+-]?\d+$", "", sel), away_keys):
-                        odds[f"eh_{tag}_away"] = odd
+                        record(f"eh_{tag}_away", odd)
         elif is_reg and mname.startswith("resultado (1x2) y ambos equipos marcan"):
             for s in sels:
                 sel = str(s.get("selection") or "").strip().lower()
                 odd = float(s["odd"])
                 if "ningún equipo marca" in sel or "ningun equipo marca" in sel:
-                    odds["result_none_score"] = odd
+                    record("result_none_score", odd)
                 elif "empate" in sel and "marcan" in sel:
-                    odds["result_draw_btts_yes"] = odd
+                    record("result_draw_btts_yes", odd)
                 elif "ambos equipos marcan" in sel:
                     if _match_team_key(sel, home_keys):
-                        odds["result_home_btts_yes"] = odd
+                        record("result_home_btts_yes", odd)
                     elif _match_team_key(sel, away_keys):
-                        odds["result_away_btts_yes"] = odd
+                        record("result_away_btts_yes", odd)
                 elif "no marca" in sel:
                     parts = sel.split(" gana y ")
                     if len(parts) == 2:
                         if _match_team_key(parts[0], home_keys):
-                            odds["result_home_away_no"] = odd
+                            record("result_home_away_no", odd)
                         elif _match_team_key(parts[0], away_keys):
-                            odds["result_away_home_no"] = odd
+                            record("result_away_home_no", odd)
         elif is_reg and mname.startswith("ambos equipos marcan y cualquier equipo gana"):
             for s in sels:
                 sel = str(s.get("selection") or "").strip().lower()
                 if sel in ("sí", "si", "yes"):
-                    odds["btts_yes_and_either_win"] = float(s["odd"])
+                    record("btts_yes_and_either_win", float(s["odd"]))
                 elif sel == "no":
-                    odds["btts_yes_and_either_win_no"] = float(s["odd"])
+                    record("btts_yes_and_either_win_no", float(s["odd"]))
         elif is_reg and mname.startswith("ambos equipos marcan y total de goles 2,5"):
             for s in sels:
                 sel = str(s.get("selection") or "").strip().lower()
                 odd = float(s["odd"])
                 if "más de 2,5" in sel or "mas de 2,5" in sel:
-                    odds["btts_yes_and_over_2_5" if sel.startswith(("sí", "si")) else "btts_no_and_over_2_5"] = odd
+                    record("btts_yes_and_over_2_5" if sel.startswith(("sí", "si")) else "btts_no_and_over_2_5", odd)
                 elif "menos de 2,5" in sel:
-                    odds["btts_yes_and_under_2_5" if sel.startswith(("sí", "si")) else "btts_no_and_under_2_5"] = odd
-        elif (is_reg or is_h1) and mname.startswith("1er equipo en marcar"):
+                    record("btts_yes_and_under_2_5" if sel.startswith(("sí", "si")) else "btts_no_and_under_2_5", odd)
+        elif base == "1er equipo en marcar":
             pref = "h1_" if is_h1 else ""
             for s in sels:
                 sel = str(s.get("selection") or "").strip().lower()
                 if "no hay gol" in sel:
-                    odds[f"{pref}first_goal_none"] = float(s["odd"])
-    return odds
+                    record(f"{pref}first_goal_none", float(s["odd"]))
+    return {key: next(iter(values)) for key, values in quotes.items() if len(values) == 1}
 
 
 def audit_bwin_catalog_txt(

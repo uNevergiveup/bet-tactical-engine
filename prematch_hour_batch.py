@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 from collections import defaultdict
 from datetime import datetime, timedelta
@@ -22,8 +23,7 @@ FINAL_PRICE_AGE = 20
 MAX_PREFINALISTS = 4
 
 
-def _scope(args, steps, now):
-    root, run, _, _ = steps._resolve_eval_dir(args, now)
+def _window_bounds(run, steps):
     path = steps._require_file(run / "fixtures.json", "discover")
     window = steps._read_json(path).get("window") or {}
 
@@ -34,12 +34,17 @@ def _scope(args, steps, now):
         value = datetime.fromisoformat(stamp)
         return value.astimezone(steps.trial.TZ) if value.tzinfo else value.replace(tzinfo=steps.trial.TZ)
 
-    begin, end = civil("start_madrid"), civil("end_madrid")
+    return civil("start_madrid"), civil("end_madrid")
+
+
+def _scope(args, steps, now):
+    root, run, _, _ = steps._resolve_eval_dir(args, now)
+    begin, end = _window_bounds(run, steps)
     day = begin.date()
     days = []
     while day <= end.date():
         slot = datetime.combine(day, args.hour, tzinfo=steps.trial.TZ)
-        if slot <= end and slot + timedelta(hours=1) > begin:
+        if slot < end and slot + timedelta(hours=1) > begin:
             days.append(slot)
         day += timedelta(days=1)
     if args.date:
@@ -48,6 +53,16 @@ def _scope(args, steps, now):
         raise ValueError("HOUR_OUTSIDE_OR_AMBIGUOUS_IN_RUN: comprueba --hour y, si procede, --date Madrid")
     slot = days[0]
     return root, run, slot, run / "hour_batches" / slot.strftime("%Y-%m-%d_%H%M")
+
+
+def _batch_end(run, steps, slot):
+    """Return the exclusive end of the lot inside the original civil window."""
+    _, window_end = _window_bounds(run, steps)
+    # Late-night runs intentionally cover the remainder of the original window.
+    # In the usual 15:00–03:00 run, 23:00, 00:00, 01:00 and 02:00 all end at 03:00.
+    if slot.hour >= 23 or (slot.date() == window_end.date() and slot < window_end):
+        return window_end
+    return min(slot + timedelta(hours=2), window_end)
 
 
 def _kickoff(steps, target):
@@ -100,6 +115,17 @@ def _usable_offer(entry):
     }
 
 
+def _verified_catalog_prices(entries):
+    prices = defaultdict(set)
+    for entry in entries:
+        key = entry.get("canonical_key")
+        if (key and _usable_offer(entry) and entry.get("contract_id")
+                and entry["settlement_status"] == "VERIFIED_STANDARD"):
+            prices[key].add(Decimal(entry["odd"]))
+    conflicts = {key: [str(value) for value in sorted(values)] for key, values in prices.items() if len(values) > 1}
+    return {key: float(next(iter(values))) for key, values in prices.items() if len(values) == 1}, conflicts
+
+
 def _card_review(entry, pre_match):
     """Use paired yellows as context, with the Bwin contract kept separate."""
     family = entry["market_family"]
@@ -139,11 +165,7 @@ def _market_options(allowed, target, pre_match, tactical, now, price_status, pla
     model = CoherentMatchModeler.build_model(bundle)
     # Use the exact catalogued price and rule. Conflicting quotes for the same
     # canonical key stay exploratory rather than selecting the favourable price.
-    prices = defaultdict(set)
-    for entry in allowed:
-        if entry.get("contract_id") and entry.get("settlement_status") == "VERIFIED_STANDARD":
-            prices[entry["canonical_key"]].add(float(entry["odd"]))
-    odds = {key: next(iter(values)) for key, values in prices.items() if len(values) == 1}
+    odds, _ = _verified_catalog_prices(allowed)
     evaluated = {opt.selection_key: opt for opt in
                  BwinMarketEvaluator.evaluate_standard_markets(bundle, model, odds_map=odds) if opt.odd is not None}
     signals = [s for s in tactical.get("signals") or [] if s.get("status") == "SUPPORTED_DESCRIPTIVE_SIGNAL"]
@@ -224,11 +246,12 @@ def _write_markdown(path, lines):
     path.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
-def _write_agent_prompt(prompt, output, lines):
+def _write_agent_prompt(prompt, output, lines, *, instruction_name):
     instruction = (f'Lee "{prompt}" y los archivos locales que referencia. '
                    f'Sigue el encargo y guarda el resultado directamente en "{output}".')
-    instruction_file = prompt.with_name("instruccion_agente_local.txt")
+    instruction_file = prompt.with_name(instruction_name)
     _write_markdown(instruction_file, [instruction])
+    _write_markdown(prompt.with_name("instruccion_agente_local.txt"), [instruction])
     _write_markdown(prompt, [
         lines[0], "", "## Instrucción para enviar al agente local", "",
         "```text", instruction, "```", "", "## Encargo", "", *lines[2:],
@@ -268,11 +291,22 @@ def _prepare_event(steps, args, root, run, output, target, position, player_hist
     offers = [entry for entry in catalog["entries"] if _usable_offer(entry)]
     player_options, player_coverage, player_sources = link_player_props(offers, player_history, pre, now)
     options = _market_options(offers, target, pre, tactical, now, price_status, player_options)
-    path = output / "events" / str(target["fixture_id"]) / "catalogo.json"
+    event_dir = output / "events" / str(target["fixture_id"])
+    steps._prepare_research_inbox(event_dir / "research" / "responses", str(target["bwin_event_id"]))
+    path = event_dir / "catalogo.json"
     steps._atomic_json(path, catalog)
+    reason = None
+    if needs_todo:
+        reason = "TODO_VIEW_NOT_VERIFIED" if can_capture else "TODO_REFRESH_LEAD_BELOW_45"
+    elif not offers:
+        reason = "NO_USABLE_OFFERS_IN_CAPTURE"
+    elif not options:
+        reason = "NO_STATISTICAL_LINKS_FOR_CAPTURED_MARKETS"
+    elif price_status["status"] != "VALID_PREMATCH":
+        reason = price_status["status"]
     return {
         "status": "REVISABLE" if options and price_status["status"] == "VALID_PREMATCH" and not needs_todo else "COBERTURA_LIMITADA",
-        "reason": ("TODO_VIEW_NOT_VERIFIED" if can_capture else "TODO_REFRESH_LEAD_BELOW_45") if needs_todo else None,
+        "reason": reason,
         "all_markets_view_status": todo.get("status", "TODO_VIEW_NOT_RECORDED"),
         "statistical_position": position, "snapshot": snapshot, "catalog": str(path),
         "statistical_sources": {
@@ -288,6 +322,7 @@ def _prepare_event(steps, args, root, run, output, target, position, player_hist
         },
         "price_status": price_status, "catalog_coverage": catalog["counts_by_commercial_coverage"],
         "catalog_by_family": catalog["coverage_by_family"],
+        "capture_coverage": catalog["capture_coverage"],
         "player_prop_coverage": player_coverage, "player_history_sources": player_sources,
         "priced_and_linked_options": options, "contradictions": tactical.get("contradictions") or [],
     }
@@ -302,6 +337,8 @@ def _market_review_rules():
         "Indica si cada familia está solo capturada, enlazada con evidencia descriptiva, sin datos del periodo, "
         "pendiente de liquidación o respaldada por un modelo acreditado. Registra qué dato falta en cada caso.",
         "Para cada candidato, empieza por la mejor explicación futbolística a favor y busca evidencia fechada que la refuerce.",
+        "Cuando el histórico lo permita, contrasta forma reciente con muestras de 10 y 20 partidos. Separa liga, localía, "
+        "periodo y etapa del entrenador. Usa 30 solo si están disponibles y siguen siendo comparables. Indica n válido y datos ausentes.",
         "Indica qué cambio concreto de XI, rol o precio cambiaría el análisis. Un vínculo indirecto equipo→total requiere justificar la contribución del rival.",
         "En cada candidato escribe requires_confirmed_xi como booleano. Usa false solo si es un mercado colectivo y "
         "la tesis se sostiene con las variantes plausibles de XI. Explica esas variantes en lineup_condition. "
@@ -355,6 +392,7 @@ def _export_gemini(steps, output, packet, response):
 def prepare(args, steps):
     now = steps._now_utc()
     root, run, slot, folder = _scope(args, steps, now)
+    batch_end = _batch_end(run, steps, slot)
     _, major = steps._load_major_doc(run)
     rows = steps._bwin_reconcile_records(run, major, now, min_lead_minutes=0)["all"]
     ranked_path = run / "prospective_trial/tactical/tactical_signal_engine.json"
@@ -365,7 +403,7 @@ def prepare(args, steps):
     members = [
         r for r in rows if r["identity_state"] == "VERIFIED" and (r.get("kickoff_utc") or r.get("kickoff_madrid"))
         and (not args.fixture_id or r["fixture_id"] in args.fixture_id)
-        and slot <= _kickoff(steps, r).astimezone(steps.trial.TZ) < slot + timedelta(hours=1)
+        and slot <= _kickoff(steps, r).astimezone(steps.trial.TZ) < batch_end
     ]
     if not members:
         raise ValueError("NO_VERIFIED_FIXTURES_IN_HOUR")
@@ -399,13 +437,14 @@ def prepare(args, steps):
         row.get("statistical_position") or float("inf"),
     ))
     packet = {"packet_id": packet_id, "eval_dir": str(run), "hour_madrid": slot.isoformat(),
+              "batch_end_madrid": batch_end.isoformat(),
               "created_at_utc": steps._now_utc().isoformat(), "fixtures": results}
     path = output / "lote.json"
     steps._atomic_json(path, packet)
-    prompt = output / "encargo_codex_argon.md"
+    prompt = output / "encargo_analista_codex_argon.md"
     response = output / "prefinalistas.json"
     lines = [
-        f"# Revisión comercial del lote {slot:%Y-%m-%d %H:%M} Europe/Madrid", "",
+        f"# Revisión comercial del lote {slot:%Y-%m-%d %H:%M}–{batch_end:%Y-%m-%d %H:%M} Europe/Madrid", "",
         f"Abre `{path}` desde el proyecto y revisa `priced_and_linked_options` de cada fixture `REVISABLE`.",
         "Lee los catálogos y contrasta los finalistas con los TXT de cuotas y las fuentes estadísticas locales indicadas abajo. "
         "Coteja identidad, corte, línea, selección y precio en los archivos del partido.",
@@ -435,14 +474,16 @@ def prepare(args, steps):
             lines.append(f"- {name} `{ref['path']}` · SHA-256 `{ref['sha256']}`.")
         if row.get("player_prop_coverage", {}).get("priced_player_options"):
             lines.append("- Cobertura de props y referencias históricas verificadas en `player_prop_coverage` y `player_history_sources` de este fixture.")
-    instruction_file, instruction = _write_agent_prompt(prompt, response, lines)
+    instruction_file, instruction = _write_agent_prompt(
+        prompt, response, lines, instruction_name="instruccion_analista_cuotas.txt")
+    _write_markdown(output / "encargo_codex_argon.md", prompt.read_text(encoding="utf-8").splitlines())
     print(f"  lote_json: {path}")
-    print(f"  prompt_codex_argon: {prompt}")
+    print(f"  prompt_analista_cuotas: {prompt}")
     print(f"  prefinalistas_json: {response}")
-    print(f"  archivo_instruccion_agente_local: {instruction_file}")
+    print(f"  archivo_instruccion_analista_cuotas: {instruction_file}")
     if args.export_gemini:
         _export_gemini(steps, output, packet, response)
-    print(f"  instruccion_agente_local: {instruction}")
+    print(f"  instruccion_analista_cuotas: {instruction}")
     return 0
 
 
@@ -454,7 +495,8 @@ def _read_shortlist(steps, run, slot, folder, path):
             f"HOUR_SHORTLIST_FILE_REQUIRED:{kind}:{resolved} "
             "(--shortlist debe apuntar al archivo prefinalistas.json, no al directorio del paquete)"
         )
-    response = steps._read_json(resolved)
+    raw = resolved.read_bytes()
+    response = json.loads(raw.decode("utf-8-sig"))
     if not isinstance(response, dict) or set(response) != {"packet_id", "candidates"}:
         raise ValueError("INVALID_HOUR_SHORTLIST_SCHEMA")
     packet_id = response["packet_id"]
@@ -488,25 +530,33 @@ def _read_shortlist(steps, run, slot, folder, path):
     roles = [item[0]["role"] for item in selected.values()]
     if roles.count("prefinalist") > 3 or roles.count("reserve") > 1:
         raise ValueError("HOUR_SHORTLIST_MAX_3_PLUS_RESERVE")
-    return packet_id, list(selected.values())
+    return packet_id, list(selected.values()), hashlib.sha256(raw).hexdigest()
 
 
 def _research_questions(row, candidates, mode):
     families = sorted({option["market_family"] for _, option in candidates})
-    questions = [
-        "Comprueba bajas, sanciones, dudas, regresos, entrenador actual, cambios recientes y adaptación de la plantilla.",
-        "Revisa XI oficial si ya existe y, mientras no exista, XI probables, variantes, rotaciones, roles y gestión de minutos.",
-        "Contrasta estrategias, necesidad según la tabla, descanso, viajes y partidos siguientes con fuentes fechadas.",
-        "Busca designación arbitral, clima o superficie solo cuando puedan afectar las familias candidatas.",
-        "Distingue fuentes primarias, prensa local, rumores y repeticiones de la misma fuente. Registra contradicciones.",
-    ]
+    questions = []
+    if mode == "deep":
+        questions.extend([
+            "Comprueba bajas, sanciones, dudas, regresos, entrenador actual y adaptación de la plantilla.",
+            "Revisa alineaciones publicadas o probables, variantes, rotaciones, roles y gestión de minutos.",
+            "Contrasta estrategias, necesidad según la tabla, descanso, viajes y partidos siguientes con fuentes fechadas.",
+            "Busca designación arbitral, clima o superficie si afectan los mercados candidatos.",
+        ])
+    elif mode == "focused":
+        questions.append("Prioriza bajas, sanciones y alineaciones (publicadas o probables) que cambien el rol, la exposición o el planteamiento de un candidato.")
+        if row.get("contradictions"):
+            questions.append("De las contradicciones del JSON, comprueba solo la que pueda cambiar más una tesis. Distingue evidencia y rumor.")
+        if any(family.startswith("CARDS_") for family in families):
+            referee = (row.get("football_context") or {}).get("referee")
+            questions.append(f"Comprueba el árbitro ({referee or 'sin designación acreditada en los insumos'}) y su relevancia para las tarjetas candidatas.")
+    else:
+        questions.append("Prioriza novedades de XI, bajas, roles, árbitro o contexto que cambien una condición concreta del candidato.")
     if "ON_TARGET_COLLECTIVE" in families:
         questions.append(
             "Para tiros a portería, usa Opta/Stats Perform como proveedor de liquidación Bwin según la política aportada. "
             "Separa esa liquidación del histórico API-Football y señala cualquier diferencia documentada de definición o corrección."
         )
-    if mode == "update":
-        questions.append("Prioriza novedades posteriores al informe anterior y explica qué condición del candidato cambió.")
     for item, option in candidates:
         questions.append(
             f"Audita `{option['market_header_literal']} → {option['selection_literal']}`. Tesis: {item['case_for']} "
@@ -515,13 +565,30 @@ def _research_questions(row, candidates, mode):
     return questions
 
 
+def _research_reports(packet_root, root, row):
+    from bet_engine.analytics.early_tactical_scout import RESEARCH_PROVIDERS
+
+    eid = str(row["bwin_event_id"])
+    event_dir = packet_root / "events" / str(row["fixture_id"])
+    responses = event_dir / "research" / "responses"
+    reports = []
+    for provider in RESEARCH_PROVIDERS:
+        name = f"{provider}_{eid}.md"
+        paths = (responses / name, *sorted(responses.glob(f"{provider}_{eid}_*.md")),
+                 event_dir / name, root / "outputs/matches" / eid / "research" / name)
+        for path in paths:
+            if path.is_file():
+                reports.append({"source": provider, "path": str(path), "discovered": True})
+    return reports
+
+
 def research(args, steps):
     """Create one portable, fixture-specific manual research handoff per shortlisted event."""
     from bet_engine.analytics.early_tactical_scout import RESEARCH_PLACEHOLDER
 
     now = steps._now_utc()
-    _, run, slot, folder = _scope(args, steps, now)
-    packet_id, selections = _read_shortlist(steps, run, slot, folder, args.shortlist)
+    root, run, slot, folder = _scope(args, steps, now)
+    packet_id, selections, _ = _read_shortlist(steps, run, slot, folder, args.shortlist)
     packet_root = folder / "packets" / packet_id
     packet = steps._read_json(packet_root / "lote.json")
     rows = {row["fixture_id"]: row for row in packet["fixtures"]}
@@ -532,8 +599,12 @@ def research(args, steps):
     if not grouped:
         raise ValueError("NO_SHORTLIST_FIXTURES_SELECTED_FOR_RESEARCH")
 
+    generated = 0
     for fid, candidates in sorted(grouped.items()):
         row = rows[fid]
+        if _lead(steps, row, now) <= 0:
+            print(f"[hour-batch-research] {fid} CIERRE_OPERATIVO | KICKOFF_REACHED")
+            continue
         eid = str(row["bwin_event_id"])
         research_root = packet_root / "events" / str(fid) / "research"
         requests = research_root / "requests"
@@ -543,7 +614,16 @@ def research(args, steps):
         response = responses / f"{args.provider}_{eid}_{args.research_mode}.md"
         catalog = steps._read_json(Path(row["catalog"]))
         families = {option["market_family"] for _, option in candidates}
-        relevant_quotes = [entry for entry in catalog["entries"] if entry["market_family"] in families]
+        candidate_ids = {option["selection_id"] for _, option in candidates}
+        relevant_quotes = [entry for entry in catalog["entries"] if
+                           (entry["market_family"] in families if args.research_mode == "deep"
+                            else entry["selection_id"] in candidate_ids)]
+        previous_report = None
+        if args.research_mode == "update":
+            reports = [item for item in _research_reports(packet_root, root, row)
+                       if not Path(item["path"]).name.endswith("_update.md")]
+            prior = steps._evaluate_research_inbox(reports, row, now)["accepted"]
+            previous_report = max(prior, key=lambda item: item["generated_utc"], default=None)
         payload = {
             "packet_id": packet_id,
             "generated_at_utc": now.isoformat(),
@@ -565,19 +645,36 @@ def research(args, steps):
         except FileExistsError:
             pass
         questions = _research_questions(row, candidates, args.research_mode)
+        if args.research_mode == "focused":
+            scope = ("Usa una consulta normal o una búsqueda breve. Limita la búsqueda a una pregunta por candidato y hasta dos "
+                     "comprobaciones compartidas, preferentemente de los últimos 14 días, con hasta 4 fuentes primarias o medios locales. "
+                     "Revisa entrenador, estrategia, tabla, calendario o rumores solo si cambian la tesis. Devuelve hasta 6 hallazgos. "
+                     "Si falta una fuente fiable, registra el faltante y termina.")
+        elif args.research_mode == "deep":
+            scope = ("Usa Deep Research si hay tiempo. Prioriza las últimas 4 semanas y amplía solo para contrastar un cambio de régimen. "
+                     "Usa hasta 8 fuentes pertinentes. Evita recapitulaciones de estadísticas ya aportadas.")
+        elif previous_report:
+            scope = (f"Adjunta el informe anterior impreso por el CLI. Busca solo novedades desde su corte "
+                     f"{previous_report['cutoff_utc'] or previous_report['generated_utc']}, con hasta 3 fuentes. "
+                     "Registra únicamente cambios materiales o indica que no encontraste cambios.")
+        else:
+            scope = "Sin informe anterior acreditado, revisa solo novedades materiales de las últimas 24 horas y usa hasta 3 fuentes."
         lines = [
             f"# Investigación {args.research_mode} · {row['home']} – {row['away']} · {args.provider}", "",
             f"Fixture `{fid}` · Event ID `{eid}` · kickoff `{row['kickoff_madrid']}`.",
             f"Lee el archivo adjunto `{inventory.name}`. Analiza únicamente este evento y sus candidatos.",
             "La investigación externa es opcional y no decide BET/NO BET. Aporta hechos cualitativos, fuentes y contradicciones al cierre.",
-            "Usa información disponible antes del kickoff. Incluye URL, medio, fecha de publicación y relación entre fuentes repetidas.",
+            "Usa información disponible antes del kickoff. Cita cada fuente como enlace Markdown con medio y fecha de publicación. "
+            "Indica cuándo varias notas repiten la misma fuente.",
             "Clasifica cada hallazgo como CONFIRMADO_OFICIAL, PUBLICADO_PREPARTIDO, PROBABLE, INFERIDO o NO_VERIFICADO.",
             "No inventes probabilidades, cuotas actuales, alineaciones ni reglas ausentes. La cuota adjunta es un snapshot.",
-            "Revisa reportes, bajas, rumores, entrenador, alineaciones, estrategias, necesidad, tabla, descanso y partidos siguientes.",
+            scope,
             "Si una conclusión depende del XI, indica la condición exacta y el mercado afectado.", "",
             "## Preguntas específicas", "", *[f"- {question}" for question in questions], "",
             "## Entrega", "",
-            f"Devuelve Markdown destinado a `{response}` con identidad, corte declarado, hechos y fuentes, contradicciones, "
+            f"Abre el informe con `fixture_id: {fid}` y `event_id: {eid}` en líneas separadas. "
+            "Añade `analysis_cutoff_utc` y `generated_at_utc` con timestamps reales ISO 8601 y offset y fecha cada fuente.",
+            f"Devuelve Markdown destinado a `{response.name}` con identidad, corte declarado, hechos y fuentes, contradicciones, "
             "impacto por candidato, faltantes críticos y una conclusión cualitativa. No emitas la decisión financiera final.",
         ]
         _write_markdown(prompt, lines)
@@ -585,7 +682,10 @@ def research(args, steps):
         print(f"  research_prompt: {prompt}")
         print(f"  research_input: {inventory}")
         print(f"  research_response: {response}")
-    return 0
+        if previous_report:
+            print(f"  research_previous_report: {previous_report['path']}")
+        generated += 1
+    return 0 if generated else 2
 
 
 def _fetch_lineups(fixture_id):
@@ -660,23 +760,27 @@ def _refresh_lineup(steps, args, run, output, target, previous, now, lineup_path
 
 
 def _compare_price(before, catalog):
-    matches = [e for e in catalog["entries"] if _usable_offer(e) and e["selection_id"] == before["selection_id"]
-               and e["market_header_literal"] == before["market_header_literal"]
+    matches = [e for e in catalog["entries"] if e["market_header_literal"] == before["market_header_literal"]
                and e["selection_literal"] == before["selection_literal"]]
-    after = matches[0] if len(matches) == 1 else None
     scope = ("market_family", "target_scope", "temporal_scope", "target_entity", "direction")
     alternatives = [
         {key: e[key] for key in ("selection_id", "selection_literal", "market_header_literal", "line", "odd", "settlement_status")}
         for e in catalog["entries"] if _usable_offer(e) and e["line"] is not None and e["line"] != before["line"]
         and all(e.get(key) == before.get(key) for key in scope)
     ]
-    if after is None:
-        return {"status": "SELECCION_ORIGINAL_NO_LOCALIZADA", "odd_before": before["odd"], "line_before": before["line"],
-                "neighboring_lines": alternatives}
+    unavailable = {"odd_before": before["odd"], "line_before": before["line"], "neighboring_lines": alternatives}
+    if any(entry["verdict"] == "CONFLICTING_CAPTURE_PRICES" for entry in matches):
+        return {**unavailable, "status": "CUOTAS_EN_CONFLICTO",
+                "observed_prices": sorted({entry["odd"] for entry in matches if entry["odd"] is not None})}
+    if not matches:
+        return {**unavailable, "status": "SELECCION_ORIGINAL_NO_LOCALIZADA"}
+    after = matches[0]
+    if not _usable_offer(after) or after["selection_id"] != before["selection_id"]:
+        return {**unavailable, "status": "PRECIO_O_IDENTIDAD_NO_VERIFICADOS"}
     return {"status": "COMPARABLE", "line_before": before["line"], "line_after": after["line"],
             "odd_before": before["odd"], "odd_after": after["odd"],
             "settlement_before": before["settlement_status"], "settlement_after": after["settlement_status"],
-            "canonical_key_after": after["canonical_key"],
+            "canonical_key_after": after["canonical_key"], "contract_id_after": after["contract_id"],
             "odd_delta": str(Decimal(after["odd"]) - Decimal(before["odd"])), "neighboring_lines": alternatives}
 
 
@@ -685,7 +789,8 @@ def _refresh_event(steps, args, root, run, output, target, previous):
     early = args.lineup_mode == "sin-xi"
     minimum = steps.ANALYSIS_MIN_LEAD_MINUTES if early else CONFIRMED_XI_MIN_LEAD
     if not target["temporal_eligible"] or _lead(steps, target, now) < minimum:
-        return {"status": "CIERRE_OPERATIVO", "reason": f"MODEL_LEAD_BELOW_{minimum}"}
+        return {"status": "CIERRE_OPERATIVO",
+                "reason": target.get("temporal_reason") or f"MODEL_LEAD_BELOW_{minimum}"}
     for _, old, _ in previous:
         if _target_row(target) != {k: old[k] for k in _target_row(target)}:
             raise ValueError("HOUR_SHORTLIST_FIXTURE_IDENTITY_OR_KICKOFF_CHANGED")
@@ -719,16 +824,29 @@ def _refresh_event(steps, args, root, run, output, target, previous):
         return timestamp >= earliest and timestamp > initial_latest and now - timestamp <= timedelta(minutes=FINAL_PRICE_AGE)
 
     capture_minimum = FINAL_CAPTURE_MIN_LEAD if early else CONFIRMED_XI_MIN_LEAD
+    capture_error = None
     if not valid_second_capture(snapshot, now) and args.confirm_external and _lead(steps, target, now) >= capture_minimum:
-        snapshot = _capture_final(steps, root, run, target) if early else _capture(steps, root, run, target, min_lead=CONFIRMED_XI_MIN_LEAD)
+        try:
+            snapshot = (_capture_final(steps, root, run, target) if early
+                        else _capture(steps, root, run, target, min_lead=CONFIRMED_XI_MIN_LEAD))
+        except (steps.StepError, OSError, ValueError, RuntimeError) as exc:
+            capture_error = str(exc)
         now = steps._now_utc()
-    if not valid_second_capture(snapshot, now):
+    pending_price = not valid_second_capture(snapshot, now)
+    price_reason = None
+    if pending_price:
         price_reason = "FRESH_CAPTURE_AFTER_INITIAL_REQUIRED" if early else "RECENT_CAPTURE_AFTER_INITIAL_REQUIRED"
-        return {"status": "PRECIO_PENDIENTE", "lineup": lineup, "snapshot": snapshot,
-                "reason": price_reason if _lead(steps, target, now) >= capture_minimum else f"FINAL_CAPTURE_LEAD_BELOW_{capture_minimum}"}
+        if _lead(steps, target, now) < capture_minimum:
+            price_reason = f"FINAL_CAPTURE_LEAD_BELOW_{capture_minimum}"
+        elif capture_error:
+            price_reason = "FINAL_ODDS_CAPTURE_FAILED"
+        if not snapshot:
+            return {"status": "PRECIO_PENDIENTE", "lineup": lineup, "snapshot": None,
+                    "reason": price_reason, "capture_error": capture_error}
     catalog = _catalog(target, snapshot)
     catalog_path = output / "catalogo_cierre.json"
     steps._atomic_json(catalog_path, catalog)
+    verified_odds, canonical_conflicts = _verified_catalog_prices(catalog["entries"])
     comparisons = [
         {**item, "initial_snapshot": row["snapshot"], "market_header_literal": option["market_header_literal"],
          "selection_literal": option["selection_literal"], "settlement_status": option["settlement_status"],
@@ -737,6 +855,22 @@ def _refresh_event(steps, args, root, run, output, target, previous):
         for item, row, option in previous
     ]
     for comparison, (_, _, option) in zip(comparisons, previous):
+        price = comparison["price"]
+        key = price.get("canonical_key_after")
+        if price["status"] != "COMPARABLE":
+            reason = price["status"]
+        elif price.get("settlement_after") != "VERIFIED_STANDARD":
+            reason = "SETTLEMENT_UNVERIFIED"
+        elif key in canonical_conflicts:
+            reason = "CANONICAL_PRICE_CONFLICT"
+            price["conflicting_canonical_prices"] = canonical_conflicts[key]
+        elif not price.get("contract_id_after") or key not in verified_odds:
+            reason = "CONTRACT_MAPPING_PENDING"
+        else:
+            reason = None
+        if pending_price and reason is None:
+            reason = price_reason
+        comparison["shadow_evaluation"] = {"status": "NOT_EVALUATED", "reason": reason}
         if evidence := option.get("player_evidence"):
             matches = [player for player in (lineup or {}).get("api_roster") or []
                        if (player.get("player_id"), player.get("side")) == (evidence["player_id"], evidence["side"])]
@@ -747,46 +881,63 @@ def _refresh_event(steps, args, root, run, output, target, previous):
     result = {"status": "CONTRATO_PENDIENTE", "lineup": lineup, "snapshot": snapshot,
               "price_age_minutes_at_review": round((steps._now_utc() - price_time).total_seconds() / 60, 2),
               "price_captured_before_confirmed_xi": bool(xi_time and price_time < xi_time),
-              "catalog": str(catalog_path), "comparisons": comparisons}
-    if not any(row["price"]["status"] == "COMPARABLE" for row in comparisons):
-        return result
-    if not any(row["price"]["status"] == "COMPARABLE" and row["price"].get("settlement_after") == "VERIFIED_STANDARD"
-               for row in comparisons):
-        return {**result, "status": "LIQUIDACION_PENDIENTE", "reason": "SETTLEMENT_UNVERIFIED"}
+              "price_status": "SNAPSHOT_ONLY" if pending_price else "RECENT_PREMATCH_SNAPSHOT",
+              "capture_error": capture_error,
+              "catalog": str(catalog_path), "capture_coverage": catalog["capture_coverage"],
+              "comparisons": comparisons}
     if _lead(steps, target, steps._now_utc()) < minimum:
         return {**result, "status": "CIERRE_OPERATIVO", "reason": f"MODEL_LEAD_BELOW_{minimum}"}
-    early_keys = frozenset(row["price"].get("canonical_key_after") for row in comparisons if early
-                           and row["price"]["status"] == "COMPARABLE"
-                           and row["price"].get("settlement_after") == "VERIFIED_STANDARD"
-                           and row["price"].get("canonical_key_after"))
-    if early and not early_keys:
-        return {**result, "reason": "NO_COMPARABLE_VERIFIED_CANONICAL_SELECTION"}
+    if pending_price:
+        return {**result, "status": "PRECIO_PENDIENTE", "reason": price_reason}
+    eligible_keys = frozenset(row["price"]["canonical_key_after"] for row in comparisons
+                              if row["shadow_evaluation"]["reason"] is None)
+    if not eligible_keys:
+        reasons = list(dict.fromkeys(row["shadow_evaluation"]["reason"] for row in comparisons))
+        status = "LIQUIDACION_PENDIENTE" if reasons == ["SETTLEMENT_UNVERIFIED"] else "CONTRATO_PENDIENTE"
+        return {**result, "status": status, "reason": ",".join(reasons)}
     model_dir = output / "model"
     stages = argparse.Namespace(
         command="model", root=root, eval_dir=run, asof=None, fixture_id=target["fixture_id"],
         event_id=eid, min_lead=minimum, odds_file=Path(snapshot["path"]), output_dir=model_dir,
-        lineup_independent_keys=early_keys,
+        lineup_independent_keys=eligible_keys if early else frozenset(), verified_catalog_odds=verified_odds,
     )
-    steps.cmd_model(stages)
     model_path = model_dir / f"model_report_{eid}.json"
-    report = steps._read_json(model_path)
+    try:
+        steps.cmd_model(stages)
+        report = steps._read_json(model_path)
+    except (steps.StepError, OSError, ValueError, RuntimeError) as exc:
+        for row in comparisons:
+            if row["shadow_evaluation"]["reason"] is None:
+                row["shadow_evaluation"]["reason"] = "SHADOW_EXECUTION_FAILED"
+        return {**result, "status": "ERROR_REINTENTABLE", "reason": f"SHADOW_EXECUTION_FAILED:{exc}"}
     finished = steps._now_utc()
     status, reason = "LISTO_REVISION_FINAL", None
     if _lead(steps, target, finished) < minimum:
-        status, reason = "CIERRE_OPERATIVO", "MODEL_FINISHED_BELOW_T30"
+        status, reason = "CIERRE_OPERATIVO", f"MODEL_FINISHED_BELOW_T{minimum}"
     elif not valid_second_capture(snapshot, finished):
         status, reason = "PRECIO_PENDIENTE", "PRICE_EXPIRED_DURING_MODEL"
+        result["price_status"] = "SNAPSHOT_ONLY"
     options = {row.get("selection_key"): row for row in report.get("market_comparisons") or []}
     for row in comparisons:
+        if row["shadow_evaluation"]["reason"] is not None:
+            continue
         option = options.get(row["price"].get("canonical_key_after"))
-        if (option and row["price"]["status"] == "COMPARABLE" and option.get("odd") is not None
-                and Decimal(str(option["odd"])) == Decimal(row["price"]["odd_after"])
-                and row["price"].get("settlement_after") == "VERIFIED_STANDARD"):
+        if not option or option.get("decision_category") == "MERCADO_NO_MODELADO":
+            row["shadow_evaluation"]["reason"] = "MARKET_NOT_MODELED"
+        elif option.get("odd") is None or Decimal(str(option["odd"])) != Decimal(row["price"]["odd_after"]):
+            row["shadow_evaluation"]["reason"] = "SHADOW_PRICE_NOT_MATCHED"
+        elif option.get("decision_category") == "BLOQUEO_TECNICO":
+            row["shadow_evaluation"]["reason"] = "SHADOW_TECHNICAL_BLOCK"
+        else:
+            row["shadow_evaluation"] = {"status": "EVALUATED", "reason": None}
             row["shadow_option"] = {k: option.get(k) for k in (
                 "calibration_status", "decision_category", "raw_sample_n", "effective_sample_n", "pending_conditions",
             )}
             if option.get("calibration_status") == "CALIBRATED_OUT_OF_SAMPLE":
                 row["shadow_option"].update({k: option.get(k) for k in ("p_model", "p_low", "p_high", "ev_conservative_low")})
+    if status == "LISTO_REVISION_FINAL" and not any(row["shadow_evaluation"]["status"] == "EVALUATED" for row in comparisons):
+        status, reason = "COBERTURA_MODELO_PENDIENTE", ",".join(
+            dict.fromkeys(row["shadow_evaluation"]["reason"] for row in comparisons))
     return {**result, "status": status, "reason": reason, "model_json": str(model_path), "model_sha256": steps._sha256_file(model_path),
             "model_decision": report.get("decision"), "model_classification": report.get("decision_classification"),
             "model_reasons": report.get("no_bet_reasons"),
@@ -799,7 +950,7 @@ def refresh(args, steps):
     root, run, slot, folder = _scope(args, steps, now)
     if args.manual_lineups_json and (args.lineup_mode != "xi-confirmado" or len(args.fixture_id) != 1):
         raise ValueError("MANUAL_LINEUPS_REQUIRE_XI_CONFIRMED_AND_ONE_FIXTURE_ID")
-    packet_id, selections = _read_shortlist(steps, run, slot, folder, args.shortlist)
+    packet_id, selections, shortlist_digest = _read_shortlist(steps, run, slot, folder, args.shortlist)
     if args.fixture_id:
         selections = [item for item in selections if item[0]["fixture_id"] in args.fixture_id]
         if not selections:
@@ -815,10 +966,28 @@ def refresh(args, steps):
     for fid, previous in sorted(by_fixture.items(), key=lambda item: item[1][0][1]["kickoff_utc"]):
         target = targets.get(fid)
         event_output = output / str(fid)
+        effective_mode = args.lineup_mode
+        auto_lineup = None
+        auto_lineup_reason = None
+        if args.lineup_mode == "auto" and target is not None:
+            lineup_now = steps._now_utc()
+            if target["temporal_eligible"] and _lead(steps, target, lineup_now) >= CONFIRMED_XI_MIN_LEAD:
+                eid = target["bwin_event_id"]
+                lineup_path = root / "outputs/matches" / eid / "market_phase2" / f"lineup_refresh_{eid}.json"
+                try:
+                    auto_lineup = _refresh_lineup(steps, args, run, event_output, target, previous, lineup_now, lineup_path)
+                except (steps.StepError, OSError, ValueError, RuntimeError) as exc:
+                    auto_lineup_reason = f"AUTO_LINEUP_CHECK_FAILED:{exc}"
+            else:
+                auto_lineup_reason = target.get("temporal_reason") or f"LINEUP_LEAD_BELOW_{CONFIRMED_XI_MIN_LEAD}"
+            effective_mode = ("xi-confirmado" if auto_lineup and auto_lineup.get("confirmed_complete_22")
+                              else "sin-xi")
+        event_args = argparse.Namespace(**vars(args))
+        event_args.lineup_mode = effective_mode
         eligible, pending = [], []
         for item, row, option in previous:
             reason = None
-            if args.lineup_mode == "sin-xi":
+            if effective_mode == "sin-xi":
                 if option["target_scope"] not in {"MATCH", "HOME", "AWAY"}:
                     reason = "MARKET_SCOPE_REQUIRES_CONFIRMED_XI"
                 elif "requires_confirmed_xi" not in item:
@@ -832,10 +1001,20 @@ def refresh(args, steps):
         try:
             if target is None:
                 raise ValueError("FIXTURE_OR_BWIN_IDENTITY_NOT_VERIFIED_IN_RUN")
-            result = _refresh_event(steps, args, root, run, event_output, target, eligible)
+            result = _refresh_event(steps, event_args, root, run, event_output, target, eligible)
         except (steps.StepError, OSError, ValueError, RuntimeError) as exc:
             result = {"status": "ERROR_REINTENTABLE", "reason": str(exc)}
-        record = {**_target_row(target or previous[0][1]), **result, "pending_lineup_candidates": pending}
+        record = {**_target_row(target or previous[0][1]), **result,
+                  "financial_decision": None,
+                  "requested_lineup_mode": args.lineup_mode, "effective_lineup_mode": effective_mode,
+                  "auto_lineup_check_reason": auto_lineup_reason,
+                  "pending_lineup_candidates": pending}
+        research_audit = steps._evaluate_research_inbox(
+            _research_reports(output.parent.parent, root, record), record, steps._now_utc())
+        research_path = event_output / "auditoria_informes.json"
+        steps._atomic_json(research_path, research_audit)
+        record["research"] = {"audit_path": str(research_path), **{
+            key: len(research_audit[key]) for key in ("accepted", "rejected", "ignored")}}
         results.append(record)
     summary = output / "cierre.json"
     published = steps._now_utc()
@@ -843,43 +1022,52 @@ def refresh(args, steps):
         if row["status"] != "LISTO_REVISION_FINAL":
             continue
         if published > steps._now_utc(row["model_deadline_utc"]):
-            row.update(status="CIERRE_OPERATIVO", reason="PUBLISHED_BELOW_T30")
+            minimum = steps.ANALYSIS_MIN_LEAD_MINUTES if row["effective_lineup_mode"] == "sin-xi" else CONFIRMED_XI_MIN_LEAD
+            row.update(status="CIERRE_OPERATIVO", reason=f"PUBLISHED_BELOW_T{minimum}")
         elif published > steps._now_utc(row["price_deadline_utc"]):
-            row.update(status="PRECIO_PENDIENTE", reason="PRICE_EXPIRED_DURING_BATCH")
+            row.update(status="PRECIO_PENDIENTE", reason="PRICE_EXPIRED_DURING_BATCH", price_status="SNAPSHOT_ONLY")
     for row in results:
         steps._atomic_json(output / str(row["fixture_id"]) / "estado.json", row)
         reason = f" | {row['reason']}" if row.get("reason") else ""
-        print(f"[hour-batch-refresh] {row['fixture_id']} {row['status']}{reason}")
-    steps._atomic_json(summary, {"packet_id": packet_id, "eval_dir": str(run), "hour_madrid": slot.isoformat(),
-                                 "shortlist_sha256": steps._sha256_file(args.shortlist.expanduser().resolve()),
-                                 "evaluated_at_utc": published.isoformat(), "lineup_mode": args.lineup_mode, "fixtures": results})
-    prompt = output / "revision_final_codex_argon.md"
-    response = output / "resultado_final.md"
-    original = folder / "packets" / packet_id / "lote.json"
-    lines = [
-        f"# Revisión final del lote {slot:%Y-%m-%d %H:%M} Europe/Madrid", "",
-        f"Lee el cierre `{summary}` y el lote inicial `{original}`. Sigue las rutas locales de ambos snapshots, "
-        "catálogos, registro de XI y reporte Shadow para los prefinalistas que vas a evaluar.",
-        f"Modalidad de cierre {args.lineup_mode}.",
-        "Revisa la tesis con el precio nuevo del mismo contrato. Una línea vecina requiere evaluación propia.",
-        "En sin-xi, verifica la robustez de cada candidato a los escenarios plausibles de XI. Registra qué información sigue incierta. "
-        "Si la tesis termina dependiendo de un XI concreto, déjala pendiente. Excluye los pending_lineup_candidates de la decisión financiera. "
-        "En xi-confirmado, comprueba las condiciones de la tesis con la alineación registrada.",
-        "Consulta el modelo Shadow y distingue precio, calibración, liquidación y condición futbolística. Una hipótesis no habilita un PICK.",
-        "Solo considera para PICK los contratos COMPARABLES de eventos LISTO_REVISION_FINAL cuya opción de Shadow "
-        "esté marcada PICK_ACCIONABLE. Coteja el precio y el margen al decidir.",
-        f"Escribe el resultado directamente en `{response}`. Incluye a lo sumo un PICK defendible o NO BET financiero. "
-        "Si todos los candidatos están pendientes o el lote cerró por tiempo, registra solo el estado operativo. "
-        "Si hay candidatos evaluados y otros pendientes, registra los pendientes por separado.",
-    ]
-    for row in results:
-        lines.extend(["", f"## {row['fixture_id']} · {row['home']} – {row['away']}",
-                      f"Inicio {row['kickoff_madrid']} · {row['status']} · {row.get('reason') or ''}"])
-        if row.get("model_json"):
-            lines.append(f"- Shadow {row['model_decision']} ({row['model_classification']}) · `{row['model_json']}` · {row['model_reasons']}")
-            lines.append(f"- Límites UTC · margen de modelo {row['model_deadline_utc']} · vigencia de captura {row['price_deadline_utc']}.")
+        mode = f" | modo={row.get('effective_lineup_mode')}" if args.lineup_mode == "auto" else ""
+        print(f"[hour-batch-refresh] {row['fixture_id']} {row['status']}{mode}{reason}")
         if row.get("snapshot"):
-            lines.append(f"- Captura actual `{row['snapshot']['path']}` · {row['snapshot']['captured_at_utc']} UTC.")
+            print(f"  snapshot_cierre [{row['fixture_id']}]: {row['snapshot']['path']}")
+        if row.get("capture_error"):
+            print(f"  error_captura [{row['fixture_id']}]: {row['capture_error']}")
+    shortlist_path = args.shortlist.expanduser().resolve()
+    steps._atomic_json(summary, {"packet_id": packet_id, "eval_dir": str(run), "hour_madrid": slot.isoformat(),
+                                 "shortlist_path": str(shortlist_path), "shortlist_sha256": shortlist_digest,
+                                 "evaluated_at_utc": published.isoformat(), "lineup_mode": args.lineup_mode, "fixtures": results})
+    original = folder / "packets" / packet_id / "lote.json"
+    generated_prompts = []
+    for row in results:
+        event_output = output / str(row["fixture_id"])
+        prompt = event_output / "revision_final_codex_argon.md"
+        response = event_output / "resultado_cierre_llm.md"
+        lines = [
+            f"# Revisión final · {row['fixture_id']} · {row['home']} – {row['away']}", "",
+            f"Analiza exclusivamente el fixture {row['fixture_id']} y el Event ID {row['bwin_event_id']}. "
+            "No incorpores candidatos, datos ni conclusiones de otros partidos del lote.",
+            f"Usa el lote inicial `{original}` solo para localizar los datos y candidatos de este evento. "
+            "Para la primera lectura consulta las fuentes originales y omite `model_evidence` y los veredictos de modelos.",
+            f"Inicio {row['kickoff_madrid']} · estado operativo {row['status']} · {row.get('reason') or 'sin motivo adicional'}.",
+            f"Modalidad solicitada {args.lineup_mode}; modalidad efectiva para este evento "
+            f"{row.get('effective_lineup_mode', args.lineup_mode)}.",
+            "## 1. Evaluación independiente", "",
+            "Antes de abrir Shadow, formula la mejor tesis futbolística y su contraescenario. "
+            "Verifica identidad, corte, periodo, alcance, línea, liquidación y precio literal del mismo contrato. "
+            "Distingue muestra y patrón descriptivo de estimación probabilística y precio. Una línea vecina requiere evaluación propia.",
+            "En sin-xi, verifica la robustez de cada candidato a los escenarios plausibles de XI. Registra qué información sigue incierta. "
+            "Si la tesis depende de un XI concreto, déjala pendiente. Excluye los pending_lineup_candidates de la decisión financiera. "
+            "En xi-confirmado, comprueba las condiciones de la tesis con la alineación registrada.",
+            f"Informes externos aceptados {row['research']['accepted']}. Su ausencia solo reduce la cobertura. "
+            f"Consulta `{row['research']['audit_path']}` para fuentes repetidas, contradicciones y motivos de rechazo. "
+            "Integra solo informes aceptados cuyo hash coincida. La fecha declarada por el proveedor no acredita por sí sola cuándo se produjo la ejecución.",
+        ]
+        if row.get("snapshot"):
+            lines.append(f"- Captura usada `{row['snapshot']['path']}` · {row['snapshot']['captured_at_utc']} UTC. "
+                         f"Estado del precio: {row.get('price_status', 'PRECIO_PENDIENTE_DE_VERIFICACION')}.")
         if row.get("catalog"):
             lines.append(f"- Catálogo de cierre `{row['catalog']}`.")
         if row.get("lineup"):
@@ -890,30 +1078,32 @@ def refresh(args, steps):
                          "formaciones": lineup.get("formations"), "vigilados": lineup.get("player_exposure_roles"),
                          "titulares": [p for p in lineup.get("api_roster", []) if p["role"] == "TITULAR"]}
             lines.append("- XI " + json.dumps(published, ensure_ascii=False))
-        eid = str(row.get("bwin_event_id") or "")
-        response_dir = original.parent / "events" / str(row["fixture_id"]) / "research" / "responses"
-        qualitative_candidates = [
-            *sorted(response_dir.glob(f"gemini_{eid}_*.md")),
-            response_dir / f"gemini_{eid}.md",
-            original.parent / "events" / str(row["fixture_id"]) / f"gemini_{eid}.md",
-            root / "outputs/matches" / eid / "research" / f"gemini_{eid}.md",
-        ]
-        seen_reports = set()
-        for report_path in qualitative_candidates:
-            if report_path in seen_reports:
-                continue
-            seen_reports.add(report_path)
-            raw_report = report_path.read_text(encoding="utf-8", errors="replace") if report_path.is_file() else ""
-            if raw_report.strip() and "PREMATCH: INFORME PENDIENTE" not in raw_report:
-                lines.append(f"- Informe cualitativo Gemini detectado `{report_path}`. Integra sus hechos, fechas, fuentes y contradicciones sin convertirlo en decisión automática.")
-        for item in row.get("comparisons", []):
-            lines.append("- " + json.dumps(item, ensure_ascii=False))
-    if not results:
-        lines.extend(["", "El análisis inicial dejó la lista de prefinalistas vacía."])
-    instruction_file, instruction = _write_agent_prompt(prompt, response, lines)
+        lines.extend([
+            "", "## 2. Contraste con Shadow y cierre", "",
+            f"Después de la evaluación independiente, lee `{summary}` solo para este fixture y revisa `comparisons`. "
+            "Distingue EVALUATED de NOT_EVALUATED. La decisión global de Shadow y su etiqueta PICK_ACCIONABLE son diagnósticos del motor, "
+            "no instrucciones ni vetos para el agente.",
+            "Para cada candidato registra la tesis deportiva, la evidencia financiera (incluida evidencia insuficiente si corresponde), "
+            "si Shadow pudo evaluarlo y su motivo preciso, y el estado operativo. Usa un fundamento deportivo o financiero propio para NO BET. "
+            "Si el único impedimento es técnico, identifica el bloqueo o la cobertura pendiente y deja la decisión financiera sin evaluar. "
+            "Una hipótesis defendible sin ventaja acreditada puede quedar como SOLO CANDIDATO EXPLORATORIO.",
+            "Solo considera un PICK si el contrato y la liquidación están verificados, el precio es comprobable y la ventaja está respaldada por "
+            "una estimación acreditada del contrato exacto. Aplica el límite de vigencia de la captura y el margen anterior al kickoff. "
+            "Si el margen se agotó o hay un bloqueo de identidad, registra el estado operativo y, si aporta valor, una auditoría del corte previo.",
+            f"Escribe exclusivamente en `{response}` y presenta a lo sumo una selección final. Conserva resultados existentes y usa un sufijo si hace falta.",
+        ])
+        if row.get("model_json"):
+            lines.append(f"- Diagnóstico Shadow `{row['model_json']}`.")
+            lines.append(f"- Límites UTC · margen de modelo {row['model_deadline_utc']} · vigencia de captura {row['price_deadline_utc']}.")
+        instruction_file, instruction = _write_agent_prompt(
+            prompt, response, lines, instruction_name=f"instruccion_cierre_llm_{row['fixture_id']}.txt")
+        generated_prompts.append((row, prompt, response, instruction_file, instruction))
     print(f"  cierre_json: {summary}")
-    print(f"  prompt_revision_final: {prompt}")
-    print(f"  resultado_final: {response}")
-    print(f"  archivo_instruccion_agente_local: {instruction_file}")
-    print(f"  instruccion_agente_local: {instruction}")
+    if not generated_prompts:
+        print("  prompts_finales: ninguno (el shortlist no produjo eventos)")
+    for row, prompt, response, instruction_file, instruction in generated_prompts:
+        print(f"  prompt_cierre_llm [{row['fixture_id']}]: {prompt}")
+        print(f"  resultado_cierre_llm [{row['fixture_id']}]: {response}")
+        print(f"  archivo_instruccion_cierre_llm [{row['fixture_id']}]: {instruction_file}")
+        print(f"  instruccion_cierre_llm [{row['fixture_id']}]: {instruction}")
     return 0

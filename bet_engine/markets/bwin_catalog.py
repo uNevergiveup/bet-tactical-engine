@@ -338,13 +338,15 @@ def extract_bwin_catalog(
             continue
 
         # Temporal scope
-        if re.search(r"\b(?:entre el|minuto|\d{2}:\d{2})", m_low):
+        _, separator, period = m_low.partition("|")
+        period = period.strip()
+        if re.search(r"\b(?:entre el|minutos?|\d{1,2}:\d{2})\b", m_low):
             t_scope = "UNKNOWN"
-        elif "1a parte" in m_low or "1ª parte" in m_low or "primera parte" in m_low:
+        elif period in {"1a parte", "primera parte"}:
             t_scope = "H1"
-        elif "2a parte" in m_low or "2ª parte" in m_low or "segunda parte" in m_low:
+        elif period in {"2a parte", "segunda parte"}:
             t_scope = "H2"
-        elif "tiempo reglamentario" in m_low or "|" not in m_low:
+        elif period == "tiempo reglamentario" or not separator:
             t_scope = "FT"
         else:
             t_scope = "UNKNOWN"
@@ -677,7 +679,7 @@ def _classify_selection(
             return fam, ckey, d_str, str(line_dec), tgt_scope, ent, True, "VERIFIED_STANDARD", "OK"
 
     # 5. BTTS
-    if m_low.startswith("ambos equipos marcan") and "y " not in m_low:
+    if base == "ambos equipos marcan":
         fam = f"BTTS_{t_scope}" if t_scope != "FT" else "BTTS"
         pref_btts = "h1_" if t_scope == "H1" else ("h2_" if t_scope == "H2" else "")
         if sel_low in {"si", "sí", "yes"}:
@@ -688,7 +690,7 @@ def _classify_selection(
             return fam, ckey, "no", None, "MATCH", None, True, "VERIFIED_STANDARD", "OK"
 
     # 6. 1X2, Double Chance, DNB, Handicap 1X2, Exact Score, First to score, Combos
-    if m_low.startswith("resultado del partido") and "y " not in m_low:
+    if base == "resultado del partido":
         fam = f"1X2_{t_scope}" if t_scope != "FT" else "1X2"
         pref = "h1_" if t_scope == "H1" else ("h2_" if t_scope == "H2" else "")
         if sel_low == "x":
@@ -698,7 +700,7 @@ def _classify_selection(
         if _match_team_key(sel_low, away_keys):
             return fam, f"{pref}away_win", "away", None, "AWAY", away_name, True, "VERIFIED_STANDARD", "OK"
 
-    if m_low.startswith("doble oportunidad"):
+    if base == "doble oportunidad":
         fam = f"DOUBLE_CHANCE_{t_scope}" if t_scope != "FT" else "DOUBLE_CHANCE"
         pref = "h1_" if t_scope == "H1" else ("h2_" if t_scope == "H2" else "")
         parts = [p.strip() for p in sel_low.split(" o ")]
@@ -710,7 +712,7 @@ def _classify_selection(
             return fam, ck, None, None, "MATCH", None, True, "VERIFIED_STANDARD", "OK"
         return fam, None, None, None, "MATCH", None, True, "VERIFIED_STANDARD", "OK"
 
-    if m_low.startswith("ganador sin empate"):
+    if base == "ganador sin empate":
         fam = f"DNB_{t_scope}" if t_scope != "FT" else "DNB"
         pref = "h1_" if t_scope == "H1" else ("h2_" if t_scope == "H2" else "")
         if _match_team_key(sel_low, home_keys):
@@ -719,7 +721,7 @@ def _classify_selection(
             return fam, f"{pref}dnb_away", "away", None, "AWAY", away_name, True, "VERIFIED_STANDARD", "OK"
         return fam, None, None, None, "MATCH", None, True, "VERIFIED_STANDARD", "OK"
 
-    if m_low.startswith("marcador exacto"):
+    if base == "marcador exacto":
         fam = f"EXACT_SCORE_{t_scope}" if t_scope != "FT" else "EXACT_SCORE"
         pref = "h1_" if t_scope == "H1" else ("h2_" if t_scope == "H2" else "")
         m_sc = re.fullmatch(r"(\d+)\s*[-:]\s*(\d+)", sel_lit.strip())
