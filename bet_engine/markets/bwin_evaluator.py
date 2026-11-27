@@ -168,6 +168,8 @@ def _family_calibration_info(
     family: str,
     accredited_families: set[str] | frozenset[str] = frozenset(),
 ) -> tuple[bool, str]:
+    if family in ("EXACT_SCORE_FT", "EXACT_SCORE_H1", "RESULT_AND_BTTS", "BTTS_AND_EITHER_WIN", "BTTS_AND_TOTAL_2_5"):
+        return False, "HIGH_VIG_FAMILY_NON_ACTIONABLE"
     if family in accredited_families:
         return True, "CALIBRATED_OUT_OF_SAMPLE"
     if family in (
@@ -177,10 +179,7 @@ def _family_calibration_info(
         "BTTS",
         "DRAW_NO_BET",
         "EUROPEAN_HANDICAP_1X2",
-        "RESULT_AND_BTTS",
-        "BTTS_AND_EITHER_WIN",
-        "BTTS_AND_TOTAL_2_5",
-        "EXACT_SCORE_FT",
+        "HANDICAP_1_2",
     ):
         return False, "JOINT_MATCH_CALIBRATION_NOT_ACCREDITED"
     if "H1" in family:
@@ -201,6 +200,12 @@ def _effective_n_for_family(fdist: Any, scope: str = "total") -> float | None:
 
 
 def _classify_unmodelled_parsed_selection(sel_key: str) -> tuple[str, str, str]:
+    if sel_key.startswith("eh_") and sel_key.endswith("_draw"):
+        return (
+            "EUROPEAN_HANDICAP_1X2",
+            f"NO_MODELO_VALIDO:EMPATE_EXACTO_HANDICAP_EXCLUIDO_POR_MARGEN({sel_key})",
+            "EXCLUDED_HIGH_VIG_EXACT_MARGIN_DRAW",
+        )
     if sel_key.startswith("eh_"):
         return (
             "EUROPEAN_HANDICAP_1X2",
@@ -218,6 +223,13 @@ def _classify_unmodelled_parsed_selection(sel_key: str) -> tuple[str, str, str]:
             "FIRST_TEAM_TO_SCORE_H1",
             "NO_MODELO_VALIDO:MERCADO_PRIMER_GOL_1H_SIN_MODELO_PROPIO(equivalencia_0_0_auditada)",
             "FIRST_GOAL_FIRST_HALF_UNMODELLED",
+        )
+    if sel_key.startswith(("exact_score_", "h1_exact_score_")):
+        fam_es = "EXACT_SCORE_H1" if sel_key.startswith("h1_") else "EXACT_SCORE_FT"
+        return (
+            fam_es,
+            f"NO_MODELO_VALIDO:MARCADOR_EXACTO_EXCLUIDO_POR_ALTO_MARGEN({sel_key})",
+            "EXCLUDED_HIGH_VIG_EXACT_SCORE",
         )
     if _DYNAMIC_OU_KEY_RE.match(sel_key):
         return (
@@ -249,6 +261,9 @@ def _classify_option(
     market_requires_official_xi: bool = True,
     calibration_accredited: bool = False,
     calibration_status: str = "JOINT_MATCH_CALIBRATION_NOT_ACCREDITED",
+    allow_central_ev_authorization: bool = False,
+    overround: float | None = None,
+    p_market_fair: float | None = None,
 ) -> tuple[str, str, tuple[str, ...], tuple[str, ...]]:
     """Asigna clasificación, categoría de estado y flags de riesgo sin convertir EV conservador positivo en accionable automático."""
     if odd is None or odd <= 1.0:
@@ -270,9 +285,19 @@ def _classify_option(
         risk_flags.append(risk_flag)
         pending.append(risk_flag)
 
-    high_tail_sensitivity = p_mod < 0.05
-    if high_tail_sensitivity:
+    high_tail_sensitivity = p_mod < 0.05 or float(odd) > 4.50
+    if p_mod < 0.05:
         risk_flags.append("COLA_ESTADISTICA_ALTA_SENSIBILIDAD_PRECIO")
+
+    excessive_vig = overround is not None and overround > 0.105
+    if excessive_vig:
+        risk_flags.append(f"MARGEN_CASA_EXCESIVO({overround * 100:.1f}%)")
+
+    extreme_market_divergence = (
+        p_market_fair is not None and (p_mod - p_market_fair) > 0.26
+    )
+    if extreme_market_divergence:
+        risk_flags.append(f"DIVERGENCIA_MODELO_MERCADO_ALTA({p_mod - p_market_fair:+.3f})")
 
     if not lineups_confirmed_complete:
         risk_flags.append(f"SIN_22_TITULARES_CONFIRMADOS({lineup_status})")
@@ -283,14 +308,26 @@ def _classify_option(
         or not calibration_accredited
     )
 
+    ev_gate_passed = (
+        ev_lo > 0.0
+        or (
+            allow_central_ev_authorization
+            and sample_n >= 12
+            and ev_m >= 0.05
+            and ev_lo >= -0.14
+            and not excessive_vig
+            and not extreme_market_divergence
+        )
+    )
+
     if (
         (lineups_confirmed_complete or not market_requires_official_xi)
         and calibration_accredited
-        and ev_lo > 0.0
+        and ev_gate_passed
         and not insufficient_evidence
         and not small_sample_or_uncalibrated
         and not historical_zero_risk
-        and not high_tail_sensitivity
+        and not (p_mod < 0.05 or (allow_central_ev_authorization and float(odd) > 4.50))
     ):
         cls_label = "QUANTITATIVELY_EVALUABLE_EDGE"
         dec_cat = "PICK_ACCIONABLE"
@@ -389,6 +426,7 @@ class BwinMarketEvaluator:
         lineup_status: str | None = None,
         lineup_independent_keys: frozenset[str] = frozenset(),
         calibration_accredited_families: set[str] | frozenset[str] = frozenset(),
+        allow_central_ev_authorization: bool = False,
     ) -> list[EvaluatedMarketOption]:
         if lineups_confirmed_complete is None or lineup_status is None:
             le = getattr(bundle, "target_lineup_evaluation", None) or {}
@@ -397,19 +435,26 @@ class BwinMarketEvaluator:
             if lineup_status is None:
                 lineup_status = str(le.get("status") or "LINEUPS_PENDING")
 
+        odds = odds_map or {}
+        from .staking_and_policy import compute_market_devig_map
+        devig_map = compute_market_devig_map(odds)
+
         def _classify_for_match(fam_name: str, selection_key: str, **kw: Any) -> tuple[str, str, tuple[str, ...], tuple[str, ...], str]:
             cal_ok, cal_status = _family_calibration_info(fam_name, calibration_accredited_families)
+            dv = devig_map.get(selection_key) or {}
             cls_l, dec_c, pend, r_fl = _classify_option(
                 lineups_confirmed_complete=bool(lineups_confirmed_complete),
                 lineup_status=str(lineup_status),
                 market_requires_official_xi=selection_key not in lineup_independent_keys,
                 calibration_accredited=cal_ok,
                 calibration_status=cal_status,
+                allow_central_ev_authorization=allow_central_ev_authorization,
+                overround=dv.get("overround"),
+                p_market_fair=dv.get("p_market_fair"),
                 **kw,
             )
             return cls_l, dec_c, pend, r_fl, cal_status
 
-        odds = odds_map or {}
         tactical_flags: list[str] = []
         if analytics_result is not None:
             for p in analytics_result.prematch_patterns:
@@ -766,11 +811,17 @@ class BwinMarketEvaluator:
         ft_center, ft_grids = model.joint_grid_with_corners("FT")
         if ft_center:
             mg_ft = len(ft_center) - 1
-            # Hándicap Europeo 3-way FT
-            for offset_tag, h_off in (("eh_m1", -1), ("eh_m2", -2), ("eh_p1", 1), ("eh_p2", 2)):
+            # Hándicap Europeo FT: solo lados direccionales (±1, ±2, ±3); se excluye 'empate de hándicap' por sobre-margen
+            for offset_tag, h_off in (
+                ("eh_m1", -1),
+                ("eh_m2", -2),
+                ("eh_m3", -3),
+                ("eh_p1", 1),
+                ("eh_p2", 2),
+                ("eh_p3", 3),
+            ):
                 for s_name, pred in (
                     ("home", lambda i, j, o=h_off: (i + o) > j),
-                    ("draw", lambda i, j, o=h_off: (i + o) == j),
                     ("away", lambda i, j, o=h_off: (i + o) < j),
                 ):
                     sk = f"{offset_tag}_{s_name}"
@@ -782,11 +833,40 @@ class BwinMarketEvaluator:
                             p_mod=pm,
                             p_lo=pl,
                             p_hi=ph,
-                            settlement="THREE_WAY_EUROPEAN_HANDICAP_REGULATION",
+                            settlement="BINARY_REGULATION_TIME",
                             s_n=sample_ft,
                         )
 
-            # Resultado y BTTS / BTTS & Cualquier equipo gana / BTTS & 2.5 FT
+            # Hándicap 1-2 FT en semilíneas (.5) sin empate (±0.5, ±1.5, ±2.5, ±3.5)
+            for whole in (0, 1, 2, 3):
+                half_val = whole + 0.5
+                for sign_ch, signed_h in (("m", -half_val), ("p", half_val)):
+                    sk_h = f"ah_home_{sign_ch}{whole}_5"
+                    if sk_h in odds:
+                        pm, pl, ph = _eval_grid_predicate(ft_grids, ft_center, lambda i, j, o=signed_h: (i + o) > j)
+                        _append_quoted_derived(
+                            fam="HANDICAP_1_2",
+                            skey=sk_h,
+                            p_mod=pm,
+                            p_lo=pl,
+                            p_hi=ph,
+                            settlement="BINARY_HANDICAP_1_2_REGULATION",
+                            s_n=sample_ft,
+                        )
+                    sk_a = f"ah_away_{sign_ch}{whole}_5"
+                    if sk_a in odds:
+                        pm, pl, ph = _eval_grid_predicate(ft_grids, ft_center, lambda i, j, o=signed_h: (j + o) > i)
+                        _append_quoted_derived(
+                            fam="HANDICAP_1_2",
+                            skey=sk_a,
+                            p_mod=pm,
+                            p_lo=pl,
+                            p_hi=ph,
+                            settlement="BINARY_HANDICAP_1_2_REGULATION",
+                            s_n=sample_ft,
+                        )
+
+            # Resultado y BTTS / BTTS & Cualquier equipo gana / BTTS & 2.5 FT (solo auditoría de equivalencias, alto margen)
             derived_ft_specs = (
                 ("RESULT_AND_BTTS", "result_home_btts_yes", lambda i, j: i > j and i >= 1 and j >= 1, "BINARY_REGULATION_TIME"),
                 ("RESULT_AND_BTTS", "result_away_btts_yes", lambda i, j: j > i and i >= 1 and j >= 1, "BINARY_REGULATION_TIME"),
@@ -806,14 +886,14 @@ class BwinMarketEvaluator:
                     pm, pl, ph = _eval_grid_predicate(ft_grids, ft_center, pred)
                     _append_quoted_derived(fam=fam, skey=sk, p_mod=pm, p_lo=pl, p_hi=ph, settlement=stl, s_n=sample_ft)
 
-            # Marcador exacto FT (cualquier i-j dentro de 0..mg_ft cotizado en Bwin)
+            # Marcador exacto FT: solo se preserva auditoría de contratos equivalentes (0-0 y 1-1); el resto queda descartado por sobre-margen
             for sk, odd_val in sorted(odds.items()):
                 if not sk.startswith("exact_score_"):
                     continue
                 parts = sk.split("_")
                 if len(parts) == 4 and parts[2].isdigit() and parts[3].isdigit():
                     gi, gj = int(parts[2]), int(parts[3])
-                    if 0 <= gi <= mg_ft and 0 <= gj <= mg_ft:
+                    if (gi, gj) in {(0, 0), (1, 1)} and 0 <= gi <= mg_ft and 0 <= gj <= mg_ft:
                         pm, pl, ph = _eval_grid_predicate(ft_grids, ft_center, lambda i, j, a=gi, b=gj: i == a and j == b)
                         _append_quoted_derived(
                             fam="EXACT_SCORE_FT",
@@ -825,9 +905,11 @@ class BwinMarketEvaluator:
                             s_n=sample_ft,
                         )
 
-        # 5) Mercados bivariados 1ª parte (GOALS_H1) cuando cotizados en odds_map
+        # 5) Mercados bivariados 1ª parte (GOALS_H1) con ajuste táctico Dixon-Coles cuando cotizados en odds_map
+        from bet_engine.modeling.tactical_enhancements import build_h1_dixon_coles_grids
+
         h1_fam = model.families.get("GOALS_H1")
-        h1_center, h1_grids = model.joint_grid_with_corners("H1")
+        h1_center, h1_grids = build_h1_dixon_coles_grids(h1_fam)
         if h1_fam is not None and h1_center:
             sample_h1 = min(h1_fam.home_sample_n, h1_fam.away_sample_n)
             eff_h1 = _effective_n_for_family(h1_fam, "total")
@@ -882,14 +964,14 @@ class BwinMarketEvaluator:
                         ev_lo_override=ev_lo_c,
                     )
 
-            # Marcador exacto 1ª parte
+            # Marcador exacto 1ª parte: solo se preserva 0-0 para auditoría de equivalencia con Under 0.5 H1
             for sk, odd_val in sorted(odds.items()):
                 if not sk.startswith("h1_exact_score_"):
                     continue
                 parts = sk.split("_")
                 if len(parts) == 5 and parts[3].isdigit() and parts[4].isdigit():
                     gi, gj = int(parts[3]), int(parts[4])
-                    if 0 <= gi <= mg_h1 and 0 <= gj <= mg_h1:
+                    if (gi, gj) == (0, 0) and 0 <= gi <= mg_h1 and 0 <= gj <= mg_h1:
                         pm, pl, ph = _eval_grid_predicate(h1_grids, h1_center, lambda i, j, a=gi, b=gj: i == a and j == b)
                         _append_quoted_derived(
                             fam="EXACT_SCORE_H1",

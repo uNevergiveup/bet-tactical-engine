@@ -264,7 +264,8 @@ class HourBatchTests(TestCase):
         self.assertIn(f'guarda el resultado directamente en "{second.parent / "prefinalistas.json"}"', final_stdout)
         instruction_file = prompt.with_name("instruccion_analista_cuotas.txt")
         instruction = instruction_file.read_text().strip()
-        self.assertEqual(instruction_file.read_bytes(), prompt.with_name("instruccion_agente_local.txt").read_bytes())
+        self.assertFalse(prompt.with_name("instruccion_agente_local.txt").exists())
+        self.assertFalse(prompt.with_name("encargo_codex_argon.md").exists())
         self.assertIn(f"archivo_instruccion_analista_cuotas: {instruction_file}", final_stdout)
         self.assertIn(f"instruccion_analista_cuotas: {instruction}", final_stdout)
         self.assertIn(f"## Instrucción para enviar al agente local\n\n```text\n{instruction}", instructions)
@@ -311,7 +312,7 @@ class HourBatchTests(TestCase):
                      ready["lineup"]["artifact_path"]):
             self.assertIn(str(path), final)
         instruction = final_path.with_name(f"instruccion_cierre_llm_{self.fid}.txt").read_text().strip()
-        self.assertEqual(instruction, final_path.with_name("instruccion_agente_local.txt").read_text().strip())
+        self.assertFalse(final_path.with_name("instruccion_agente_local.txt").exists())
         self.assertIn(instruction, final)
         self.assertIn(str(final_path.with_name("resultado_cierre_llm.md")), instruction)
         self.assertEqual(ready["comparisons"][0]["shadow_evaluation"]["status"], "EVALUATED")
@@ -643,3 +644,15 @@ class HourBatchTests(TestCase):
         self.assertEqual(result["lineup_status"], "LINEUPS_EXTERNAL_CONFIRMED")
         self.assertEqual(len([p for p in result["api_roster"] if p["role"] == "TITULAR"]), 22)
         self.assertEqual(result["source_manual"]["screenshots"][0]["sha256"], steps._sha256_file(image))
+
+    def test_refresh_output_dir_uses_readable_chronological_names(self):
+        refresh_root = self.root / "refresh_names"
+        t1 = datetime(2026, 11, 25, 19, 23, 2, tzinfo=steps.timezone.utc)
+        t2 = datetime(2026, 11, 25, 19, 31, 12, tzinfo=steps.timezone.utc)
+        d1 = batch._refresh_output_dir(refresh_root, t1, "xi-confirmado", steps.trial.TZ)
+        d1_dup = batch._refresh_output_dir(refresh_root, t1, "xi-confirmado", steps.trial.TZ)
+        d2 = batch._refresh_output_dir(refresh_root, t2, "xi-confirmado", steps.trial.TZ)
+        self.assertEqual(d1.name, "2026-11-25_20-23-02_xi-confirmado")
+        self.assertEqual(d1_dup.name, "2026-11-25_20-23-02_xi-confirmado_02")
+        self.assertEqual(d2.name, "2026-11-25_20-31-12_xi-confirmado")
+        self.assertEqual(sorted(p.name for p in refresh_root.iterdir()), [d1.name, d1_dup.name, d2.name])

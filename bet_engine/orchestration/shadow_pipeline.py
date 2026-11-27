@@ -142,8 +142,16 @@ def parse_bwin_odds_txt(
     away_keys = _expand_team_keys(away_name, away_aliases, gender=gender)
 
     for block in parsed.get("markets", []):
-        base, _, period = str(block.get("market") or "").strip().lower().partition("|")
+        base, sep, period = str(block.get("market") or "").strip().lower().partition("|")
         base, period = base.strip(), period.strip()
+        if not sep:
+            m_dash_per = re.search(
+                r"\s+-\s+(tiempo reglamentario|1[ªaº]?\s*parte|primera parte|2[ªaº]?\s*parte|segunda parte)$",
+                base,
+            )
+            if m_dash_per:
+                period = m_dash_per.group(1).strip()
+                base = base[: m_dash_per.start()].strip()
         mname = f"{base} | {period}" if period else base
         sels = block.get("selections") or []
 
@@ -153,7 +161,7 @@ def parse_bwin_odds_txt(
         if re.search(r"\b(?:live|en directo|resto del partido|marcador actual|entre el|minutos?|\d{1,2}:\d{2})\b", mname):
             continue
 
-        is_h1 = period in {"1ª parte", "primera parte"}
+        is_h1 = period in {"1ª parte", "1a parte", "1º parte", "1 parte", "primera parte"}
         is_reg = period in {"", "tiempo reglamentario"}
         if not (is_reg or is_h1):
             continue
@@ -293,7 +301,7 @@ def parse_bwin_odds_txt(
                     record("h1_btts_yes", float(s["odd"]))
                 elif sel == "no":
                     record("h1_btts_no", float(s["odd"]))
-        elif is_reg and mname.startswith("hándicap 1x2"):
+        elif is_reg and (mname.startswith("hándicap 1x2") or mname.startswith("handicap 1x2")):
             m_h = re.search(r"\(([+-]?\d+)\)", mname)
             if m_h:
                 h_val = int(m_h.group(1))
@@ -307,6 +315,21 @@ def parse_bwin_odds_txt(
                         record(f"eh_{tag}_home", odd)
                     elif _match_team_key(re.sub(r"\s+[+-]?\d+$", "", sel), away_keys):
                         record(f"eh_{tag}_away", odd)
+        elif is_reg and (mname.startswith("hándicap 1-2") or mname.startswith("handicap 1-2")):
+            for s in sels:
+                sel = str(s.get("selection") or "").strip().lower()
+                odd = float(s["odd"])
+                m_sel = re.match(r"^(.+?)\s*\(([+-]?\d+(?:[.,]5))\)$", sel)
+                if m_sel:
+                    team_part = m_sel.group(1).strip()
+                    line_val = float(m_sel.group(2).replace(",", "."))
+                    whole = int(abs(line_val))
+                    if 0 <= whole <= 3 and abs(abs(line_val) - (whole + 0.5)) < 1e-6:
+                        sign_ch = "m" if line_val < 0 else "p"
+                        if _match_team_key(team_part, home_keys):
+                            record(f"ah_home_{sign_ch}{whole}_5", odd)
+                        elif _match_team_key(team_part, away_keys):
+                            record(f"ah_away_{sign_ch}{whole}_5", odd)
         elif is_reg and mname.startswith("resultado (1x2) y ambos equipos marcan"):
             for s in sels:
                 sel = str(s.get("selection") or "").strip().lower()
@@ -624,8 +647,11 @@ class ShadowPipelineRunner:
             + analytics_res.descriptive_splits
             + analytics_res.tactical_hypotheses
         )
-        model: MatchProbabilisticModel = CoherentMatchModeler.build_model(
-            bundle, exploratory_artifacts=exploratory_all
+        from bet_engine.modeling.tactical_enhancements import enhance_match_model
+
+        model: MatchProbabilisticModel = enhance_match_model(
+            bundle,
+            CoherentMatchModeler.build_model(bundle, exploratory_artifacts=exploratory_all),
         )
         probabilities_computed_at_utc = datetime.now(timezone.utc).isoformat()
 
@@ -946,10 +972,19 @@ class ShadowPipelineRunner:
 
         # Conservar hasta 3 candidatos investigables/exploratorios deduplicando contratos equivalentes
         # (conservando todas las cuotas originales) y priorizando EV conservador + ausencia de riesgos.
+        _HIGH_VIG_FAMILIES = {
+            "EXACT_SCORE_FT",
+            "EXACT_SCORE_H1",
+            "RESULT_AND_BTTS",
+            "BTTS_AND_EITHER_WIN",
+            "BTTS_AND_TOTAL_2_5",
+        }
         eligible_for_shortlist = [
             o
             for o in modelled_quoted_opts
-            if o.decision_category != "NO_BET_POR_EVIDENCIA"
+            if o.decision_category != "NO_BET_POR_EVIDENCIA" and o.market_family not in _HIGH_VIG_FAMILIES
+        ] or [
+            o for o in modelled_quoted_opts if o.decision_category != "NO_BET_POR_EVIDENCIA"
         ] or modelled_quoted_opts
 
         contract_groups: dict[str, list[EvaluatedMarketOption]] = {}

@@ -158,7 +158,6 @@ auditoría posterior.
 Abre Codex, Argon o Grok CLI en la raíz del repositorio con acceso de lectura
 al RUN y permiso de escritura en la carpeta del lote. Pásale el contenido de
 `instruccion_analista_cuotas.txt`, guardado junto a `encargo_analista_codex_argon.md`.
-Los nombres anteriores del encargo y del TXT se conservan como alias.
 La misma instrucción queda al comienzo del encargo y en la última línea de
 la salida del comando. El agente abre el
 Markdown en disco, lee `lote.json` y consulta directamente los TXT de cuotas,
@@ -330,8 +329,8 @@ tesis y precio.
 En `LISTO_REVISION_FINAL`, usa `instruccion_cierre_llm_<FID>.txt`, anunciado como
 `archivo_instruccion_cierre_llm` en la terminal, en
 ese refresco **dentro de la carpeta del fixture**. El agente lee el paquete y
-escribe `resultado_cierre_llm.md` en la ruta indicada. `instruccion_agente_local.txt`
-queda como alias en los nuevos paquetes y los cierres antiguos se conservan.
+escribe `resultado_cierre_llm.md` en la ruta indicada. Los cierres antiguos
+con `instruccion_agente_local.txt` siguen siendo compatibles en auditoría.
 El agente formula su tesis y verifica el contrato, muestra y precio antes de
 leer Shadow. Cada candidato indica si Shadow lo evaluó y, si no, el motivo.
 Si un informe

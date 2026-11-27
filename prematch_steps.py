@@ -2055,6 +2055,9 @@ def cmd_model(args: argparse.Namespace) -> int:
     early_keys = getattr(args, "lineup_independent_keys", frozenset())
     if early_keys:
         lineup_kwargs["lineup_independent_keys"] = early_keys
+    accredited_fams = getattr(args, "calibration_accredited_families", None)
+    if accredited_fams:
+        lineup_kwargs["calibration_accredited_families"] = frozenset(accredited_fams)
 
     runner = ShadowPipelineRunner(min_lead_minutes=args.min_lead)
     report = runner.run_shadow_on_bundle(
@@ -2216,6 +2219,10 @@ def build_parser() -> argparse.ArgumentParser:
                            help="Inicio Madrid: dos horas; desde 23:00 cubre el resto de la ventana hasta su cierre")
         batch.add_argument("--date", help="Fecha Madrid del lote si hace falta desambiguar")
         batch.add_argument("--confirm-external", action="store_true", help="Autorizar capturas Bwin y, en el cierre, consulta de XI")
+        batch.add_argument("--bankroll", type=float, default=1000.0,
+                           help="Bankroll de referencia para calcular el monto exacto por apuesta (1000.0 por defecto)")
+        batch.add_argument("--currency", default="EUR",
+                           help="Moneda del bankroll para la boleta de ejecución (EUR por defecto)")
         if command == "hour-batch-refresh":
             batch.add_argument("--shortlist", required=True, type=Path, help="JSON de prefinalistas devuelto por Codex o Argon")
             batch.add_argument("--manual-lineups-json", type=Path,

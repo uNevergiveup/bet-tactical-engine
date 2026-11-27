@@ -10,9 +10,10 @@ from preselect_matches import read_stat_block, numeric
 import prematch_prospective_trial as t
 
 
-def observations_from_games(games, team_id, details, requested_ids=None):
+def observations_from_games(games, team_id, details, requested_ids=None, supplement_ids=None):
     rows=[]
     requested=set(details if requested_ids is None else requested_ids)
+    supp_set=set(supplement_ids or ())
     for g in games:
         other=g['away_id'] if g['home_id']==team_id else g['home_id']
         raw=details.get(g['id'],{})
@@ -43,6 +44,10 @@ def observations_from_games(games, team_id, details, requested_ids=None):
              'kickoff_utc':g['date_utc'],'league_id':g['league_id'],'season':g['season'],
              'venue':g['venue'],'status':'FT','statistics_requested':g['id'] in requested,
              'statistics_request_status':request_status,'own':own,'conceded':opp}
+        if g.get('supplement_source')=='DOMESTIC_LEAGUE_SUPPLEMENT' or g['id'] in supp_set:
+            row['supplement_source']='DOMESTIC_LEAGUE_SUPPLEMENT'
+        if g.get('league_type'):row['league_type']=g['league_type']
+        if g.get('league_name'):row['league_name']=g['league_name']
         acquired=[v for v in (raw.get('_acquired_at_utc'),g.get('_acquired_at_utc')) if v]
         if acquired:row['acquired_at_utc']=max(acquired,key=lambda v:temporal_stamp(v))
         lineups=[lu for lu in raw.get('lineups',[]) if lu.get('team',{}).get('id')==team_id]

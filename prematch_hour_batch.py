@@ -4,6 +4,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import re
 from collections import defaultdict
 from datetime import datetime, timedelta
 from decimal import Decimal
@@ -158,24 +159,57 @@ def _card_review(entry, pre_match):
 def _market_options(allowed, target, pre_match, tactical, now, price_status, player_options):
     from bet_engine.context.observation_store import ObservationStore
     from bet_engine.markets.bwin_evaluator import BwinMarketEvaluator
+    from bet_engine.markets.staking_and_policy import (
+        compute_market_devig_map,
+        evaluate_collective_quant_policy,
+        evaluate_player_prop_quant,
+        is_cross_league_club_competition,
+    )
     from bet_engine.modeling.distributions import CoherentMatchModeler
+    from bet_engine.modeling.tactical_enhancements import enhance_match_model
     from prematch_tactical_signal_engine import classify_market
 
     bundle = ObservationStore.from_preselection_match(pre_match, cutoff_utc=now)
-    model = CoherentMatchModeler.build_model(bundle)
+    model = enhance_match_model(bundle, CoherentMatchModeler.build_model(bundle))
+    cross_league = is_cross_league_club_competition(
+        pre_match.get("league") or target.get("league"),
+        target.get("country"),
+    )
+    accredited_fams = frozenset({"GOALS_FT"}) if not cross_league else frozenset()
     # Use the exact catalogued price and rule. Conflicting quotes for the same
     # canonical key stay exploratory rather than selecting the favourable price.
     odds, _ = _verified_catalog_prices(allowed)
-    evaluated = {opt.selection_key: opt for opt in
-                 BwinMarketEvaluator.evaluate_standard_markets(bundle, model, odds_map=odds) if opt.odd is not None}
+    devig_map = compute_market_devig_map(odds)
+    evaluated = {
+        opt.selection_key: opt
+        for opt in BwinMarketEvaluator.evaluate_standard_markets(
+            bundle,
+            model,
+            odds_map=odds,
+            calibration_accredited_families=accredited_fams,
+            allow_central_ev_authorization=True,
+        )
+        if opt.odd is not None and opt.decision_category != "MERCADO_NO_MODELADO"
+    }
+    non_actionable_families = {"EXACT_SCORE", "EXACT_SCORE_H1", "EXACT_SCORE_H2", "COMBO_OR_HTFT"}
     signals = [s for s in tactical.get("signals") or [] if s.get("status") == "SUPPORTED_DESCRIPTIVE_SIGNAL"]
     options = []
     for entry in allowed:
+        if entry["market_family"] in non_actionable_families:
+            continue
         if entry["selection_id"] in player_options:
+            p_ev = player_options[entry["selection_id"]]
+            odd_num = float(entry["odd"]) if entry.get("odd") is not None else None
             options.append({
                 **build_comparison_option(entry, price_validity=price_status),
                 "signals": [], "direction": entry["direction"], "contract_id": entry.get("contract_id"),
-                "model_evidence": None, "player_evidence": player_options[entry["selection_id"]],
+                "model_evidence": None, "player_evidence": p_ev,
+                "quant_policy": evaluate_player_prop_quant(
+                    p_ev,
+                    odd=odd_num,
+                    market_family=entry["market_family"],
+                    lineup_confirmed=False,
+                ),
             })
             continue
         if entry["target_scope"] not in {"MATCH", "HOME", "AWAY"}:
@@ -202,7 +236,7 @@ def _market_options(allowed, target, pre_match, tactical, now, price_status, pla
         if not (linked or option or card_review):
             continue
         accredited = bool(option and option.calibration_status == "CALIBRATED_OUT_OF_SAMPLE"
-                          and option.raw_sample_n is not None and option.raw_sample_n >= 4
+                          and option.raw_sample_n is not None and option.raw_sample_n >= 12
                           and option.p_model is not None and option.p_low is not None)
         row = build_comparison_option(entry, price_validity=price_status,
                                       accredited_p_model=option.p_model if accredited else None)
@@ -219,23 +253,60 @@ def _market_options(allowed, target, pre_match, tactical, now, price_status, pla
         row["model_evidence"] = ({
             "calibration_status": option.calibration_status, "raw_n": option.raw_sample_n,
             "effective_n": option.effective_sample_n,
+            "p_model": option.p_model if accredited else None,
+            "ev_model": option.ev_model if accredited and price_status["status"] == "VALID_PREMATCH" else None,
             "p_low": option.p_low if accredited else None,
             "p_high": option.p_high if accredited else None,
             "conservative_ev": option.ev_conservative_low if accredited and price_status["status"] == "VALID_PREMATCH" else None,
             "diagnostic_uncalibrated": (
-                {"estimate": option.p_model, "low": option.p_low, "high": option.p_high}
+                {"estimate": option.p_model, "low": option.p_low, "high": option.p_high, "ev_central": option.ev_model}
                 if not accredited and (option.raw_sample_n or 0) >= 4 and option.p_model is not None else None
             ),
+            **(
+                {
+                    "equivalent_best_selection": option.equivalent_best_selection,
+                    "equivalent_best_odd": option.equivalent_best_odd,
+                }
+                if option.equivalent_best_selection is not None and option.equivalent_best_odd is not None
+                else {}
+            ),
         } if option else None)
+        row["quant_policy"] = evaluate_collective_quant_policy(
+            market_family=option.market_family if option else entry["market_family"],
+            direction=entry.get("direction"),
+            temporal_scope=entry.get("temporal_scope"),
+            odd=float(entry["odd"]) if entry.get("odd") is not None else None,
+            p_model=option.p_model if option else None,
+            p_low=option.p_low if option else None,
+            p_high=option.p_high if option else None,
+            raw_sample_n=option.raw_sample_n if option else None,
+            effective_sample_n=option.effective_sample_n if option else None,
+            devig_info=devig_map.get(entry.get("canonical_key") or ""),
+            is_cross_league=cross_league,
+            tactical_warnings=option.tactical_warnings if option else (),
+            settlement_verified=(entry.get("settlement_status") == "VERIFIED_STANDARD"),
+        )
         options.append(row)
     return sorted(options, key=_option_order)
 
 
 def _option_order(row):
+    qp = row.get("quant_policy") or {}
+    leak_blocked = bool(qp.get("leak_guard_blocked"))
+    q_auth = bool(qp.get("bet_authorized") or str(qp.get("status") or "").startswith("CANDIDATO_PROP_PENDIENTE_XI"))
+    q_ev = qp.get("ev_model")
     ev = (row.get("model_evidence") or {}).get("conservative_ev")
     direct = any(s["relation"] == "DIRECT_TEAM_MARKET" for s in row["signals"])
-    return (ev is None, -(ev or 0), not direct, -max((s["score"] for s in row["signals"]), default=0),
-            row["market_header_literal"], row["selection_literal"])
+    return (
+        leak_blocked,
+        not q_auth,
+        ev is None and (q_ev is None or q_ev <= 0),
+        -(ev if ev is not None else (q_ev or -999.0)),
+        not direct,
+        -max((s["score"] for s in row["signals"]), default=0),
+        row["market_header_literal"],
+        row["selection_literal"],
+    )
 
 
 def _target_row(target):
@@ -251,7 +322,6 @@ def _write_agent_prompt(prompt, output, lines, *, instruction_name):
                    f'Sigue el encargo y guarda el resultado directamente en "{output}".')
     instruction_file = prompt.with_name(instruction_name)
     _write_markdown(instruction_file, [instruction])
-    _write_markdown(prompt.with_name("instruccion_agente_local.txt"), [instruction])
     _write_markdown(prompt, [
         lines[0], "", "## Instrucción para enviar al agente local", "",
         "```text", instruction, "```", "", "## Encargo", "", *lines[2:],
@@ -344,6 +414,9 @@ def _market_review_rules():
         "la tesis se sostiene con las variantes plausibles de XI. Explica esas variantes en lineup_condition. "
         "Usa true si depende de una titularidad, un rol, minutos o una estructura aún por confirmar.",
         "Compara el precio con una estimación acreditada para el mismo contrato. Usa 1/cuota como umbral bruto en contratos binarios sin devolución.",
+        "Revisa `quant_policy` en cada opción: prioriza contratos con `bet_authorized = true` o `CANDIDATO_PROP_PENDIENTE_XI` (`GOALS_FT` con n>=12 y EV>=+5%, "
+        "y `PLAYER_PROPS` de tiros/faltas con muestra titular). Descarta opciones con `leak_guard_blocked = true` (Córners UNDER con n<14, 1ª parte con muestra corta "
+        "y 1X2/DNB/DC inter-liga sin ajuste Elo) y no repitas dos contratos del mismo `correlation_axis` en un mismo partido.",
         "Trata diagnostic_uncalibrated y card_review como exploratorios. Distingue amarillas de API-Football de tarjetas liquidadas en Bwin.",
         "Para props de jugador, revisa player_prop_coverage y player_evidence. Coteja identidad, competición, minutos, "
         "titularidad histórica, posición, muestra válida y ausencias de datos para el umbral exacto. "
@@ -387,6 +460,89 @@ def _export_gemini(steps, output, packet, response):
     print(f"  inventario_gemini: {inventory}")
     print(f"  prompt_gemini: {prompt}")
     print(f"  guarda el bloque JSON de Gemini en: {response}")
+
+
+def _build_auto_quant_shortlist(packet):
+    """Genera un prefinalistas_quant_auto.json determinista y libre de fugas (<1s)
+    para operar cuando no hay margen horario para esperar DeepSearch o pase LLM de Fase 1.
+    Desduplica por (fixture_id, correlation_axis) y limita a 2 ejes independientes por partido.
+    """
+    pool = []
+    for fx in packet.get("fixtures") or []:
+        if fx.get("status") != "REVISABLE":
+            continue
+        fid = fx["fixture_id"]
+        for opt in fx.get("priced_and_linked_options") or []:
+            qp = opt.get("quant_policy") or {}
+            if qp.get("leak_guard_blocked"):
+                continue
+            is_prop_cand = str(qp.get("status") or "").startswith("CANDIDATO_PROP_PENDIENTE_XI")
+            if not (qp.get("bet_authorized") or is_prop_cand):
+                continue
+            ev = float(qp.get("ev_model") or 0.0)
+            stake = float(qp.get("raw_kelly_stake_pct") or qp.get("projected_stake_if_starter_pct") or 0.0)
+            if ev < 0.05 or stake <= 0.0:
+                continue
+            pool.append((round(ev * stake, 6), ev, fx, opt, qp, is_prop_cand))
+
+    pool.sort(key=lambda item: (-item[0], -item[1], item[2]["fixture_id"], item[3]["selection_id"]))
+    chosen = []
+    seen_axis = set()
+    per_fixture_count = defaultdict(int)
+    for _, ev, fx, opt, qp, is_prop in pool:
+        fid = fx["fixture_id"]
+        axis = str(qp.get("correlation_axis") or "OTHER")
+        if (fid, axis) in seen_axis or per_fixture_count[fid] >= 2:
+            continue
+        seen_axis.add((fid, axis))
+        per_fixture_count[fid] += 1
+        fair = qp.get("fair_odd")
+        min_odd = round(max(1.25, float(fair) * 1.04), 2) if fair else None
+        role = "prefinalist" if len(chosen) < 3 else "reserve"
+        if is_prop:
+            pe = opt.get("player_evidence") or {}
+            case_txt = (
+                f"[AUTO-QUANT] {opt['market_header_literal']} -> {opt['selection_literal']} @ {opt['odd']} | "
+                f"p_model={qp.get('p_model')} (tasa/90 ajustada={qp.get('shrunk_rate_per90')}, "
+                f"n_titular={qp.get('starter_sample_n')}, min={qp.get('usable_minutes')}) | "
+                f"EV={ev:+.1%} | cuota_justa={fair}."
+            )
+            cond_txt = (
+                f"Exige titularidad oficial confirmada de {opt.get('target_entity')} (ID {pe.get('player_id')}) "
+                f"y cuota de cierre no inferior a {min_odd:.2f}." if min_odd else
+                f"Exige titularidad oficial confirmada de {opt.get('target_entity')} (ID {pe.get('player_id')})."
+            )
+            req_xi = True
+            watch = [f"{opt.get('target_entity')} ({pe.get('player_id')})"] if pe.get("player_id") else []
+        else:
+            case_txt = (
+                f"[AUTO-QUANT] {opt['market_header_literal']} -> {opt['selection_literal']} @ {opt['odd']} | "
+                f"p_model={qp.get('p_model')} vs p_mkt_limpia={qp.get('p_market_fair')} "
+                f"(overround={qp.get('market_overround')}, n={qp.get('raw_sample_n')}) | "
+                f"EV={ev:+.1%} | cuota_justa={fair}."
+            )
+            cond_txt = (
+                f"Mercado colectivo limpio de fugas; invalidar si la cuota cae por debajo de {min_odd:.2f}."
+                if min_odd else "Mercado colectivo limpio de fugas."
+            )
+            req_xi = False
+            watch = []
+        cand_obj = {
+            "fixture_id": fid,
+            "selection_id": opt["selection_id"],
+            "role": role,
+            "case_for": case_txt,
+            "lineup_condition": cond_txt,
+            "requires_confirmed_xi": req_xi,
+        }
+        if min_odd is not None:
+            cand_obj["min_odd"] = min_odd
+        if watch:
+            cand_obj["watch_players"] = watch
+        chosen.append(cand_obj)
+        if len(chosen) >= MAX_PREFINALISTS:
+            break
+    return {"packet_id": packet["packet_id"], "candidates": chosen}
 
 
 def prepare(args, steps):
@@ -441,6 +597,8 @@ def prepare(args, steps):
               "created_at_utc": steps._now_utc().isoformat(), "fixtures": results}
     path = output / "lote.json"
     steps._atomic_json(path, packet)
+    auto_shortlist_path = output / "prefinalistas_quant_auto.json"
+    steps._atomic_json(auto_shortlist_path, _build_auto_quant_shortlist(packet))
     prompt = output / "encargo_analista_codex_argon.md"
     response = output / "prefinalistas.json"
     lines = [
@@ -476,8 +634,8 @@ def prepare(args, steps):
             lines.append("- Cobertura de props y referencias históricas verificadas en `player_prop_coverage` y `player_history_sources` de este fixture.")
     instruction_file, instruction = _write_agent_prompt(
         prompt, response, lines, instruction_name="instruccion_analista_cuotas.txt")
-    _write_markdown(output / "encargo_codex_argon.md", prompt.read_text(encoding="utf-8").splitlines())
     print(f"  lote_json: {path}")
+    print(f"  prefinalistas_quant_auto_json: {auto_shortlist_path}")
     print(f"  prompt_analista_cuotas: {prompt}")
     print(f"  prefinalistas_json: {response}")
     print(f"  archivo_instruccion_analista_cuotas: {instruction_file}")
@@ -514,8 +672,14 @@ def _read_shortlist(steps, run, slot, folder, path):
     selected = {}
     for item in candidates:
         keys = {"fixture_id", "selection_id", "role", "case_for", "lineup_condition"}
+        min_odd_val = item.get("min_odd")
+        valid_min_odd = (
+            min_odd_val is None
+            or (isinstance(min_odd_val, (int, float)) and not isinstance(min_odd_val, bool) and float(min_odd_val) > 1.0)
+        )
         if (not isinstance(item, dict) or not keys <= item.keys()
-                or item.keys() - keys - {"watch_players", "requires_confirmed_xi"}
+                or item.keys() - keys - {"watch_players", "requires_confirmed_xi", "min_odd"}
+                or not valid_min_odd
                 or type(item.get("requires_confirmed_xi", True)) is not bool
                 or type(item["fixture_id"]) is not int
                 or any(not isinstance(item[k], str) or not item[k].strip() for k in keys - {"fixture_id"})
@@ -896,10 +1060,14 @@ def _refresh_event(steps, args, root, run, output, target, previous):
         status = "LIQUIDACION_PENDIENTE" if reasons == ["SETTLEMENT_UNVERIFIED"] else "CONTRATO_PENDIENTE"
         return {**result, "status": status, "reason": ",".join(reasons)}
     model_dir = output / "model"
+    from bet_engine.markets.staking_and_policy import is_cross_league_club_competition
+    cross_league = is_cross_league_club_competition(target.get("league"), target.get("country"))
+    accredited_fams = frozenset({"GOALS_FT"}) if not cross_league else frozenset()
     stages = argparse.Namespace(
         command="model", root=root, eval_dir=run, asof=None, fixture_id=target["fixture_id"],
         event_id=eid, min_lead=minimum, odds_file=Path(snapshot["path"]), output_dir=model_dir,
         lineup_independent_keys=eligible_keys if early else frozenset(), verified_catalog_odds=verified_odds,
+        calibration_accredited_families=accredited_fams, allow_central_ev_authorization=True,
     )
     model_path = model_dir / f"model_report_{eid}.json"
     try:
@@ -932,9 +1100,8 @@ def _refresh_event(steps, args, root, run, output, target, previous):
             row["shadow_evaluation"] = {"status": "EVALUATED", "reason": None}
             row["shadow_option"] = {k: option.get(k) for k in (
                 "calibration_status", "decision_category", "raw_sample_n", "effective_sample_n", "pending_conditions",
+                "p_model", "p_low", "p_high", "ev_model", "ev_conservative_low", "fair_odd", "tactical_warnings",
             )}
-            if option.get("calibration_status") == "CALIBRATED_OUT_OF_SAMPLE":
-                row["shadow_option"].update({k: option.get(k) for k in ("p_model", "p_low", "p_high", "ev_conservative_low")})
     if status == "LISTO_REVISION_FINAL" and not any(row["shadow_evaluation"]["status"] == "EVALUATED" for row in comparisons):
         status, reason = "COBERTURA_MODELO_PENDIENTE", ",".join(
             dict.fromkeys(row["shadow_evaluation"]["reason"] for row in comparisons))
@@ -943,6 +1110,193 @@ def _refresh_event(steps, args, root, run, output, target, previous):
             "model_reasons": report.get("no_bet_reasons"),
             "model_deadline_utc": (_kickoff(steps, target) - timedelta(minutes=minimum)).isoformat(),
             "price_deadline_utc": (steps._now_utc(snapshot["captured_at_utc"]) + timedelta(minutes=FINAL_PRICE_AGE)).isoformat()}
+
+
+def _refresh_output_dir(refresh_root: Path, now_utc: datetime, lineup_mode: str, tz) -> Path:
+    refresh_root.mkdir(parents=True, exist_ok=True)
+    local_now = now_utc.astimezone(tz)
+    mode_slug = re.sub(r"[^a-z0-9-]+", "-", (lineup_mode or "refresh").lower()).strip("-") or "refresh"
+    base = f"{local_now:%Y-%m-%d_%H-%M-%S}_{mode_slug}"
+    for idx in range(1, 1000):
+        name = base if idx == 1 else f"{base}_{idx:02d}"
+        candidate = refresh_root / name
+        try:
+            candidate.mkdir(parents=False, exist_ok=False)
+            return candidate
+        except FileExistsError:
+            continue
+    raise RuntimeError(f"REFRESH_DIR_COLLISION:{base}")
+
+
+def _finalize_quant_tickets_and_boleta(steps, output, slot, results, targets, by_fixture, published, *, bankroll, currency):
+    """Evalúa cada candidato refrescado con las reglas anti-fugas, piso de cuota,
+    desduplicación por correlación intra-partido y Kelly Fraccional, generando
+    `boleta_ejecucion.json` y `boleta_ejecucion.md` al instante (<2s).
+    """
+    from bet_engine.markets.staking_and_policy import (
+        allocate_match_portfolio_stakes,
+        compute_market_devig_map,
+        evaluate_collective_quant_policy,
+        evaluate_player_prop_quant,
+        extract_min_acceptable_odd,
+        is_cross_league_club_competition,
+    )
+
+    boleta_fixtures = []
+    total_batch_bets = 0
+    total_batch_pct = 0.0
+    total_batch_amt = 0.0
+
+    for row in results:
+        fid = row["fixture_id"]
+        target = targets.get(fid) or row
+        prev_map = {opt["selection_id"]: (item, opt) for item, _, opt in (by_fixture.get(fid) or [])}
+        cross_league = is_cross_league_club_competition(target.get("league"), target.get("country"))
+
+        devig_map = {}
+        if row.get("catalog") and Path(row["catalog"]).is_file():
+            try:
+                cat_doc = steps._read_json(Path(row["catalog"]))
+                v_odds, _ = _verified_catalog_prices(cat_doc.get("entries") or [])
+                devig_map = compute_market_devig_map(v_odds)
+            except (OSError, ValueError, KeyError):
+                devig_map = {}
+
+        lineup_ok = bool((row.get("lineup") or {}).get("confirmed_complete_22"))
+        lead_ok = _lead(steps, target, published) >= (
+            steps.ANALYSIS_MIN_LEAD_MINUTES if row.get("effective_lineup_mode") == "sin-xi" else CONFIRMED_XI_MIN_LEAD
+        )
+        price_fresh = row.get("price_status") == "RECENT_PREMATCH_SNAPSHOT"
+        collective_gate_open = (row.get("status") == "LISTO_REVISION_FINAL") and lead_ok and price_fresh
+        prop_gate_open = (row.get("status") in {"LISTO_REVISION_FINAL", "LIQUIDACION_PENDIENTE"}) and lineup_ok and lead_ok and price_fresh
+
+        cand_inputs = []
+        for comp in row.get("comparisons") or []:
+            sel_id = comp.get("selection_id")
+            orig_item, orig_opt = prev_map.get(sel_id, (comp, {}))
+            min_odd = extract_min_acceptable_odd(orig_item)
+            price_block = comp.get("price") or {}
+            odd_after_str = price_block.get("odd_after")
+            odd_after = float(odd_after_str) if (price_block.get("status") == "COMPARABLE" and odd_after_str is not None) else None
+            fam = orig_opt.get("market_family") or ""
+
+            if comp.get("player_evidence") is not None:
+                p_role = (comp.get("player_lineup_context") or {}).get("role")
+                qd = evaluate_player_prop_quant(
+                    comp["player_evidence"],
+                    odd=odd_after,
+                    market_family=fam,
+                    lineup_role=p_role,
+                    lineup_confirmed=lineup_ok,
+                    min_acceptable_odd=min_odd,
+                )
+                if not prop_gate_open and qd.get("bet_authorized"):
+                    qd = {
+                        **qd,
+                        "bet_authorized": False,
+                        "raw_kelly_stake_pct": 0.0,
+                        "status": f"BLOQUEO_OPERATIVO_CIERRE({row.get('status')})",
+                    }
+            else:
+                sh_opt = comp.get("shadow_option") or {}
+                qd = evaluate_collective_quant_policy(
+                    market_family=fam,
+                    direction=orig_opt.get("direction"),
+                    temporal_scope=orig_opt.get("temporal_scope"),
+                    odd=odd_after,
+                    p_model=sh_opt.get("p_model"),
+                    p_low=sh_opt.get("p_low"),
+                    p_high=sh_opt.get("p_high"),
+                    raw_sample_n=sh_opt.get("raw_sample_n"),
+                    effective_sample_n=sh_opt.get("effective_sample_n"),
+                    devig_info=devig_map.get(price_block.get("canonical_key_after") or ""),
+                    is_cross_league=cross_league,
+                    tactical_warnings=sh_opt.get("tactical_warnings") or (),
+                    min_acceptable_odd=min_odd,
+                    settlement_verified=(price_block.get("settlement_after") == "VERIFIED_STANDARD"),
+                )
+                if not collective_gate_open and qd.get("bet_authorized"):
+                    qd = {
+                        **qd,
+                        "bet_authorized": False,
+                        "raw_kelly_stake_pct": 0.0,
+                        "status": f"BLOQUEO_OPERATIVO_CIERRE({row.get('status')})",
+                    }
+            comp["min_acceptable_odd"] = min_odd
+            comp["quant_decision"] = qd
+            cand_inputs.append({
+                "selection_id": sel_id,
+                "market_header_literal": comp.get("market_header_literal"),
+                "selection_literal": comp.get("selection_literal"),
+                "odd": odd_after,
+                "quant_decision": qd,
+            })
+
+        portfolio = allocate_match_portfolio_stakes(
+            cand_inputs,
+            bankroll=bankroll,
+            currency=currency,
+        )
+        row["execution_ticket"] = portfolio
+        row["financial_decision"] = portfolio["match_decision"]
+        total_batch_bets += portfolio["authorized_picks_count"]
+        total_batch_pct = round(total_batch_pct + portfolio["total_match_stake_pct"], 2)
+        total_batch_amt = round(total_batch_amt + portfolio["total_match_amount"], 2)
+        boleta_fixtures.append({
+            "fixture_id": fid,
+            "bwin_event_id": row.get("bwin_event_id"),
+            "match": f"{row.get('home')} vs {row.get('away')}",
+            "kickoff_madrid": row.get("kickoff_madrid"),
+            "operational_status": row.get("status"),
+            "effective_lineup_mode": row.get("effective_lineup_mode"),
+            **portfolio,
+        })
+
+    boleta_doc = {
+        "evaluated_at_utc": published.isoformat(),
+        "hour_madrid": slot.isoformat(),
+        "bankroll_reference": bankroll,
+        "currency": currency,
+        "total_authorized_bets": total_batch_bets,
+        "total_batch_stake_pct": total_batch_pct,
+        "total_batch_amount": total_batch_amt,
+        "fixtures": boleta_fixtures,
+    }
+    boleta_json = output / "boleta_ejecucion.json"
+    boleta_md = output / "boleta_ejecucion.md"
+    steps._atomic_json(boleta_json, boleta_doc)
+
+    md = [
+        f"# Boleta de Ejecución Cuantitativa · Lote {slot:%Y-%m-%d %H:%M} Madrid",
+        "",
+        f"- **Bankroll de referencia:** `{bankroll:.2f} {currency}` (`1u = 1% = {bankroll * 0.01:.2f} {currency}`)",
+        f"- **Apuestas `BET` autorizadas:** `{total_batch_bets}` | **Exposición total del lote:** `{total_batch_pct:.2f}%` (`{total_batch_amt:.2f} {currency}`)",
+        "- **Reglas activas:** Anti-fugas (`Córners UNDER n<14`, `1ª parte`, `1X2 inter-liga sin Elo`), piso automático de cuota, máx. 1 pick por eje de correlación y tope `3.00%` por partido.",
+        "",
+    ]
+    for fx in boleta_fixtures:
+        md.append(f"## {fx['match']} (`{fx['fixture_id']}` · Bwin `{fx['bwin_event_id']}`)")
+        md.append(f"- Inicio: `{fx['kickoff_madrid']}` | Modo XI: `{fx['effective_lineup_mode']}` | Decisión partido: **`{fx['match_decision']}`** (`{fx['total_match_stake_pct']:.2f}%` = `{fx['total_match_amount']:.2f} {currency}`)")
+        if not fx["allocations"]:
+            md.append("- Sin candidatos elegibles en esta modalidad.")
+        for alloc in fx["allocations"]:
+            odd_txt = f"{alloc['odd']:.2f}" if alloc.get("odd") else "N/D"
+            ev_txt = f"{alloc['ev_model']:+.1%}" if alloc.get("ev_model") is not None else "N/D"
+            p_txt = f"{alloc['p_model']:.1%}" if alloc.get("p_model") is not None else "N/D"
+            if alloc["decision"] == "BET":
+                md.append(
+                    f"- ✅ **BET** · `{alloc['market_header_literal']} → {alloc['selection_literal']}` @ **`{odd_txt}`** "
+                    f"| `p_model={p_txt}` · `EV={ev_txt}` · Eje `{alloc['correlation_axis']}` "
+                    f"→ **Stake: `{alloc['stake_pct_bank']:.2f}%` (`{alloc['stake_units']:.2f}u` = `{alloc['stake_amount']:.2f} {currency}`)**"
+                )
+            else:
+                md.append(
+                    f"- ⛔ **{alloc['decision']}** (`0 {currency}`) · `{alloc['market_header_literal']} → {alloc['selection_literal']}` @ `{odd_txt}` "
+                    f"| `p_model={p_txt}` · `EV={ev_txt}` · Motivo: `{alloc['reason']}`"
+                )
+        md.append("")
+    _write_markdown(boleta_md, md)
+    return boleta_json, boleta_md, boleta_doc
 
 
 def refresh(args, steps):
@@ -955,7 +1309,7 @@ def refresh(args, steps):
         selections = [item for item in selections if item[0]["fixture_id"] in args.fixture_id]
         if not selections:
             raise ValueError("NO_SHORTLIST_CANDIDATES_FOR_REQUESTED_FIXTURE")
-    output = folder / "packets" / packet_id / "refresh" / uuid4().hex
+    output = _refresh_output_dir(folder / "packets" / packet_id / "refresh", now, args.lineup_mode, steps.trial.TZ)
     _, major = steps._load_major_doc(run)
     rows = steps._bwin_reconcile_records(run, major, now, min_lead_minutes=0)["all"]
     targets = {row["fixture_id"]: row for row in rows if row["identity_state"] == "VERIFIED"}
@@ -1026,19 +1380,36 @@ def refresh(args, steps):
             row.update(status="CIERRE_OPERATIVO", reason=f"PUBLISHED_BELOW_T{minimum}")
         elif published > steps._now_utc(row["price_deadline_utc"]):
             row.update(status="PRECIO_PENDIENTE", reason="PRICE_EXPIRED_DURING_BATCH", price_status="SNAPSHOT_ONLY")
+    bankroll_ref = float(getattr(args, "bankroll", 1000.0) or 1000.0)
+    currency_ref = str(getattr(args, "currency", "EUR") or "EUR")
+    boleta_json, boleta_md, boleta_doc = _finalize_quant_tickets_and_boleta(
+        steps, output, slot, results, targets, by_fixture, published,
+        bankroll=bankroll_ref, currency=currency_ref,
+    )
     for row in results:
         steps._atomic_json(output / str(row["fixture_id"]) / "estado.json", row)
         reason = f" | {row['reason']}" if row.get("reason") else ""
         mode = f" | modo={row.get('effective_lineup_mode')}" if args.lineup_mode == "auto" else ""
-        print(f"[hour-batch-refresh] {row['fixture_id']} {row['status']}{mode}{reason}")
+        fin = f" | decision_financiera={row.get('financial_decision')}" if row.get("financial_decision") else ""
+        print(f"[hour-batch-refresh] {row['fixture_id']} {row['status']}{mode}{fin}{reason}")
         if row.get("snapshot"):
             print(f"  snapshot_cierre [{row['fixture_id']}]: {row['snapshot']['path']}")
         if row.get("capture_error"):
             print(f"  error_captura [{row['fixture_id']}]: {row['capture_error']}")
+        for alloc in (row.get("execution_ticket") or {}).get("allocations") or []:
+            if alloc.get("decision") == "BET":
+                print(
+                    f"  [BET] {row['fixture_id']} · {alloc['market_header_literal']} -> {alloc['selection_literal']} "
+                    f"@ {alloc['odd']:.2f} | EV={alloc['ev_model']:+.1%} | "
+                    f"Stake={alloc['stake_pct_bank']:.2f}% ({alloc['stake_amount']:.2f} {currency_ref})"
+                )
     shortlist_path = args.shortlist.expanduser().resolve()
     steps._atomic_json(summary, {"packet_id": packet_id, "eval_dir": str(run), "hour_madrid": slot.isoformat(),
                                  "shortlist_path": str(shortlist_path), "shortlist_sha256": shortlist_digest,
-                                 "evaluated_at_utc": published.isoformat(), "lineup_mode": args.lineup_mode, "fixtures": results})
+                                 "evaluated_at_utc": published.isoformat(), "lineup_mode": args.lineup_mode,
+                                 "bankroll_reference": bankroll_ref, "currency": currency_ref,
+                                 "boleta_json": str(boleta_json), "boleta_md": str(boleta_md),
+                                 "fixtures": results})
     original = folder / "packets" / packet_id / "lote.json"
     generated_prompts = []
     for row in results:
@@ -1099,6 +1470,8 @@ def refresh(args, steps):
             prompt, response, lines, instruction_name=f"instruccion_cierre_llm_{row['fixture_id']}.txt")
         generated_prompts.append((row, prompt, response, instruction_file, instruction))
     print(f"  cierre_json: {summary}")
+    print(f"  boleta_ejecucion_md: {boleta_md}")
+    print(f"  boleta_ejecucion_json: {boleta_json}")
     if not generated_prompts:
         print("  prompts_finales: ninguno (el shortlist no produjo eventos)")
     for row, prompt, response, instruction_file, instruction in generated_prompts:

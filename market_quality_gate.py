@@ -183,21 +183,21 @@ def _model_availability(market, kind, selection=None):
             return (True, 'GOALS_H1' if is_h1 else 'GOALS_FT', is_h1)
         return (False, None, False)
     if kind=='correct_score':
-        if not is_h1 and 'multiple' not in n and n.startswith('marcador exacto'):
-            return (True, 'GOALS_FT', False)
-        if is_h1 and 'multiple' not in n and n.startswith('marcador exacto'):
-            return (True, 'GOALS_H1', True)
         return (False, None, False)
     if kind=='handicap':
-        if not is_h1 and n.startswith('handicap 1x2') and any(off in n for off in ('(-1)','(-2)','(+1)','(+2)')):
+        sel_norm = normalized_name(selection) if selection is not None else ''
+        if not is_h1 and n.startswith('handicap 1x2') and any(
+            off in n for off in ('(-1)','(-2)','(-3)','(1)','(2)','(3)','(+1)','(+2)','(+3)')
+        ):
+            if selection is not None and ('empate' in sel_norm or sel_norm == 'x'):
+                return (False, None, False)
+            return (True, 'GOALS_FT', False)
+        if not is_h1 and n.startswith('handicap 1-2') and any(
+            off in n for off in ('0,5','0.5','1,5','1.5','2,5','2.5','3,5','3.5')
+        ):
             return (True, 'GOALS_FT', False)
         return (False, None, False)
     if kind=='combined_or_builder':
-        if not is_h1 and any(n.startswith(pfx) for pfx in (
-                'resultado (1x2) y ambos equipos marcan',
-                'ambos equipos marcan y total de goles 2,5',
-                'ambos equipos marcan y cualquier equipo gana')):
-            return (True, 'GOALS_FT', False)
         return (False, None, False)
     return (False, None, False)
 

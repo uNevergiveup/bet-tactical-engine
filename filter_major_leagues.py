@@ -75,6 +75,13 @@ WOMENS_LEAGUE_IDS = {139, 142, 91, 673, 1229, 948, 739, 254, 1130}
 # está acreditada. La combinación completa evita inferir género por ausencia
 # de palabras como Women/U19.
 EXPLICIT_COMPETITION_CATEGORIES: dict[int, dict[str,Any]] = {
+ 2: {
+   'provider':'API_FOOTBALL','country':'World','canonical_name':'UEFA Champions League',
+   'names':('UEFA Champions League',),'bwin_aliases':('UEFA Champions League',),
+   'gender':'M','level':'SENIOR','category_status':'ELIGIBLE',
+   'season_policy':'POSITIVE_API_SEASON',
+   'evidence':'CURATED_API_FOOTBALL_LEAGUE_2_UEFA_MALE_SENIOR_CLUB_COMPETITION',
+ },
  1130: {
    'provider':'API_FOOTBALL','country':'USA','canonical_name':'USL Super League',
    'names':('USL Super League',),'bwin_aliases':('USL Super League',),
@@ -244,6 +251,8 @@ def classify_competition_category(
         return 'YOUTH'
     if RESERVE_LEAGUE_PATTERN.search(league) or RESERVE_TEAM_PATTERN.search(home) or RESERVE_TEAM_PATTERN.search(away):
         return 'RESERVES'
+    if row.get('league_id') == 2 and explicit_competition_category(row):
+        return 'SENIOR_ELIGIBLE_CUP_OR_INTERNATIONAL'
     if registered_entry is None:
         from competition_registry import lookup
         registered_entry = lookup(row)
@@ -321,6 +330,8 @@ def classify(row: dict[str,Any], policy: str='adult-open') -> tuple[str,str]:
             return 'EXCLUDED', 'CUP_OR_INTERNATIONAL_EXCLUDED_BY_DOMESTIC_TOP_TIER'
         return 'REVIEW', 'NOT_IN_CURATED_TOP_TIER_CATALOG'
     if policy == 'top-tier-and-senior-cups':
+        if lid == 2 and explicit_competition_category(row):
+            return 'ELIGIBLE', 'CURATED_CONTINENTAL_SENIOR_CLUB_COMPETITION'
         if entry:
             typ = entry.get('type')
             if typ == 'CLUB_FRIENDLY':
@@ -355,6 +366,8 @@ def classify(row: dict[str,Any], policy: str='adult-open') -> tuple[str,str]:
     # estable. Esta decision es exclusivamente deportiva: no afirma que el
     # evento exista en Bwin ni vincula ningun Bwin Event ID.
     admission_status, admission_reason = admission(row)
+    if lid == 2 and explicit_competition_category(row):
+        return 'ELIGIBLE', 'CURATED_CONTINENTAL_SENIOR_CLUB_COMPETITION'
     if (
         admission_status == 'REVIEW'
         and lid in CATALOG_BY_COUNTRY.get(country, ())

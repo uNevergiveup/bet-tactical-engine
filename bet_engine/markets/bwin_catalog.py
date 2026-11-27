@@ -151,8 +151,21 @@ def is_default_modeled_key(canonical_key: str | None, market_family: str) -> boo
     """Indica si una clave comercial corresponde a una familia modelada por bwin_evaluator.py."""
     if not canonical_key:
         return False
-    if market_family in {"1X2", "DOUBLE_CHANCE", "DNB", "BTTS", "GOALS_FT", "GOALS_H1", "GOALS_TEAM", "CORNERS_TOTAL", "CORNERS_TEAM", "EXACT_SCORE"}:
-        return True
+    if market_family in {
+        "1X2",
+        "DOUBLE_CHANCE",
+        "DNB",
+        "BTTS",
+        "GOALS_FT",
+        "GOALS_H1",
+        "GOALS_TEAM",
+        "CORNERS_TOTAL",
+        "CORNERS_TEAM",
+        "EXACT_SCORE",
+        "EUROPEAN_HANDICAP_1X2",
+        "HANDICAP_1_2",
+    }:
+        return not canonical_key.endswith("_draw")
     if market_family == "ON_TARGET_COLLECTIVE":
         return bool(_DYNAMIC_COUNT_KEY_RE.fullmatch(canonical_key)) and not canonical_key.startswith(("h1_", "h2_"))
     return False
@@ -202,7 +215,7 @@ def _coverage_family(header: str, family: str) -> str:
         return "COMBINED"
     if family.startswith(("GOALS", "BTTS", "PLAYER_SCORER", "FIRST_TO_SCORE")) or "gol" in label:
         return "GOALS"
-    if family.startswith(("1X2", "DNB", "DOUBLE_CHANCE", "EXACT_SCORE", "EUROPEAN_HANDICAP")):
+    if family.startswith(("1X2", "DNB", "DOUBLE_CHANCE", "EXACT_SCORE", "EUROPEAN_HANDICAP", "HANDICAP_1_2")):
         return "RESULT"
     return "OTHER"
 
@@ -337,14 +350,22 @@ def extract_bwin_catalog(
             )
             continue
 
-        # Temporal scope
+        # Temporal scope (soporta tanto ' | ' como sufijos Bwin ' - Tiempo reglamentario' / ' - 1ª parte')
         _, separator, period = m_low.partition("|")
         period = period.strip()
+        if not separator:
+            m_dash_per = re.search(
+                r"\s+-\s+(tiempo reglamentario|1[ªaº]?\s*parte|primera parte|2[ªaº]?\s*parte|segunda parte)$",
+                m_low,
+            )
+            if m_dash_per:
+                separator = "-"
+                period = m_dash_per.group(1).strip()
         if re.search(r"\b(?:entre el|minutos?|\d{1,2}:\d{2})\b", m_low):
             t_scope = "UNKNOWN"
-        elif period in {"1a parte", "primera parte"}:
+        elif period in {"1a parte", "1ª parte", "1º parte", "1 parte", "primera parte"}:
             t_scope = "H1"
-        elif period in {"2a parte", "segunda parte"}:
+        elif period in {"2a parte", "2ª parte", "2º parte", "2 parte", "segunda parte"}:
             t_scope = "H2"
         elif period == "tiempo reglamentario" or not separator:
             t_scope = "FT"
@@ -729,7 +750,37 @@ def _classify_selection(
         return fam, ck, None, None, "MATCH", None, True, "VERIFIED_STANDARD", "OK"
 
     if m_low.startswith("handicap 1x2") or m_low.startswith("hándicap 1x2"):
-        return "EUROPEAN_HANDICAP_1X2", None, None, None, "MATCH", None, True, "VERIFIED_STANDARD", "OK"
+        fam = f"EUROPEAN_HANDICAP_1X2_{t_scope}" if t_scope != "FT" else "EUROPEAN_HANDICAP_1X2"
+        if t_scope == "FT":
+            m_h = re.search(r"\(([+-]?\d+)\)", m_low)
+            if m_h:
+                h_val = int(m_h.group(1))
+                if 1 <= abs(h_val) <= 3:
+                    tag = f"m{abs(h_val)}" if h_val < 0 else f"p{h_val}"
+                    if "empate" in sel_low or sel_low == "x":
+                        # El empate exacto de hándicap carga el sobre-margen principal; se inventaría sin promover a modelo
+                        return fam, None, "draw", str(h_val), "MATCH", None, True, "VERIFIED_STANDARD", "HANDICAP_EXACT_MARGIN_DRAW_EXCLUDED"
+                    sel_team = re.sub(r"\s+[+-]?\d+$", "", sel_low).strip()
+                    if _match_team_key(sel_team, home_keys):
+                        return fam, f"eh_{tag}_home", "home", str(h_val), "HOME", home_name, True, "VERIFIED_STANDARD", "OK"
+                    if _match_team_key(sel_team, away_keys):
+                        return fam, f"eh_{tag}_away", "away", str(-h_val), "AWAY", away_name, True, "VERIFIED_STANDARD", "OK"
+        return fam, None, None, None, "MATCH", None, True, "VERIFIED_STANDARD", "OK"
+
+    if m_low.startswith("handicap 1-2") or m_low.startswith("hándicap 1-2"):
+        fam = f"HANDICAP_1_2_{t_scope}" if t_scope != "FT" else "HANDICAP_1_2"
+        m_sel = re.match(r"^(.+?)\s*\(([+-]?\d+(?:[.,]5))\)$", sel_low)
+        if t_scope == "FT" and m_sel:
+            team_part = m_sel.group(1).strip()
+            line_val = float(m_sel.group(2).replace(",", "."))
+            whole = int(abs(line_val))
+            if 0 <= whole <= 3 and abs(abs(line_val) - (whole + 0.5)) < 1e-6:
+                sign_ch = "m" if line_val < 0 else "p"
+                if _match_team_key(team_part, home_keys):
+                    return fam, f"ah_home_{sign_ch}{whole}_5", "home", f"{line_val:+.1f}", "HOME", home_name, True, "VERIFIED_STANDARD", "OK"
+                if _match_team_key(team_part, away_keys):
+                    return fam, f"ah_away_{sign_ch}{whole}_5", "away", f"{line_val:+.1f}", "AWAY", away_name, True, "VERIFIED_STANDARD", "OK"
+        return fam, None, None, None, "MATCH", None, False, "SETTLEMENT_UNVERIFIED", "HANDICAP_1_2_UNMODELLED_LINE_OR_PERIOD"
 
     if m_low.startswith("1er equipo en marcar"):
         fam = f"FIRST_TO_SCORE_{t_scope}" if t_scope != "FT" else "FIRST_TO_SCORE"

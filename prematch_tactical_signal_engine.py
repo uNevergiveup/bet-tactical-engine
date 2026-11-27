@@ -50,11 +50,30 @@ def finite(value):
     return isinstance(value,(int,float)) and not isinstance(value,bool) and math.isfinite(value) and value>=0
 
 
+DOMESTIC_SUPPLEMENT_WEIGHTS={
+    'fouls':0.70,'yellow':0.70,'offsides':0.60,
+    'xg':0.55,'goals':0.50,
+    'on_target':0.40,'corners':0.35,'shots':0.35,
+}
+
+
 def stats(values):
     if not values:return {'n':0,'mean':None,'cv':None}
     avg=mean(values);sd=pstdev(values)
     return {'n':len(values),'mean':round(avg,4),'stdev':round(sd,4),
             'cv':round(sd/avg,4) if avg>0 else (0.0 if sd==0 else None)}
+
+
+def _weighted_stats(weighted_pairs):
+    if not weighted_pairs:return {'n':0,'mean':None,'cv':None,'weighted_effective_n':0.0}
+    w_sum=sum(w for _,w in weighted_pairs)
+    if w_sum<=0:return {'n':0,'mean':None,'cv':None,'weighted_effective_n':0.0}
+    avg=sum(v*w for v,w in weighted_pairs)/w_sum
+    var=max(0.0,sum(w*((v-avg)**2) for v,w in weighted_pairs)/w_sum)
+    sd=math.sqrt(var)
+    return {'n':len(weighted_pairs),'mean':round(avg,4),'stdev':round(sd,4),
+            'cv':round(sd/avg,4) if avg>0 else (0.0 if sd==0 else None),
+            'weighted_effective_n':round(w_sum,4)}
 
 
 def summarize_series(records,metric,kind,venue):
@@ -65,16 +84,32 @@ def summarize_series(records,metric,kind,venue):
     detailed_records=records if metric=='goals' else [r for r in records if r.get('statistics_requested',True)]
     vals=[(r,r.get(kind,{}).get(metric)) for r in detailed_records]
     valid=[(r,float(v)) for r,v in vals if finite(v)]
-    values=[v for _,v in valid];summary=stats(values)
-    venue_values=[v for r,v in valid if r['venue']==venue]
+    has_supplement=any(r.get('supplement_source')=='DOMESTIC_LEAGUE_SUPPLEMENT' for r,_ in valid)
+    supp_w=DOMESTIC_SUPPLEMENT_WEIGHTS.get(metric,0.45)
+    values=[v for _,v in valid]
+    if has_supplement:
+        wpairs=[(v,supp_w if r.get('supplement_source')=='DOMESTIC_LEAGUE_SUPPLEMENT' else 1.0) for r,v in valid]
+        summary=_weighted_stats(wpairs)
+        venue_wpairs=[(v,supp_w if r.get('supplement_source')=='DOMESTIC_LEAGUE_SUPPLEMENT' else 1.0) for r,v in valid if r['venue']==venue]
+        venue_summary=_weighted_stats(venue_wpairs)
+        same_comp_venue_n=sum(1 for r,_ in valid if r['venue']==venue and not r.get('supplement_source'))
+        venue_summary['same_competition_n']=same_comp_venue_n
+    else:
+        summary=stats(values)
+        venue_values=[v for r,v in valid if r['venue']==venue]
+        venue_summary=stats(venue_values)
     recent=stats(values[:5]);previous=stats(values[5:10])
     trend=(recent['mean']-previous['mean'])/max(previous['mean'],1) if recent['n']>=3 and previous['n']>=3 else None
     loo=[]
     if len(values)>=4:
-        loo=[mean(values[:i]+values[i+1:]) for i in range(len(values))]
+        if has_supplement:
+            wpairs=[(v,supp_w if r.get('supplement_source')=='DOMESTIC_LEAGUE_SUPPLEMENT' else 1.0) for r,v in valid]
+            loo=[sum(v*w for v,w in (wpairs[:i]+wpairs[i+1:]))/max(1e-6,sum(w for _,w in (wpairs[:i]+wpairs[i+1:]))) for i in range(len(wpairs))]
+        else:
+            loo=[mean(values[:i]+values[i+1:]) for i in range(len(values))]
     requested_coverage=round(100*len(valid)/len(detailed_records),2) if detailed_records else None
     effective_coverage=round(100*len(valid)/all_n,2) if all_n else None
-    base={**summary,'history_n':all_n,'history_not_detailed_n':all_n-len(detailed_records),'expected_n':len(detailed_records),'missing_n':len(detailed_records)-len(valid),
+    base={**summary,'has_domestic_supplement':has_supplement,'history_n':all_n,'history_not_detailed_n':all_n-len(detailed_records),'expected_n':len(detailed_records),'missing_n':len(detailed_records)-len(valid),
           # Backwards-compatible alias: it always meant coverage within details requested.
           'coverage_pct':requested_coverage,
           'historical_matches_available':all_n,
@@ -84,7 +119,7 @@ def summarize_series(records,metric,kind,venue):
           'metric_observations_missing':len(detailed_records)-len(valid),
           'requested_data_coverage_pct':requested_coverage,
           'historical_effective_coverage_pct':effective_coverage,
-          'venue':stats(venue_values),'recent':recent,'previous':previous,'trend_relative':trend,
+          'venue':venue_summary,'recent':recent,'previous':previous,'trend_relative':trend,
           'leave_one_out_mean_range':[round(min(loo),4),round(max(loo),4)] if loo else None,
           'fixture_ids':[r['fixture_id'] for r,_ in valid]}
     return enrich_series_denominators(base,records,detailed_records,valid,venue,metric)
@@ -153,7 +188,7 @@ def aggregate_series(fixture,side,metric,kind):
 
 def filtered_observations(rows,fixture,side,cutoff):
     from prematch_cache_record import historical_available, acquisition_before
-    output=[];seen=set();rejected=[];tid=fixture.get(side+'_id')
+    primary=[];supplement=[];seen=set();rejected=[];tid=fixture.get(side+'_id')
     for r in sorted(rows,key=lambda r:str(r.get('kickoff_utc','')),reverse=True):
         fid=r.get('fixture_id');at=t.dt(r.get('kickoff_utc'))
         why=None
@@ -162,12 +197,21 @@ def filtered_observations(rows,fixture,side,cutoff):
         elif not historical_available(r,cutoff):why='RESULT_NOT_AVAILABLE_AT_CUTOFF'
         elif r.get('acquired_at_utc') and not acquisition_before(r['acquired_at_utc'],cutoff):why='ACQUISITION_AFTER_CUTOFF'
         elif r.get('status')!='FT':why='NON_FT_PERIOD_NOT_COMPARABLE'
-        elif r.get('league_id')!=fixture.get('league_id'):why='DIFFERENT_COMPETITION'
-        elif r.get('season')!=fixture.get('season'):why='DIFFERENT_SEASON'
         elif r.get('venue') not in ('HOME','AWAY'):why='VENUE_UNKNOWN'
         elif fid in seen:why='DUPLICATE_HISTORICAL_FIXTURE'
+        elif r.get('league_id')!=fixture.get('league_id'):
+            if r.get('supplement_source')=='DOMESTIC_LEAGUE_SUPPLEMENT':
+                seen.add(fid);supplement.append(r);continue
+            why='DIFFERENT_COMPETITION'
+        elif r.get('season')!=fixture.get('season'):why='DIFFERENT_SEASON'
         if why:rejected.append({'fixture_id':fid,'reason':why});continue
-        seen.add(fid);output.append(r)
+        seen.add(fid);primary.append(r)
+    if supplement and len(primary)<6:
+        output=sorted(primary+supplement[:max(0,10-len(primary))],key=lambda r:str(r.get('kickoff_utc','')),reverse=True)
+    else:
+        for sr in supplement:
+            rejected.append({'fixture_id':sr.get('fixture_id'),'reason':'DIFFERENT_COMPETITION'})
+        output=primary
     return output[:30],rejected
 
 
@@ -179,6 +223,7 @@ def build_signal(fixture,side,metric,observations,profiles):
     if not own['n'] and not conceded['n']:
         own=aggregate_series(fixture,side,metric,'own');conceded=aggregate_series(fixture,opposite,metric,'conceded');source='AGGREGATED_PRESELECTION'
     n=min(own['n'],conceded['n'])
+    n_eff=min(float(own.get('weighted_effective_n') or own['n']),float(conceded.get('weighted_effective_n') or conceded['n']))
     # Cobertura efectiva y solicitada se auditan como puerta de elegibilidad y diagnóstico,
     # nunca como bonificación para inflar muestras pequeñas (ej. 4/4 = 100%).
     coverage=mean([(s['historical_effective_coverage_pct'] or 0)/100 for s in (own,conceded)])
@@ -194,7 +239,8 @@ def build_signal(fixture,side,metric,observations,profiles):
         contradictions.append('OPPOSITE_RECENT_TRENDS')
     venue_n=min(own['venue']['n'],conceded['venue']['n'])
     for s in (own,conceded):
-        if s['venue']['n']>=3 and s['mean'] is not None and abs(s['venue']['mean']-s['mean'])/max(s['mean'],1)>.4:
+        min_v_n=s['venue'].get('same_competition_n',s['venue']['n']) if s.get('has_domestic_supplement') else s['venue']['n']
+        if min_v_n>=3 and s['mean'] is not None and abs(s['venue']['mean']-s['mean'])/max(s['mean'],1)>.4:
             contradictions.append('VENUE_VS_GLOBAL_DISAGREE');break
     relevant=[p for p in profiles if FAMILY[metric] in p['markets'] and str(p['team_id'])==str(fixture.get(side+'_id'))]
     production_claims={'corners':'CORNER_GENERATION_VOLUME','shots':'SHOT_VOLUME','on_target':'SHOTS_ON_TARGET_VOLUME',
@@ -215,12 +261,12 @@ def build_signal(fixture,side,metric,observations,profiles):
             sensitivity.append(0.7*loo_s+0.3*win_s)
         else:
             sensitivity.append(loo_s)
-    sample_precision=min(n/10,1.0)*(n/(n+6)) if n>0 else 0.0
+    sample_precision=min(n_eff/10,1.0)*(n_eff/(n_eff+6)) if n_eff>0 else 0.0
     trend_consistency=1.0
     if a is not None and b is not None and a*b<0:
         trend_consistency=max(0.5, 1.0 - min(0.5, min(abs(a),abs(b))))
     raw_stability=(1/(1+cv))*trend_consistency if cv is not None else 0.0
-    parts={'sample':min(n/10,1),'sample_precision':round(sample_precision,4),'coverage':coverage,
+    parts={'sample':min(n_eff/10,1),'sample_precision':round(sample_precision,4),'coverage':coverage,
            'stability':round(raw_stability,4),'agreement':round(agreement,4),
            'sensitivity':round(min(sensitivity),4),'venue':min(venue_n/5,1),'profile':1 if confirmed else 0}
     score=max(0,100*sum(WEIGHTS[k]*parts[k] for k in WEIGHTS)-min(20,10*len(contradictions)))
@@ -237,15 +283,17 @@ def build_signal(fixture,side,metric,observations,profiles):
     sos_context=fixture.get('sos_context') or {}
     sos_status='APPLIED' if sos_context.get('applied') else 'NOT_AVAILABLE_IN_PRESELECTION_SNAPSHOT'
     uncertainty={
-        'effective_n':n,
-        'sample_precision_weight':round(n/(n+6),4) if n>0 else 0.0,
-        'uncertainty_se_scale':round(1.0/math.sqrt(max(1,n)),4) if n>0 else None,
-        'laplace_shrunk_ceiling_rate':round((n+1)/(n+2),4) if n>0 else None,
+        'effective_n':round(n_eff,4) if n_eff!=int(n_eff) else int(n_eff),
+        'sample_precision_weight':round(n_eff/(n_eff+6),4) if n_eff>0 else 0.0,
+        'uncertainty_se_scale':round(1.0/math.sqrt(max(1.0,n_eff)),4) if n_eff>0 else None,
+        'laplace_shrunk_ceiling_rate':round((n_eff+1)/(n_eff+2),4) if n_eff>0 else None,
         'window_resilience':round(min(window_resilience),4) if window_resilience else None,
         'sos_adjustment_status':sos_status,
         'score_interpretation':'DESCRIPTIVE_ROBUSTNESS_SCORE_NOT_CALIBRATED_PROBABILITY',
     }
     caveats=list(LIMITATIONS)
+    if any(s.get('has_domestic_supplement') for s in (own,conceded)):
+        caveats.append('DOMESTIC_LEAGUE_SUPPLEMENT_WEIGHTED_BY_METRIC_TRANSFERABILITY')
     if any(s['historical_matches_not_detailed'] for s in (own,conceded)):
         caveats.append('HISTORICAL_COVERAGE_PARTIAL_DETAILED_SUBSET_NOT_TREATED_AS_FULL_HISTORY')
     if source=='AGGREGATED_PRESELECTION':caveats.append('TREND_AND_LOCALITY_UNAVAILABLE')

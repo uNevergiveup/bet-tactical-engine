@@ -3,6 +3,30 @@
   "competitions": [
     {
       "provider": "API_FOOTBALL",
+      "league_id": 267,
+      "country": "Chile",
+      "names": ["Copa Chile"],
+      "gender": "M",
+      "season": 2026,
+      "type": "NATIONAL_CUP",
+      "national_tier": null,
+      "level": "SENIOR",
+      "evidence": "User-confirmed senior club cup; frozen API fixture 1645381 in 2026-11-24 discovery"
+    },
+    {
+      "provider": "API_FOOTBALL",
+      "league_id": 1113,
+      "country": "Venezuela",
+      "names": ["Copa Venezuela"],
+      "gender": "M",
+      "season": 2026,
+      "type": "NATIONAL_CUP",
+      "national_tier": null,
+      "level": "SENIOR",
+      "evidence": "User-confirmed senior club cup; frozen API fixture 1651652 in 2026-11-24 discovery"
+    },
+    {
+      "provider": "API_FOOTBALL",
       "league_id": 140,
       "country": "Spain",
       "names": [
@@ -553,6 +577,63 @@
     {"provider":"API_FOOTBALL","league_id":138,"country":"Italy","names":["Serie C - Girone A"],"gender":"M","season":2026,"type":"LEAGUE","national_tier":3,"level":"SENIOR","evidence":"filter_major_leagues.KNOWN_EXCLUDED_IDS + frozen exact API League ID/name"},
     {"provider":"API_FOOTBALL","league_id":942,"country":"Italy","names":["Serie C - Girone B"],"gender":"M","season":2026,"type":"LEAGUE","national_tier":3,"level":"SENIOR","evidence":"filter_major_leagues.KNOWN_EXCLUDED_IDS + frozen exact API League ID/name"},
     {"provider":"API_FOOTBALL","league_id":943,"country":"Italy","names":["Serie C - Girone C"],"gender":"M","season":2026,"type":"LEAGUE","national_tier":3,"level":"SENIOR","evidence":"filter_major_leagues.KNOWN_EXCLUDED_IDS + frozen exact API League ID/name"},
-    {"provider":"API_FOOTBALL","league_id":11,"country":"World","names":["CONMEBOL Sudamericana"],"gender":"M","season":2026,"type":"NATIONAL_OFFICIAL","national_tier":null,"level":"SENIOR","evidence":"CURATED_SENIOR_CONMEBOL_CLUB_COMPETITION"}
+    {"provider":"API_FOOTBALL","league_id":11,"country":"World","names":["CONMEBOL Sudamericana"],"gender":"M","season":2026,"type":"NATIONAL_OFFICIAL","national_tier":null,"level":"SENIOR","evidence":"CURATED_SENIOR_CONMEBOL_CLUB_COMPETITION"},
+    {
+      "provider": "API_FOOTBALL",
+      "league_id": 3,
+      "country": "World",
+      "names": [
+        "UEFA Europa League"
+      ],
+      "gender": "M",
+      "season": 2026,
+      "type": "NATIONAL_OFFICIAL",
+      "national_tier": null,
+      "level": "SENIOR",
+      "evidence": "User-confirmed senior UEFA club competition; frozen API fixture 1636231 in 2026-11-26 discovery"
+    },
+    {
+      "provider": "API_FOOTBALL",
+      "league_id": 848,
+      "country": "World",
+      "names": [
+        "UEFA Europa Conference League",
+        "UEFA Conference League"
+      ],
+      "gender": "M",
+      "season": 2026,
+      "type": "NATIONAL_OFFICIAL",
+      "national_tier": null,
+      "level": "SENIOR",
+      "evidence": "User-confirmed senior UEFA club competition; frozen API fixture 1636435 in 2026-11-26 discovery"
+    },
+    {
+      "provider": "API_FOOTBALL",
+      "league_id": 501,
+      "country": "Paraguay",
+      "names": [
+        "Copa Paraguay"
+      ],
+      "gender": "M",
+      "season": 2026,
+      "type": "NATIONAL_CUP",
+      "national_tier": null,
+      "level": "SENIOR",
+      "evidence": "User-confirmed senior club cup; frozen API fixture 1651123 in 2026-11-26 discovery"
+    },
+    {
+      "provider": "API_FOOTBALL",
+      "league_id": 930,
+      "country": "Uruguay",
+      "names": [
+        "Copa Uruguay"
+      ],
+      "gender": "M",
+      "season": 2026,
+      "type": "NATIONAL_CUP",
+      "national_tier": null,
+      "level": "SENIOR",
+      "evidence": "User-confirmed senior club cup; frozen API fixture 1649972 in 2026-11-26 discovery"
+    }
   ]
 }

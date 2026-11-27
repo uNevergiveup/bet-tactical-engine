@@ -251,6 +251,7 @@ def prepare_history(raw:list[dict[str,Any]],team_id:int,as_of:datetime,
         if not isinstance(gh,int) or isinstance(gh,bool) or not isinstance(ga,int) or isinstance(ga,bool):continue
         ids.add(fid)
         games.append({**{key:r[key] for key in ('result_available_at_utc','completed_at_utc','fixture_completed_at_utc','_acquired_at_utc') if key in r},'id':fid,'date_utc':dt.isoformat(),'status':(fix.get('status') or {}).get('short'),'league_id':lg.get('id'),
+                      'league_name':lg.get('name'),'league_type':lg.get('type'),
                       'season':lg.get('season'),'home_id':home,'away_id':away,
                       'goals_home':gh,'goals_away':ga,
                       'team_goals':gh if team_id==home else ga,
@@ -303,25 +304,100 @@ def team_detail(games:list[dict[str,Any]],team_id:int,details:dict[int,dict[str,
       'missing_not_zero':True}
 
 
+_CUP_OR_CONTINENTAL_RE = re.compile(
+    r'\b(?:champions league|europa league|conference league|libertadores|sudamericana|'
+    r'recopa|club world cup|cup|copa|pokal|coupe|coppa|taça|taca|beker)\b',
+    re.I,
+)
+_EXCLUDED_SUPPLEMENT_LEAGUE_RE = re.compile(
+    r'\b(?:friendly|friendlies|amistos[oa]s?|u1[789]|u2[0123]|youth|junior|reserve|reservas|'
+    r'cup|copa|pokal|coupe|coppa|super\s*cup|supercopa)\b',
+    re.I,
+)
+
+
+def is_cup_or_continental_fixture(f:dict[str,Any], contract:dict[str,Any]|None=None) -> bool:
+    """Identifica torneos continentales de clubes o copas adultas donde la muestra misma-liga suele ser corta (<6)."""
+    if f.get('gender') == 'NATIONAL' or f.get('league_id') in (1, 4, 5, 6, 9, 10):
+        return False
+    cat = str(f.get('competition_category') or '').upper()
+    if any(tok in cat for tok in ('CONTINENTAL', 'CUP', 'INTERNATIONAL_CLUB')):
+        return True
+    if contract and str(contract.get('competition_type') or '').lower() == 'cup':
+        return True
+    lname = str(f.get('league') or '')
+    return bool(_CUP_OR_CONTINENTAL_RE.search(lname))
+
+
+def _is_senior_domestic_league_game(game:dict[str,Any], target_league_id:int, cutoff:datetime) -> bool:
+    """Acepta solo partidos recientes de Liga doméstica adulta (excluye copas domésticas con rotación y amistosos)."""
+    glid = game.get('league_id')
+    if glid is None or glid == target_league_id or glid in (1, 4, 5, 6, 9, 10, 667):
+        return False
+    if game.get('status') != 'FT':
+        return False
+    try:
+        at = utc_datetime(game.get('date_utc'))
+    except ValueError:
+        return False
+    if at >= cutoff or at < cutoff - timedelta(days=270):
+        return False
+    ltype = str(game.get('league_type') or '').strip().lower()
+    lname = str(game.get('league_name') or '').strip()
+    if ltype and ltype != 'league':
+        return False
+    if lname and _EXCLUDED_SUPPLEMENT_LEAGUE_RE.search(lname):
+        return False
+    # Si viene de caché antigua sin league_type ni league_name, no asumir que es liga doméstica
+    if not ltype and not lname:
+        return False
+    return True
+
+
 def select_detail_games(games:list[dict[str,Any]],league_id:int,season:int,
-                        cutoff:datetime,limit:int) -> tuple[list[dict[str,Any]],dict[str,Any]]:
+                        cutoff:datetime,limit:int,*,
+                        allow_domestic_supplement:bool=False,
+                        min_same_comp_before_supplement:int=6) -> tuple[list[dict[str,Any]],dict[str,Any]]:
     """Elige la muestra que el motor táctico realmente admite sin alterar el histórico general."""
-    eligible=[];rejected=Counter()
+    eligible=[];domestic_candidates=[];rejected=Counter()
     for game in games:
         try:at=utc_datetime(game.get('date_utc'))
         except ValueError:
             rejected['INVALID_DATE']+=1;continue
         if at>=cutoff:rejected['AT_OR_AFTER_CUTOFF']+=1
         elif game.get('status')!='FT':rejected['NON_REGULAR_TIME_FT']+=1
-        elif game.get('league_id')!=league_id:rejected['DIFFERENT_COMPETITION']+=1
+        elif game.get('league_id')!=league_id:
+            rejected['DIFFERENT_COMPETITION']+=1
+            if allow_domestic_supplement and _is_senior_domestic_league_game(game,league_id,cutoff):
+                domestic_candidates.append(game)
         elif game.get('season')!=season:rejected['DIFFERENT_SEASON']+=1
         else:eligible.append(game)
     eligible.sort(key=lambda x:x['date_utc'],reverse=True)
-    selected=eligible[:limit]
-    return selected,{'policy':'SAME_LEAGUE_SEASON_FT_BEFORE_CUTOFF','requested_cap':limit,
+    selected=list(eligible[:limit])
+    alt_sources:list[str]=[]
+    supplement_ids:list[int]=[]
+    if allow_domestic_supplement and len(selected)<min(limit,min_same_comp_before_supplement) and domestic_candidates:
+        domestic_candidates.sort(key=lambda x:x['date_utc'],reverse=True)
+        needed=limit-len(selected)
+        seen_ids={g['id'] for g in selected}
+        for dg in domestic_candidates:
+            if len(supplement_ids)>=needed:
+                break
+            if dg['id'] in seen_ids:
+                continue
+            seen_ids.add(dg['id'])
+            selected.append({**dg,'supplement_source':'DOMESTIC_LEAGUE_SUPPLEMENT'})
+            supplement_ids.append(dg['id'])
+        if supplement_ids:
+            alt_sources.append('DOMESTIC_LEAGUE_SUPPLEMENT')
+    policy=('SAME_LEAGUE_WITH_DOMESTIC_LEAGUE_SUPPLEMENT' if supplement_ids else 'SAME_LEAGUE_SEASON_FT_BEFORE_CUTOFF')
+    return selected,{'policy':policy,'requested_cap':limit,
         'eligible_n':len(eligible),'selected_n':len(selected),
+        'same_competition_selected_n':len(eligible[:limit]),
+        'domestic_supplement_n':len(supplement_ids),
+        'domestic_supplement_fixture_ids':supplement_ids,
         'selected_fixture_ids':[g['id'] for g in selected],
-        'alternative_sources_used':[],'rejected_reasons':dict(sorted(rejected.items())),
+        'alternative_sources_used':alt_sources,'rejected_reasons':dict(sorted(rejected.items())),
         'shortfall_n':max(0,limit-len(selected))}
 
 
@@ -553,8 +629,9 @@ def evaluate_fixture(f:dict[str,Any],histories:dict[int,list[dict[str,Any]]],
     h=[g for g in histories.get(hid,[]) if utc_datetime(g['date_utc'])<cutoff]
     a=[g for g in histories.get(aid,[]) if utc_datetime(g['date_utc'])<cutoff]
     hb=team_basic(h,lid,cutoff);ab=team_basic(a,lid,cutoff)
-    hdetail,hselection=select_detail_games(h,lid,season,cutoff,detail_limit)
-    adetail,aselection=select_detail_games(a,lid,season,cutoff,detail_limit)
+    allow_supp=is_cup_or_continental_fixture(f)
+    hdetail,hselection=select_detail_games(h,lid,season,cutoff,detail_limit,allow_domestic_supplement=allow_supp)
+    adetail,aselection=select_detail_games(a,lid,season,cutoff,detail_limit,allow_domestic_supplement=allow_supp)
     hd=team_detail(hdetail,hid,details) if details_selected else None
     ad=team_detail(adetail,aid,details) if details_selected else None
     standings_rows=standings.get((lid,season),[])
@@ -562,11 +639,13 @@ def evaluate_fixture(f:dict[str,Any],histories:dict[int,list[dict[str,Any]]],
     prelim=preliminary_score(hb,ab,hs,ass)
     from prematch_tactical_history import observations_from_games
     requested=detail_requested_ids or set()
+    h_supp_ids=set(hselection.get('domestic_supplement_fixture_ids') or []) if details_selected else set()
+    a_supp_ids=set(aselection.get('domestic_supplement_fixture_ids') or []) if details_selected else set()
     # Always preserve FT goal histories for every eligible fixture, even when
     # adaptive acquisition did not request detailed match statistics.  The
     # observation adapter labels all unrequested metrics NOT_REQUESTED, never 0.
-    observed={'home':observations_from_games(h,hid,details,requested),
-              'away':observations_from_games(a,aid,details,requested)}
+    observed={'home':observations_from_games(h,hid,details,requested,supplement_ids=h_supp_ids),
+              'away':observations_from_games(a,aid,details,requested,supplement_ids=a_supp_ids)}
     ev_info = assess_family_evidence(hb, ab, hd, ad, observed)
     if details_selected:
         grade,status,notes,profiles,stability,priority=score_readiness(
@@ -669,7 +748,7 @@ def apply_coverage_priority(match, rules=None):
     families = {}
     for family,metric in [('goals','goals'),('corners','corners'),('cards','yellow'),('shots','shots')]:
         series = {side+'_'+block:sum(numeric((r.get(block) or {}).get(metric)) is not None for r in {r.get('fixture_id'):r for r in rows if r.get('fixture_id') is not None}.values()
-                  if (not r.get('acquired_at_utc') or acquisition_before(r['acquired_at_utc'],utc_datetime(match['analysis_cutoff_utc']))) and r.get('status')=='FT' and r.get('league_id') == match.get('league_id') and r.get('season') == match.get('season') and
+                  if (not r.get('acquired_at_utc') or acquisition_before(r['acquired_at_utc'],utc_datetime(match['analysis_cutoff_utc']))) and r.get('status')=='FT' and ((r.get('league_id') == match.get('league_id') and r.get('season') == match.get('season')) or r.get('supplement_source') == 'DOMESTIC_LEAGUE_SUPPLEMENT') and
                   historical_available(r,utc_datetime(match['analysis_cutoff_utc'])))
                   for side,rows in observations.items() for block in ('own','conceded')}
         n = min(series.values()) if len(series) == 4 else 0
@@ -950,7 +1029,8 @@ def run_evaluator(doc:dict[str,Any],client:Any,now:datetime,history_limit:int=20
             if (coverage_rules['skip_declared_false_details'] and contract['capabilities']['statistics_fixtures']=='FALSE'
                     and not f.get('coverage_probe_reason')):
                 continue
-            selected,_=select_detail_games(subset,f['league_id'],f['season'],cutoff,detail_limit)
+            allow_supp=is_cup_or_continental_fixture(f,contract)
+            selected,_=select_detail_games(subset,f['league_id'],f['season'],cutoff,detail_limit,allow_domestic_supplement=allow_supp)
             detail_ids.update(g['id'] for g in selected)
     details={};detail_list=sorted(detail_ids)
     for i in range(0,len(detail_list),20):

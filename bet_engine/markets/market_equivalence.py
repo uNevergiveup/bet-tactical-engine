@@ -45,6 +45,7 @@ def are_contracts_equivalent(sel_a: str, sel_b: str) -> bool:
 
 _EXACT_SCORE_KEY_RE = re.compile(r"^(?:(h1)_)?exact_score_(\d+)_(\d+)$")
 _EH_KEY_RE = re.compile(r"^eh_([mp]\d+)_(home|draw|away)$")
+_AH_HALF_KEY_RE = re.compile(r"^ah_(home|away)_([mp])(\d+)_5$")
 
 
 def canonicalize_selection_key(selection_key: str) -> CanonicalContract | None:
@@ -75,8 +76,8 @@ def canonicalize_selection_key(selection_key: str) -> CanonicalContract | None:
             push_condition=None,
         )
 
-    # 3) Doble oportunidad 1X FT == Hándicap Europeo Home +1 (H + 1 > A <=> H >= A)
-    if k in {"double_chance_1x", "eh_p1_home"}:
+    # 3) Doble oportunidad 1X FT == Hándicap Europeo Home +1 == Hándicap 1-2 Home +0.5 (H >= A)
+    if k in {"double_chance_1x", "eh_p1_home", "ah_home_p0_5"}:
         return CanonicalContract(
             contract_id="FT_HOME_OR_DRAW",
             period="FT",
@@ -86,8 +87,8 @@ def canonicalize_selection_key(selection_key: str) -> CanonicalContract | None:
             push_condition=None,
         )
 
-    # 4) Doble oportunidad X2 FT == Hándicap Europeo Away +1 desde (-1) (A + 1 > H <=> H <= A)
-    if k in {"double_chance_x2", "eh_m1_away"}:
+    # 4) Doble oportunidad X2 FT == Hándicap Europeo Away +1 desde (-1) == Hándicap 1-2 Away +0.5 (H <= A)
+    if k in {"double_chance_x2", "eh_m1_away", "ah_away_p0_5"}:
         return CanonicalContract(
             contract_id="FT_DRAW_OR_AWAY",
             period="FT",
@@ -108,7 +109,7 @@ def canonicalize_selection_key(selection_key: str) -> CanonicalContract | None:
             push_condition=None,
         )
 
-    # 6) Contratos diferenciados (para evitar falsos equivalentes con otros periodos/liquidaciones)
+    # 6) Contratos diferenciados y equivalencias exactas Hándicap 1X2 <-> Hándicap 1-2 (.5)
     if k == "dnb_home":
         return CanonicalContract("FT_DNB_HOME", "FT", "match", "H>A (else push if H==A)", "DRAW_NO_BET", push_condition="DRAW_REFUND")
     if k == "dnb_away":
@@ -117,14 +118,28 @@ def canonicalize_selection_key(selection_key: str) -> CanonicalContract | None:
         return CanonicalContract("H1_DNB_HOME", "H1", "match", "H1_H>H1_A (else push if H1_H==H1_A)", "DRAW_NO_BET_FIRST_HALF", push_condition="DRAW_REFUND")
     if k == "h1_dnb_away":
         return CanonicalContract("H1_DNB_AWAY", "H1", "match", "H1_A>H1_H (else push if H1_H==H1_A)", "DRAW_NO_BET_FIRST_HALF", push_condition="DRAW_REFUND")
-    if k == "home_win":
-        return CanonicalContract("FT_1X2_HOME", "FT", "match", "H>A", "THREE_WAY_REGULATION_TIME", None)
+    if k in {"home_win", "ah_home_m0_5"}:
+        return CanonicalContract("FT_1X2_HOME", "FT", "match", "H>A", "BINARY_REGULATION_TIME", None)
     if k == "draw":
         return CanonicalContract("FT_1X2_DRAW", "FT", "match", "H==A", "THREE_WAY_REGULATION_TIME", None)
-    if k == "away_win":
-        return CanonicalContract("FT_1X2_AWAY", "FT", "match", "A>H", "THREE_WAY_REGULATION_TIME", None)
-    if k == "eh_m1_home":
-        return CanonicalContract("FT_EH_M1_HOME", "FT", "match", "H-1>A", "THREE_WAY_EUROPEAN_HANDICAP", None)
+    if k in {"away_win", "ah_away_m0_5"}:
+        return CanonicalContract("FT_1X2_AWAY", "FT", "match", "A>H", "BINARY_REGULATION_TIME", None)
+    if k in {"eh_m1_home", "ah_home_m1_5"}:
+        return CanonicalContract("FT_EH_M1_HOME", "FT", "match", "H-1>A", "BINARY_REGULATION_TIME", None)
+    if k in {"eh_p1_away", "ah_away_m1_5"}:
+        return CanonicalContract("FT_EH_P1_AWAY", "FT", "match", "A-1>H", "BINARY_REGULATION_TIME", None)
+    if k in {"eh_p2_home", "ah_home_p1_5"}:
+        return CanonicalContract("FT_HOME_PLUS_1_5", "FT", "match", "H+2>A", "BINARY_REGULATION_TIME", None)
+    if k in {"eh_m2_away", "ah_away_p1_5"}:
+        return CanonicalContract("FT_AWAY_PLUS_1_5", "FT", "match", "A+2>H", "BINARY_REGULATION_TIME", None)
+    if k in {"eh_m2_home", "ah_home_m2_5"}:
+        return CanonicalContract("FT_HOME_BY_3_PLUS", "FT", "match", "H-2>A", "BINARY_REGULATION_TIME", None)
+    if k in {"eh_p2_away", "ah_away_m2_5"}:
+        return CanonicalContract("FT_AWAY_BY_3_PLUS", "FT", "match", "A-2>H", "BINARY_REGULATION_TIME", None)
+    if k in {"eh_p3_home", "ah_home_p2_5"}:
+        return CanonicalContract("FT_HOME_PLUS_2_5", "FT", "match", "H+3>A", "BINARY_REGULATION_TIME", None)
+    if k in {"eh_m3_away", "ah_away_p2_5"}:
+        return CanonicalContract("FT_AWAY_PLUS_2_5", "FT", "match", "A+3>H", "BINARY_REGULATION_TIME", None)
     if k == "eh_m1_draw":
         return CanonicalContract("FT_EH_M1_DRAW", "FT", "match", "H-1==A", "THREE_WAY_EUROPEAN_HANDICAP", None)
 
@@ -141,12 +156,20 @@ def canonicalize_selection_key(selection_key: str) -> CanonicalContract | None:
             push_condition=None,
         )
 
+    m_ah = _AH_HALF_KEY_RE.match(k)
+    if m_ah:
+        side, sign_ch, whole_str = m_ah.groups()
+        val = (int(whole_str) + 0.5) * (-1.0 if sign_ch == "m" else 1.0)
+        pred = f"H+({val})>A" if side == "home" else f"A+({val})>H"
+        return CanonicalContract(f"FT_AH_{side.upper()}_{sign_ch.upper()}{whole_str}_5", "FT", "match", pred, "BINARY_REGULATION_TIME", None)
+
     m_eh = _EH_KEY_RE.match(k)
     if m_eh:
         tag, side = m_eh.groups()
         val = int(tag[1:]) * (-1 if tag.startswith("m") else 1)
         pred = f"H+({val})>A" if side == "home" else f"H+({val})==A" if side == "draw" else f"H+({val})<A"
-        return CanonicalContract(f"FT_EH_{tag.upper()}_{side.upper()}", "FT", "match", pred, "THREE_WAY_EUROPEAN_HANDICAP", None)
+        rule = "THREE_WAY_EUROPEAN_HANDICAP" if side == "draw" else "BINARY_REGULATION_TIME"
+        return CanonicalContract(f"FT_EH_{tag.upper()}_{side.upper()}", "FT", "match", pred, rule, None)
 
     return None
 

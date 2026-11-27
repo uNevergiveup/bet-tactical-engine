@@ -20,6 +20,12 @@ def row(league, *, lid=10001, country='World', season=2026, home='Arsenal', away
 class AdultCompetitionsTest(unittest.TestCase):
     def test_adult_champions_cups_and_lower_divisions(self):
         curated = [
+            ('Copa Chile', 267, 'Chile'),
+            ('Copa Venezuela', 1113, 'Venezuela'),
+            ('Copa Paraguay', 501, 'Paraguay'),
+            ('Copa Uruguay', 930, 'Uruguay'),
+            ('UEFA Europa League', 3, 'World'),
+            ('UEFA Europa Conference League', 848, 'World'),
             ('UEFA Champions League Women', 525, 'World'),
             ('UEFA Nations League', 5, 'World'),
             ('Copa del Rey', 143, 'Spain'),
@@ -34,7 +40,16 @@ class AdultCompetitionsTest(unittest.TestCase):
         self.assertEqual(classify(row('Unknown Cup 10001', lid=10001))[0], 'REVIEW')
         # top-tier-and-senior-cups admite Champions femenina y Copa del Rey pero excluye tier 2.
         self.assertEqual(classify(row('UEFA Champions League Women', lid=525, country='World'), policy='top-tier-and-senior-cups')[0], 'ELIGIBLE')
+        self.assertEqual(classify(row('UEFA Europa League', lid=3, country='World'), policy='top-tier-and-senior-cups'), ('ELIGIBLE', 'NATIONAL_OFFICIAL'))
+        self.assertEqual(classify(row('UEFA Europa Conference League', lid=848, country='World'), policy='top-tier-and-senior-cups'), ('ELIGIBLE', 'NATIONAL_OFFICIAL'))
         self.assertEqual(classify(row('Copa del Rey', lid=143, country='Spain'), policy='top-tier-and-senior-cups')[0], 'ELIGIBLE')
+        for label, lid, country in (('Copa Chile', 267, 'Chile'), ('Copa Venezuela', 1113, 'Venezuela'),
+                                    ('Copa Paraguay', 501, 'Paraguay'), ('Copa Uruguay', 930, 'Uruguay')):
+            with self.subTest(cup=label):
+                self.assertEqual(classify(row(label, lid=lid, country=country), policy='top-tier-and-senior-cups'),
+                                 ('ELIGIBLE', 'ADULT_NATIONAL_CUP'))
+                self.assertEqual(classify(row(label, lid=lid, country=country, season=2027),
+                                          policy='top-tier-and-senior-cups')[0], 'REVIEW')
         self.assertEqual(classify(row('Segunda División', lid=141, country='Spain'), policy='top-tier-and-senior-cups'), ('EXCLUDED', 'LOWER_DIVISION'))
 
     def test_youth_competitions_excluded(self):
